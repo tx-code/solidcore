@@ -583,16 +583,16 @@ pub fn brep_is_manifold_solid(_brep: &Brep) -> Result<bool> {
 }
 
 /// Loose or tight B-rep box (`SmApiBrepBoundingBox`); missing queries are `Unported`.
-pub fn brep_bounding_box(_k: &Kernel, _brep: &Brep, tight: bool) -> Result<Extent3d> {
-    // UNPORTED(query.brep): SmBrep::CalculateBoundingBox / CalculateTightBoundingBox
-    Err(SolidError::unported(
-        if tight {
-            "SmBrep::CalculateTightBoundingBox"
-        } else {
-            "SmBrep::CalculateBoundingBox"
-        },
-        "query.brep",
-    ))
+pub fn brep_bounding_box(k: &Kernel, brep: &Brep, tight: bool) -> Result<Extent3d> {
+    if tight {
+        crate::query::brep::calculate_tight_bounding_box(k, brep)
+    } else {
+        crate::query::brep::calculate_bounding_box(
+            k,
+            brep,
+            crate::query::brep::BoundingBoxOptions::default(),
+        )
+    }
 }
 
 /// Loose or tight face box (`SmApiFaceBoundingBox`); missing queries are `Unported`.

@@ -2024,14 +2024,13 @@ mod tests {
     }
 
     #[test]
-    fn original_brep_query_propagates_actual_cache_dependency() {
+    fn original_brep_query_builds_actual_empty_cache() {
         let kernel = Kernel::default();
-        // The real cache constructor currently defers at bounding-box calculation,
-        // not at the already implemented BrepPointSolve entry point.
-        assert_dependency(
-            make_original_brep_cache(&kernel, &Brep::new()),
-            "SmBrep::CalculateBoundingBox",
-            "query.brep",
+        let cache = make_original_brep_cache(&kernel, &Brep::new()).unwrap();
+        assert!(
+            cache.vertex_tree().is_some()
+                && cache.curve_tree().is_some()
+                && cache.surface_tree().is_some()
         );
     }
 
@@ -2080,11 +2079,8 @@ mod tests {
             .as_mut()
             .unwrap()
             .set_owner(Some(arena_identity(CacheObject::Edge(edge_id))), None);
-        assert_dependency(
-            make_original_brep_cache(&kernel, &original),
-            "SmBrep::CalculateBoundingBox",
-            "query.brep",
-        );
+        let cache = make_original_brep_cache(&kernel, &original).unwrap();
+        assert!(cache.curve_tree().is_some());
     }
 
     #[test]
@@ -2096,13 +2092,8 @@ mod tests {
             executive.set_offset_brep(Brep::new());
             executive.set_create_offset_solid(solid);
             executive.relate_edgeuses(EdgeuseId::from_index(1), EdgeuseId::from_index(2));
-            // StitchIntoShell defers at DoStitching's first Notify, StitchIntoSolid at
-            // its bounding box
-            let (symbol, owner) = if solid {
-                ("SmBrep::Notify", "topology.brep_p2")
-            } else {
-                ("SmBrep::CalculateBoundingBox", "query.brep")
-            };
+            // Both stitch variants now reach the actual notification dependency.
+            let (symbol, owner) = ("SmBrep::Notify", "topology.brep_p2");
             assert_dependency(
                 executive.piecewise_merge(&mut kernel, &mut original),
                 symbol,

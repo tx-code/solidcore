@@ -21,6 +21,8 @@
 
 mod geometry;
 mod pointers;
+mod tolerances;
+pub use tolerances::{validate_and_update_tolerances, ToleranceReport};
 mod presence;
 #[cfg(test)]
 mod tests;
@@ -162,6 +164,17 @@ impl Reporter<'_> {
         tol: f64,
         value: f64,
     ) -> Result<bool> {
+        self.list_value(1, test, owner, passed, tol, value)
+    }
+    fn list_value(
+        &mut self,
+        list: u64,
+        test: u64,
+        owner: Object,
+        passed: bool,
+        tol: f64,
+        value: f64,
+    ) -> Result<bool> {
         if let Some(reports) = self.reports.as_deref_mut() {
             if passed {
                 reports.set_last_add(false);
@@ -177,7 +190,7 @@ impl Reporter<'_> {
                     other_type_string: Some("NULL"),
                     tol3d: tol,
                     value,
-                    list_index: 1,
+                    list_index: list,
                     ..ReportSpec::default()
                 })?);
             }

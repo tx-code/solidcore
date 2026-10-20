@@ -12,11 +12,15 @@ use solidcore::geom::extent2d::Extent2d;
 use solidcore::kernel::Kernel;
 use solidcore::math::{Point3, Vec2, Vec3};
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
+use solidcore::query::brep::{
+    calculate_bounding_box, calculate_tight_bounding_box, lock_bounding_box, BoundingBoxOptions,
+};
 use solidcore::surface::{plane::Plane, surface::Surface};
 use solidcore::topology::brep_cache::{arena_identity, CacheObject};
 use solidcore::topology::brep_constructor::{BrepConstructor, VertexNode};
 use solidcore::topology::brep_validation::{
-    required_links, validate_pointers, CheckLevel, ValidationOptions,
+    required_links, validate_and_update_tolerances, validate_pointers, CheckLevel,
+    ValidationOptions,
 };
 use solidcore::topology::shell::ShellMembers;
 use solidcore::topology::{Edge, EdgeuseOwner, LoopuseStart, VertexuseOwner};
@@ -37,6 +41,8 @@ fn run() -> Result<Value> {
     let mode = args.get(3).map_or("prefix", String::as_str);
     let full = mode != "prefix";
     let raw = mode == "raw_fix" || mode == "raw_check";
+    let tolerance = mode == "tolerance_check" || mode == "tolerance_update";
+    let box_mode = mode.starts_with("bbox_");
     let mut k = Kernel::default();
     let mut builder = BrepConstructor::new()?;
     let (outer, _) = builder.start_shell()?;
@@ -199,6 +205,21 @@ fn run() -> Result<Value> {
             "vertex_low_tolerance" => b.vertex_mut(v0)?.tolerance = 0.,
             "vertex_high_tolerance" => b.vertex_mut(v0)?.tolerance = 0.1,
             "root_zero_tolerance" => b.set_tolerance(0.),
+            "initial_validate_only" => b.set_validate_only(true),
+            name if name.starts_with("gap_") => {
+                let factor = match name {
+                    "gap_half" => 0.5,
+                    "gap_between" => 0.75,
+                    "gap_full" => 1.,
+                    "gap_above" => 2.,
+                    _ => 1000.,
+                };
+                b.vertex_mut(v0)?.point = Vec3::new(0., 0., 1e-5 * factor);
+            }
+            "locked_box" => {
+                lock_bounding_box(&k, &mut b, false)?;
+                b.vertex_mut(v0)?.point = Vec3::new(100., 100., 100.);
+            }
             "surface_no_owner" => {
                 b.face_mut(face)?
                     .surface
@@ -228,9 +249,43 @@ fn run() -> Result<Value> {
         "two" => CheckLevel::Two,
         _ => CheckLevel::Zero,
     };
+    let mut tolerance_output = None;
+    let mut box_output = None;
     let mut invoke = |reports: Option<&mut AssertArray>| {
         if raw {
             Ok(())
+        } else if tolerance {
+            validate_and_update_tolerances(
+                &mut k,
+                &mut b,
+                mode == "tolerance_check",
+                level,
+                reports,
+            )
+            .map(|r| {
+                tolerance_output = Some(r);
+            })
+        } else if box_mode {
+            let result = if mode == "bbox_tight" {
+                calculate_tight_bounding_box(&k, &b)
+            } else {
+                let flags = mode
+                    .strip_prefix("bbox_")
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .unwrap_or(0);
+                calculate_bounding_box(
+                    &k,
+                    &b,
+                    BoundingBoxOptions {
+                        approximate: flags & 1 != 0,
+                        tight: flags & 2 != 0,
+                        expand_by_tolerance: flags & 4 != 0,
+                    },
+                )
+            };
+            result.map(|r| {
+                box_output = Some(r);
+            })
         } else if full {
             validate_pointers(
                 &mut k,
@@ -282,7 +337,7 @@ fn run() -> Result<Value> {
             .ok_or("observer result is not an object")?
             .insert("reversal_mask".into(), json!(mask));
     }
-    if full {
+    if full && !tolerance && !box_mode {
         let cached = match b.edge(*at(&edges, 0)?)?.curve.as_ref().map(Curve::kind) {
             Some(CurveKind::BSpline(base)) => base.gw_nurb(),
             Some(CurveKind::Line(c)) => c.base().gw_nurb(),
@@ -300,9 +355,61 @@ fn run() -> Result<Value> {
             .ok_or("observer result is not an object")?
             .insert("control_points".into(), points);
     }
+    let output = result
+        .as_object_mut()
+        .ok_or("observer result is not an object")?;
+    if let Some(r) = tolerance_output {
+        let vu = |id: Option<solidcore::topology::VertexuseId>| {
+            id.map(|id| (16006_u64 << 32) | u64::from(id.index()))
+        };
+        let eu = |id: Option<solidcore::topology::EdgeuseId>| {
+            id.map(|id| (16005_u64 << 32) | u64::from(id.index()))
+        };
+        output.insert(
+            "tolerance".into(),
+            json!([
+                r.violated_or_updated,
+                r.max_edge_face_trim_curve_gap,
+                r.max_vertex_edge_gap,
+                r.max_vertex_face_gap,
+                r.max_edge_face_gap,
+                r.max_vertex_face_trim_curve_gap,
+                vu(r.vertex_edge_source),
+                vu(r.vertex_face_source),
+                eu(r.edge_face_trim_curve_source),
+                eu(r.edge_face_source),
+                eu(r.vertex_face_trim_curve_source)
+            ]),
+        );
+    }
+    if tolerance || box_mode {
+        let mut working = vec![b.tolerance(), b.face(face)?.tolerance];
+        for id in &edges {
+            working.push(b.edge(*id)?.tolerance);
+        }
+        for id in &vertices {
+            working.push(b.vertex(*id)?.tolerance);
+        }
+        output.insert("working_tolerances".into(), json!(working));
+        output.insert("validate_only".into(), json!(b.validate_only()));
+    }
+    if let Some(bounds) = box_output {
+        let a = bounds.min();
+        let z = bounds.max();
+        output.insert("box".into(), json!([a.x, a.y, a.z, z.x, z.y, z.z]));
+    }
     Ok(result)
 }
 fn main() -> Result<()> {
-    println!("{}", run()?);
+    match run() {
+        Ok(value) => println!("{value}"),
+        Err(error) => {
+            if let Some(SolidError::Unported { upstream, unit }) = error.downcast_ref() {
+                println!("{}", json!({"deferred":{"upstream":upstream,"unit":unit}}));
+            } else {
+                return Err(error);
+            }
+        }
+    }
     Ok(())
 }

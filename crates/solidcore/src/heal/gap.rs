@@ -1596,6 +1596,9 @@ pub enum SamplesState {
 pub struct GapFunction<'a> {
     /// The shapes (the derived class and its members; `m_eSampleType`).
     geometry: GapGeometry<'a>,
+    /// Per-evaluation owning-face zone tolerances resolved from actual model
+    /// records. These are not acceptance or approximation-budget overrides.
+    face_tolerances: Vec<(crate::geom::object::ObjectRef, f64)>,
     /// `m_sXSectTol3d`.
     xsect_tol_3d: f64,
     /// `m_sSampleIvlU`.
@@ -1748,6 +1751,7 @@ fn surface_drop(
     point: Point3,
     domain: &Extent2d,
     guess: Option<Point2>,
+    face_tolerances: &[(crate::geom::object::ObjectRef, f64)],
 ) -> Result<(bool, Point2, f64)> {
     let opts = crate::surface::surface::p5::DropPointOptions {
         guess_uv: guess,
@@ -1755,9 +1759,25 @@ fn surface_drop(
     };
     // Upstream ignores the DropPoint status (no `SER`) and reads `bSuccess`/`dDist`
     // either way; on failure they keep their initial values (`FALSE`, the guess, `BIG_DOUBLE`).
+    let lookup = |owner| {
+        face_tolerances
+            .iter()
+            .find(|(face, _)| *face == owner)
+            .map(|(_, tol)| *tol)
+            .ok_or(SolidError::unported(
+                "SmFace::GetTolerance",
+                "topology.face_p2",
+            ))
+    };
     Ok(
         match ignored(
-            surface.drop_point::<crate::surface::surface::p4::NoObject>(k, point, domain, &opts),
+            surface.drop_point_with_face_lookup::<crate::surface::surface::p4::NoObject>(
+                k,
+                point,
+                domain,
+                &opts,
+                Some(&lookup),
+            ),
         )? {
             Some(d) => (d.success, d.result_uv, d.gap),
             None => (false, guess.unwrap_or(Point2::UNDEF), BIG_DOUBLE),
@@ -1807,6 +1827,7 @@ impl<'a> GapFunction<'a> {
     ) -> Self {
         let mut g = Self {
             geometry,
+            face_tolerances: Vec::new(),
             xsect_tol_3d,
             sample_ivl_u,
             sample_ivl_v,
@@ -1965,6 +1986,18 @@ impl<'a> GapFunction<'a> {
     #[must_use]
     pub const fn geometry(&self) -> &GapGeometry<'a> {
         &self.geometry
+    }
+    /// Bind the current owning face's actual zone tolerance for surface drops.
+    /// Callers that hold the model use its shared face accessor; cached samples
+    /// are invalidated when evaluation context changes.
+    pub fn bind_face_tolerance(&mut self, face: crate::geom::object::ObjectRef, tolerance: f64) {
+        if let Some((_, tol)) = self.face_tolerances.iter_mut().find(|(id, _)| *id == face) {
+            *tol = tolerance;
+        } else {
+            self.face_tolerances.push((face, tolerance));
+        }
+        self.samples_set = SamplesState::NotSet;
+        self.local_neighborhood_set = false;
     }
 
     /// `GetSampleType`.
@@ -2591,7 +2624,8 @@ impl<'a> GapFunction<'a> {
             _ => None,
         };
         let domain = other.natural_uv_domain();
-        let (mut success, mut uv, mut dist) = surface_drop(k, other, this_pos, &domain, guess)?;
+        let (mut success, mut uv, mut dist) =
+            surface_drop(k, other, this_pos, &domain, guess, &self.face_tolerances)?;
 
         // If we don't like the result of the drop with a guess, try without a guess
         let try_global = guess.is_some()
@@ -2599,7 +2633,8 @@ impl<'a> GapFunction<'a> {
                 || dist > tol * 100.0
                 || (dist > tol && domain.is_point_on_boundary(uv, EFF_ZERO).0));
         if try_global {
-            (success, uv, dist) = surface_drop(k, other, this_pos, &domain, None)?;
+            (success, uv, dist) =
+                surface_drop(k, other, this_pos, &domain, None, &self.face_tolerances)?;
         }
         let _ = dist;
 

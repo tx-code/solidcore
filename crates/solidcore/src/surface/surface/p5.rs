@@ -987,6 +987,22 @@ impl Surface {
         domain: &Extent2d,
         opts: &DropPointOptions,
     ) -> Result<DropPoint<O>> {
+        self.drop_point_with_face_lookup(k, pt_to_drop, domain, opts, None)
+    }
+
+    /// [`Self::drop_point`] with explicit live lookup of the owning face's working
+    /// tolerance. This resolves the native GetFace()->GetTolerance dependency;
+    /// it is not an override of an import accuracy or repair budget. No owner is
+    /// cleared, and all fast/local/global solver paths remain the original ones.
+    #[allow(clippy::too_many_lines)]
+    pub fn drop_point_with_face_lookup<O: SolutionObject>(
+        &self,
+        k: &Kernel,
+        pt_to_drop: Point3,
+        domain: &Extent2d,
+        opts: &DropPointOptions,
+        face_tolerance: Option<&dyn Fn(crate::geom::object::ObjectRef) -> Result<f64>>,
+    ) -> Result<DropPoint<O>> {
         let op = opts.operation;
         let guess = opts.guess_uv;
 
@@ -1002,12 +1018,16 @@ impl Surface {
         let mut answer_in_array = false;
 
         // We need a tolerance value.
-        let dist_tol = if self.face()?.is_some() {
-            // UNPORTED(topology.face_p2): SmFace::GetTolerance
-            return Err(SolidError::unported(
-                "SmFace::GetTolerance",
-                "topology.face_p2",
-            ));
+        let dist_tol = if let Some(face) = self.face()? {
+            if let Some(lookup) = face_tolerance {
+                lookup(face)?
+            } else {
+                // UNPORTED(topology.face_p2): SmFace::GetTolerance without owning model lookup
+                return Err(SolidError::unported(
+                    "SmFace::GetTolerance",
+                    "topology.face_p2",
+                ));
+            }
         } else {
             XSECT_TOL_3D
         };

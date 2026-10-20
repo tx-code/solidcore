@@ -605,16 +605,15 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(
-            find_face(
-                &Kernel::default(),
-                &brep,
-                BrepId::from_index(7),
-                p(0.0, 0.0, 0.0),
-                &crate::topology::brep_cache::arena_identity,
-                &|_| None,
-            ),
-            Err(SolidError::Unported { .. })
-        ));
+        assert!(find_face(
+            &Kernel::default(),
+            &brep,
+            BrepId::from_index(7),
+            p(0.0, 0.0, 0.0),
+            &crate::topology::brep_cache::arena_identity,
+            &|_| None,
+        )
+        .unwrap()
+        .is_none());
     }
 }

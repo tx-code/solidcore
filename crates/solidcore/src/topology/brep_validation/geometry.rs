@@ -3,7 +3,7 @@
 //! Native geometric callees of pointer validation. Missing algorithms must fail
 //! explicitly, never make a completed topology walk stand in for geometry checks.
 //!
-//! Upstream: `SmBrep.cpp::sm_CheckEdgeuseGeometry` (SM_CHANGE_CHECK off) and
+//! Upstream: `SmBrep.cpp::sm_CheckEdgeuseGeometry` (`SM_CHANGE_CHECK` off) and
 //! `SmEdge.cpp::SmEdge::ValidateGeometry` at maintained fork `d8ed45a`.
 //!
 //! | Rust | Upstream |

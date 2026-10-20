@@ -2954,7 +2954,7 @@ tests = ["prog_test:my_test_surface_closest_point", "prog_test:my_test_drop_poin
 status = "todo"
 claimed_by = ""
 claimed_at = ""
-notes = "17 fns; largest: SmBrep::Point3DClassify, SmBrep::CalculateBoundingBox, SmBrep::CalculateTightBoundingBox, SmApiEvaluateSurfaceDerivatives; entry points: SmApiEvaluateSurfaceDerivatives, SmApiEvaluateSurfaceNormal, SmApiEvaluateSurfacePoint; unit-SCC #22 (220 units); 317 upstream test entry points reach this unit"
+notes = "17 fns; largest: SmBrep::Point3DClassify, SmBrep::CalculateBoundingBox, SmBrep::CalculateTightBoundingBox, SmApiEvaluateSurfaceDerivatives; entry points: SmApiEvaluateSurfaceDerivatives, SmApiEvaluateSurfaceNormal, SmApiEvaluateSurfacePoint; unit-SCC #22 (220 units); 317 upstream test entry points reach this unit CO-PORTED in fork native tolerance validation: SmBrep::CalculateBoundingBox, CalculateTightBoundingBox, LockBoundingBox and UnLockBoundingBox -> query::brep (docs/BREP_TOLERANCES.md); remaining unit functions and full base FFI gate stay unqualified. Brep locked-box field is co-ported; no unit status promotion."
 
 [[unit]]
 id = "topology.brep_p3"

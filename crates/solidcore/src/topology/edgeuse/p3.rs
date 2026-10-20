@@ -195,15 +195,22 @@ struct DropPointOut {
 /// (`SM_SO_MINIMIZE`, no guess).
 fn surface_drop_point(
     k: &Kernel,
+    b: &Brep,
     surface: &Surface,
     point: Point3,
     domain: &crate::geom::extent2d::Extent2d,
 ) -> Result<DropPointOut> {
-    let r = surface.drop_point::<NoObject>(
+    let lookup = |owner: ObjectRef| {
+        let index = u32::try_from(owner.key.0)
+            .map_err(|_| SolidError::invalid_input(OP, "face owner key is not an arena id"))?;
+        crate::topology::face::p2::tolerance(b, crate::topology::FaceId::from_index(index))
+    };
+    let r = surface.drop_point_with_face_lookup::<NoObject>(
         k,
         point,
         domain,
         &crate::surface::surface::p5::DropPointOptions::default(),
+        Some(&lookup),
     )?;
     Ok(DropPointOut {
         found: r.success,
@@ -1089,6 +1096,7 @@ fn two_singular_end_points(
     // drop curve endpoints onto surface
     let start_drop = ignored(surface_drop_point(
         k,
+        b,
         surface,
         start_point,
         &surface_uv_domain,
@@ -1098,6 +1106,7 @@ fn two_singular_end_points(
         if start_singularity {
             let end_drop = ignored(surface_drop_point(
                 k,
+                b,
                 surface,
                 end_point,
                 &surface_uv_domain,
@@ -2208,7 +2217,7 @@ pub fn normalized_evaluate(
                     .as_ref()
                     .ok_or_else(|| SolidError::null_pointer(OP))?; // NER(pSurf)
                 let domain = surf.natural_uv_domain();
-                let drop = surface_drop_point(k, surf, three_d.point, &domain)?;
+                let drop = surface_drop_point(k, b, surf, three_d.point, &domain)?;
                 if !drop.found {
                     return Err(SolidError::sm_err(OP));
                 }

@@ -439,10 +439,34 @@ impl Surface {
         guess: Point2,
         surface_object: Option<O>,
     ) -> Result<LocalPointSolve<O>> {
+        self.local_point_solve_1_for_face(k, domain, op, point, guess, surface_object, None)
+    }
+
+    /// [`Self::local_point_solve_1`] with the live owning face's zone tolerance.
+    /// It resolves owner lookup only; iteration/convergence policy is unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn local_point_solve_1_for_face<O: Copy>(
+        &self,
+        k: &Kernel,
+        domain: &Extent2d,
+        op: SolverOperation,
+        point: Point3,
+        guess: Point2,
+        surface_object: Option<O>,
+        face_tolerance: Option<f64>,
+    ) -> Result<LocalPointSolve<O>> {
         if let Some(surface) = with_out_of_bounds_enabled(self)? {
-            return surface.local_point_solve_1_body(k, domain, op, point, guess, surface_object);
+            return surface.local_point_solve_1_body(
+                k,
+                domain,
+                op,
+                point,
+                guess,
+                surface_object,
+                face_tolerance,
+            );
         }
-        self.local_point_solve_1_body(k, domain, op, point, guess, surface_object)
+        self.local_point_solve_1_body(k, domain, op, point, guess, surface_object, face_tolerance)
     }
 
     fn local_point_solve_1_body<O: Copy>(
@@ -453,13 +477,16 @@ impl Surface {
         point: Point3,
         guess: Point2,
         surface_object: Option<O>,
+        face_tolerance: Option<f64>,
     ) -> Result<LocalPointSolve<O>> {
         use TerminationReason::{
             FoundAnswerConverged as Converged, OutOfBounds, StillIterating, UnableToConverge,
         };
         let guess = domain.clamp_point(guess);
         let tight = EFF_ZERO * (1.0 + point.max_dimension());
-        let loose = if self.owner().is_some() {
+        let loose = if let Some(tol) = face_tolerance {
+            tol
+        } else if self.owner().is_some() {
             zone_tol_3d(k, self)?
         } else if op == SolverOperation::Intersect {
             0.01

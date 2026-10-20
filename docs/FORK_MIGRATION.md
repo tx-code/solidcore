@@ -97,3 +97,7 @@ mutating reverse-direction validity checks. Missing geometric/notification
 dispatches and full root/local AssertValid plus gap/tolerance checks still gate
 native acceptance. Pointer success or base reader-unit status cannot stand in
 for these implementations.
+
+Native box and gap/tolerance operations now have their own
+[contract and remaining dependencies](BREP_TOLERANCES.md). Their operation-level
+evidence does not complete native import or the full SDK migration.

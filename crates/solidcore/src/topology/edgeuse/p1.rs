@@ -986,6 +986,9 @@ pub fn calc_max_edge_face_gap(
             .as_ref()
             .ok_or_else(|| null("CalcMaxEdgeFaceGap: face without surface"))?;
         let mut gf = GapFunction::crv_srf(xsect_tol, curve, &interval, surface, 20);
+        if let Some(owner) = surface.face()? {
+            gf.bind_face_tolerance(owner, crate::topology::face::p2::tolerance(b, f)?);
+        }
         // get max gap sample - forces lazy evaluation
         *gf.max_gap_sample(k, false)?
     };

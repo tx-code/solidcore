@@ -756,9 +756,20 @@ fn local_point_solve(
     op: SolverOperation,
     point: Point3,
     guess: Point2,
+    face_tolerance: f64,
 ) -> Result<(bool, PointDrop)> {
-    let r = surface
-        .local_point_solve::<crate::surface::surface::p4::NoObject>(k, domain, op, point, guess)?;
+    // This call site always uses MINIMIZE, which native LocalPointSolve routes to
+    // LocalPointSolve_1. Pass the actual owning face tolerance instead of leaving
+    // the surface's opaque owner unresolved.
+    let r = surface.local_point_solve_1_for_face::<crate::surface::surface::p4::NoObject>(
+        k,
+        domain,
+        op,
+        point,
+        guess,
+        None,
+        Some(face_tolerance),
+    )?;
     Ok((
         r.found,
         PointDrop {
@@ -1019,6 +1030,7 @@ pub fn compute_uv_point(
             SolverOperation::Minimize,
             vertex_pnt,
             uv_guess,
+            face_tolerance(b, f)?,
         )?;
 
         // If the found solution is more than half the surface domain from the guess

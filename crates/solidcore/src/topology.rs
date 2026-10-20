@@ -575,6 +575,9 @@ pub struct Brep {
     /// `m_pDeletedSurfaces` (unit `topology.brep_p1`): surfaces removed from the B-rep
     /// that are kept until the operation ends because they may still be referenced.
     deleted_surfaces: Vec<Surface>,
+    /// `m_pLockedBoundingBox`: an explicit caller-owned optimization, separate
+    /// from geometry caches. It overrides loose box options until unlocked.
+    locked_bounding_box: Option<crate::geom::extent3d::Extent3d>,
 }
 
 impl Default for Brep {
@@ -602,6 +605,7 @@ impl Default for Brep {
             model_size_estimate: USE_DEFAULT,
             large_small_size_ratio: USE_DEFAULT,
             deleted_surfaces: Vec::new(),
+            locked_bounding_box: None,
         }
     }
 }
@@ -874,6 +878,17 @@ impl Brep {
     /// Sets `m_bValidateOnly`.
     pub fn set_validate_only(&mut self, validate_only: bool) {
         self.validate_only = validate_only;
+    }
+    /// Current native locked box, if any; not geometric-acceptance evidence.
+    pub fn locked_bounding_box(&self) -> Option<&crate::geom::extent3d::Extent3d> {
+        self.locked_bounding_box.as_ref()
+    }
+    /// Kernel friend assignment of the native locked-box record.
+    pub fn set_locked_bounding_box_record(
+        &mut self,
+        bounds: Option<crate::geom::extent3d::Extent3d>,
+    ) {
+        self.locked_bounding_box = bounds;
     }
 
     /// `SmBrep::GetTolerance` (`SM_USE_OLDTOL`, CO-PORTED by `topology.edgeuse_p2`):

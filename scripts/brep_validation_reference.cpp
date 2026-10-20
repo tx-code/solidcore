@@ -74,6 +74,7 @@ FIELD(FaceTol, SmFace, m_sZoneTol3d, SmZoneTol3d)
 FIELD(EdgeTol, SmEdge, m_sZoneTol3d, SmZoneTol3d)
 FIELD(VertexTol, SmVertex, m_sZoneTol3d, SmZoneTol3d)
 FIELD(RootTol, SmBrep, m_sThisZoneTol3d, SmZoneTol3d)
+FIELD(ValidateOnly,SmBrep,m_bValidateOnly,SmBoolean)
 #undef FIELD
 template <class Tag, class T> static decltype(auto) field(T *p) { return p->*access(Tag{}); }
 struct EmptyEdge final : SmEdge {
@@ -139,6 +140,8 @@ int main(int argc, char **argv) {
                           second = argc > 3 ? argv[3] : "none";
         const std::string mode = argc > 4 ? argv[4] : "prefix";
         const bool raw = mode == "raw_fix" || mode == "raw_check";
+        const bool tolerance=mode=="tolerance_check"||mode=="tolerance_update";
+        const bool box_mode=mode.starts_with("bbox_");
         SmContext context;
         SmBrepConstructor builder;
         auto b = builder.StartBrep(context);
@@ -313,6 +316,14 @@ int main(int argc, char **argv) {
                 field<VertexTol>(vs[0]) = .1;
             else if (name == "root_zero_tolerance")
                 field<RootTol>(b) = 0.;
+            else if(name=="initial_validate_only")field<ValidateOnly>(b)=TRUE;
+            else if(name.starts_with("gap_")){
+                double factor=name=="gap_half"?.5:name=="gap_between"?.75:name=="gap_full"?1.:name=="gap_above"?2.:1000.;
+                vs[0]->SetPoint(SmPoint3d(0,0,1e-5*factor));
+            }
+            else if(name=="locked_box"){
+                require(b->LockBoundingBox(FALSE));vs[0]->SetPoint(SmPoint3d(100,100,100));
+            }
             else if (name == "surface_no_owner") {
                 auto surface = f->GetSurface();
                 auto old = surface->GetOwner();
@@ -331,15 +342,29 @@ int main(int argc, char **argv) {
                                           : SM_LEVEL_0;
         auto target = selection == "no_reports" ? nullptr : &reports;
         int reversal = -1;
+        SmBoolean violated=FALSE;
+        double ef_trim=0,ve=0,vf=0,ef=0,vf_trim=0;
+        SmEdgeuse *ef_trim_obj=nullptr,*ef_obj=nullptr,*vf_trim_obj=nullptr;
+        SmVertexuse *ve_obj=nullptr,*vf_obj=nullptr;
+        SmExtent3d bounds;
+        SmStatus query_status=SM_SUCCESS;
+        auto run_tolerance=[&]{return b->ValidateAndUpdateTolerances(mode=="tolerance_check",violated,ef_trim,ve,vf,target,level,selection=="given"?&requested:nullptr,&ef_trim_obj,&ve_obj,&vf_obj,&ef_obj,&vf_trim_obj,&ef,&vf_trim);};
         auto status =
-            raw ? SM_SUCCESS
+            (raw||tolerance||box_mode) ? SM_SUCCESS
                 : b->ValidatePointers(target, level, selection == "given" ? &requested : nullptr,
                                       SM_NO_WALK);
         if (raw)
             reversal = N_CrvIsNotReversed(
                 static_cast<SmBSplineCurve *>(edges[0]->GetCurve())->GetOrCreateGwNurbPointer(),
                 mode == "raw_fix");
-        if (!raw && selection == "repeat")
+        if(tolerance)status=run_tolerance();
+        if(box_mode){
+            if(mode=="bbox_tight")query_status=b->CalculateTightBoundingBox(bounds);
+            else{int flags=std::atoi(mode.c_str()+5);query_status=b->CalculateBoundingBox(bounds,(flags&1)!=0,(flags&2)!=0,(flags&4)!=0);}
+            status=query_status;
+        }
+        if(tolerance&&selection=="repeat")status=run_tolerance();
+        if (!raw && !tolerance && !box_mode && selection == "repeat")
             status = b->ValidatePointers(target, level, nullptr, SM_NO_WALK);
         std::cout << "{\"status\":" << status
                   << ",\"last_add\":" << (reports.GetLastAdd() ? "true" : "false")
@@ -357,7 +382,7 @@ int main(int argc, char **argv) {
             std::cout << ',' << r->m_sTol3d << ',' << r->m_dValue << ']';
         }
         std::cout << "]";
-        if (argc == 5) {
+        if (argc == 5 && !tolerance && !box_mode) {
             auto curve = static_cast<SmBSplineCurve *>(edges[0]->GetCurve());
             std::cout << ",\"control_points\":";
             if (!curve || !curve->GetGwNurbPointer())
@@ -378,6 +403,17 @@ int main(int argc, char **argv) {
         }
         if (raw)
             std::cout << ",\"reversal_mask\":" << reversal;
+        auto witness=[&](const void* p){if(!p)std::cout<<"null";else std::cout<<keys.at(p);};
+        if(tolerance){
+            std::cout<<",\"tolerance\":["<<(violated?"true":"false")<<','<<ef_trim<<','<<ve<<','<<vf<<','<<ef<<','<<vf_trim<<',';
+            witness(ve_obj);std::cout<<',';witness(vf_obj);std::cout<<',';witness(ef_trim_obj);std::cout<<',';witness(ef_obj);std::cout<<',';witness(vf_trim_obj);std::cout<<"]";
+        }
+        if(tolerance||box_mode){
+            std::cout<<",\"validate_only\":"<<(field<ValidateOnly>(b)?"true":"false")<<",\"working_tolerances\":["<<b->GetTolerance()<<','<<f->GetTolerance();
+            for(ULONG i=0;i<edges.GetSize();++i)std::cout<<','<<edges[i]->GetTolerance();
+            for(ULONG i=0;i<vs.GetSize();++i)std::cout<<','<<vs[i]->GetTolerance();std::cout<<']';
+        }
+        if(box_mode){auto a=bounds.GetMin(),z=bounds.GetMax();std::cout<<",\"box\":["<<a.x<<','<<a.y<<','<<a.z<<','<<z.x<<','<<z.y<<','<<z.z<<']';}
         std::cout << "}\n";
         return 0;
     } catch (const std::exception &e) {

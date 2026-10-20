@@ -106,7 +106,8 @@ actual owned objects.
 
 A normally completed pointer walk returns success even with reports. Callers
 inspect both status and reports. Full root/local AssertValid and gap/tolerance
-checks are separate and not established yet. Pointer checking is not native
+qualification are separate. The [tolerance operation](BREP_TOLERANCES.md) is now
+ported with explicit remaining cache dependencies. Pointer checking is not native
 import acceptance.
 
 `Curve::check_reverse_direction` and NLib `end_reversal` retain the native

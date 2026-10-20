@@ -371,8 +371,8 @@ pub struct Shell {
 /// A region (`SmRegion`, CO-PORTED minimal record).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Region {
-    /// `m_pListOwner != NULL`: the region is on the B-rep's region list, so
-    /// `GetBrep` reaches the B-rep.
+    /// `m_pListOwner != NULL`: `GetBrep` reaches this B-rep. Root list
+    /// membership is stored separately, so a damaged backpointer stays visible.
     pub in_brep: bool,
     /// Native region shell list, in traversal order from its head.
     pub shells: Vec<ShellId>,

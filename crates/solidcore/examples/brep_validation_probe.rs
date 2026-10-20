@@ -110,6 +110,7 @@ fn run() -> Result<Value> {
     let cache_mode = mode.starts_with("cache_");
     let local_mode = mode == "local_bsp";
     let root_mode = mode == "assert_root" || mode == "assert_root_walk";
+    let topology_mode = mode.starts_with("assert_region") || mode.starts_with("assert_shell");
     let mut k = Kernel::default();
     let mut builder = BrepConstructor::new()?;
     let (outer, _) = builder.start_shell()?;
@@ -219,7 +220,27 @@ fn run() -> Result<Value> {
         e.curve = Some(c);
         *b.edge_mut(id)? = e;
     }
+    let region = require(b.infinite_region())?;
+    let mut target_shell = outer;
+    if topology_mode && (mode.contains("_vertex") || mode.contains("_wire")) {
+        let (shell, vertex) =
+            solidcore::topology::brep::p2::make_shell_vertex_topology(&mut b, None)?;
+        target_shell = shell;
+        if mode.contains("_wire") {
+            let (_, end) =
+                solidcore::topology::brep::p2::make_edge_vertex_topology(&mut b, None, vertex)?;
+            if mode.contains("_chain") || mode.contains("_branch") {
+                solidcore::topology::brep::p2::make_edge_vertex_topology(&mut b, None, end)?;
+            }
+            if mode.contains("_branch") {
+                solidcore::topology::brep::p2::make_edge_vertex_topology(&mut b, None, vertex)?;
+            }
+        }
+    }
+    let observed_vertices = b.vertex_list().to_vec();
+    let observed_edges = b.edge_list().to_vec();
     let fu = require(b.face(face)?.faceuse)?;
+    let mate_fu = require(b.faceuse(fu)?.mate)?;
     let lu = require(b.loop_(loop_id)?.loopuse)?;
     let LoopuseStart::Edgeuse(Some(first)) = b.loopuse(lu)?.start else {
         return Err("missing loop start".into());
@@ -230,10 +251,35 @@ fn run() -> Result<Value> {
         .vertexuses
         .first()
         .ok_or("missing fixture vertex use")?;
+    let mark_types = [
+        solidcore::geom::context::MarkType::Mark,
+        solidcore::geom::context::MarkType::Mark2,
+        solidcore::geom::context::MarkType::Mark3,
+        solidcore::geom::context::MarkType::MarkIo,
+        solidcore::geom::context::MarkType::MarkAssert,
+    ];
+    let before_marks = mark_types.map(|mark| k.context.current_mark(mark));
     for name in [defect.as_str(), second] {
         match name {
             "none" | "edge_no_uses" | "surface_offset" | "trim_failure" => {}
             name if name.starts_with("reverse_") || name.starts_with("bspline_") => {}
+            "empty_shell" => b.shell_mut(target_shell)?.members = ShellMembers::Empty,
+            "region_mark3_ahead" | "shell_mark3_ahead" => {
+                let mut contexts = [solidcore::geom::context::Context::default()];
+                let mut lock = solidcore::geom::context::MarkLock::new(
+                    &mut contexts,
+                    0,
+                    solidcore::geom::context::MarkType::Mark3.code(),
+                )?;
+                let entity = if name == "region_mark3_ahead" {
+                    solidcore::error::EntityRef::Region(region)
+                } else {
+                    solidcore::error::EntityRef::Shell(target_shell)
+                };
+                b.notification_topology_mut(entity)?
+                    .mark(contexts.first(), solidcore::geom::context::MarkType::Mark3);
+                lock.release(&mut contexts)?;
+            }
             "no_infinite_region" => b.set_infinite_region(None),
             "region_no_owner" => {
                 let r = require(b.infinite_region())?;
@@ -245,7 +291,11 @@ fn run() -> Result<Value> {
             "face_no_primary" => b.face_mut(face)?.faceuse = None,
             "fu_no_face" => b.faceuse_mut(fu)?.face = None,
             "fu_no_mate" => b.faceuse_mut(fu)?.mate = None,
-            "fu_no_shell" => b.faceuse_mut(fu)?.shell = None,
+            "fu_no_shell" => {
+                let links = solidcore::topology::shell::faceuse_sibling_links(&b, fu)?;
+                b.faceuse_mut(fu)?.sibling_links = Some(links);
+                b.faceuse_mut(fu)?.shell = None;
+            }
             "fu_no_loops" => b.faceuse_mut(fu)?.loopuses.clear(),
             "loop_no_primary" => b.loop_mut(loop_id)?.loopuse = None,
             "lu_no_loop" => b.loopuse_mut(lu)?.loop_ = None,
@@ -326,6 +376,7 @@ fn run() -> Result<Value> {
         "given15" => CheckLevel::Given(&[15]),
         "given" => CheckLevel::Given(&[0]),
         "two" => CheckLevel::Two,
+        "heal" => CheckLevel::Heal,
         "one" => CheckLevel::One,
         "given_empty" => CheckLevel::Given(&[]),
         _ => CheckLevel::Zero,
@@ -350,6 +401,27 @@ fn run() -> Result<Value> {
                 reports,
             )
             .map(|valid| {
+                root_output = Some(valid);
+            })
+        } else if topology_mode {
+            let options = solidcore::topology::brep_validation::AssertValidOptions {
+                level,
+                walk: mode.ends_with("_walk"),
+            };
+            let result = if mode.starts_with("assert_region") {
+                solidcore::topology::brep_validation::assert_region(
+                    &mut k, &mut b, region, options, reports,
+                )
+            } else {
+                solidcore::topology::brep_validation::assert_shell(
+                    &mut k,
+                    &mut b,
+                    target_shell,
+                    options,
+                    reports,
+                )
+            };
+            result.map(|valid| {
                 root_output = Some(valid);
             })
         } else if local_mode {
@@ -674,7 +746,56 @@ fn run() -> Result<Value> {
         output.insert("validate_only".into(), json!(b.validate_only()));
     }
     if let Some(valid) = root_output {
-        output.insert("root_valid".into(), json!(valid));
+        output.insert(
+            if topology_mode {
+                "local_valid"
+            } else {
+                "root_valid"
+            }
+            .into(),
+            json!(valid),
+        );
+    }
+    if topology_mode {
+        use solidcore::error::EntityRef;
+        let mut current = Vec::new();
+        let mut observed = vec![
+            EntityRef::Region(region),
+            EntityRef::Shell(target_shell),
+            EntityRef::Faceuse(fu),
+            EntityRef::Faceuse(mate_fu),
+        ];
+        observed.extend(observed_vertices.iter().copied().map(EntityRef::Vertex));
+        observed.extend(observed_edges.iter().copied().map(EntityRef::Edge));
+        for vertex in observed_vertices {
+            observed.extend(
+                b.vertex(vertex)?
+                    .vertexuses
+                    .iter()
+                    .copied()
+                    .map(EntityRef::Vertexuse),
+            );
+        }
+        for entity in observed {
+            let key = solidcore::topology::brep::p2::object_ref(&b, entity)?.key;
+            let record = b
+                .notifications()
+                .topology
+                .get(&key)
+                .copied()
+                .unwrap_or_default();
+            current
+                .push(mark_types.map(|mark| record.get_mark(mark) == k.context.current_mark(mark)));
+        }
+        output.insert("current_marks".into(), json!(current));
+        output.insert(
+            "mark_advances".into(),
+            json!(mark_types
+                .iter()
+                .zip(before_marks)
+                .map(|(mark, before)| k.context.current_mark(*mark) - before)
+                .collect::<Vec<_>>()),
+        );
     }
     if let Some(local) = local_output {
         output.insert("local".into(), local);

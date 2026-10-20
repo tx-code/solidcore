@@ -84,7 +84,7 @@ pub fn assert_valid(
     ))?
     .is_some();
     let regions = bp::regions(b, None)?;
-    let shells = bp::shells(k, b, None)?;
+    let shells = super::local::root_shells(k, b)?;
     let faces = bp::faces(b, None)?;
     let edges = bp::edges(b, None)?;
     let vertices = bp::vertices(b, None)?;
@@ -283,14 +283,12 @@ fn contains_coincident_topology(_k: &mut Kernel, _b: &mut Brep) -> Result<bool> 
     Err(missing("SmBrep::ContainsCoincidentTopology"))
 }
 fn assert_sub_topology(
-    _k: &mut Kernel,
-    _b: &mut Brep,
-    _level: CheckLevel<'_>,
-    _report: &mut Reporter<'_>,
+    k: &mut Kernel,
+    b: &mut Brep,
+    level: CheckLevel<'_>,
+    report: &mut Reporter<'_>,
 ) -> Result<bool> {
-    // UNPORTED(fork.topology_validation): descendant local validators. A root-only
-    // success must never stand in for their native once-only ordered traversal.
-    Err(missing("SmBrep::AssertSubTopology"))
+    super::local::walk_root(k, b, level, report)
 }
 
 fn adjacent_regions(k: &mut Kernel, b: &Brep, region: RegionId) -> Result<Vec<RegionId>> {
@@ -400,7 +398,7 @@ mod tests {
         assert!(matches!(
             error,
             SolidError::Unported {
-                upstream: "SmBrep::AssertSubTopology",
+                upstream: "SmFace::AssertValid",
                 ..
             }
         ));

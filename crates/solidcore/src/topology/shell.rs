@@ -438,6 +438,17 @@ pub fn order_region_shells(kernel: &mut Kernel, brep: &mut Brep, id: RegionId) -
 /// vertex edge-list traversal; the mark is released on every path. There is no
 /// recursion.
 pub fn wire_edges(kernel: &mut Kernel, brep: &Brep, id: ShellId) -> Result<Vec<EdgeId>> {
+    wire_edges_with_marks(kernel, brep, id, &mut Marks::default())
+}
+
+/// Same native operation with the caller's actual model mark records. This
+/// retains the existing standalone API while owning validation persists marks.
+pub(crate) fn wire_edges_with_marks(
+    kernel: &mut Kernel,
+    brep: &Brep,
+    id: ShellId,
+    marks: &mut Marks,
+) -> Result<Vec<EdgeId>> {
     const WIRE_OP: &str = "topology::shell::wire_edges";
     let shell = brep.shell(id)?;
     let mut output = Vec::new();
@@ -447,7 +458,6 @@ pub fn wire_edges(kernel: &mut Kernel, brep: &Brep, id: ShellId) -> Result<Vec<E
     if shell.is_wire_shell() {
         with_mark_lock(kernel, ALL_MARKS, |kernel, mark| {
             let first = shell.wire_edge(brep)?.ok_or(invalid_members())?;
-            let mut marks = Marks::default();
             let mut stack = vec![first];
             while let Some(edge) = stack.pop() {
                 for vertex in crate::topology::edge::vertices(brep, edge, None)? {

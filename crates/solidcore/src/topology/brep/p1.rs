@@ -143,7 +143,6 @@ use crate::topology::face::p1 as face1;
 use crate::topology::face::p2 as face2;
 use crate::topology::loopuse;
 use crate::topology::proto_topology::p1::CopyBrepMap;
-use crate::topology::topology::Topology;
 use crate::topology::topology_traverser::{Entity, Marks};
 use crate::topology::vertex;
 use crate::topology::vertexuse;
@@ -466,22 +465,31 @@ pub fn shells(
     b: &Brep,
     attribute: Option<&AttributeFilter<'_>>,
 ) -> Result<Vec<ShellId>> {
+    shells_with_marks(k, b, attribute, &mut Marks::default())
+}
+
+/// Shared `GetShells` traversal with actual model marks supplied by its owner.
+pub(crate) fn shells_with_marks(
+    k: &mut Kernel,
+    b: &Brep,
+    attribute: Option<&AttributeFilter<'_>>,
+    marks: &mut Marks,
+) -> Result<Vec<ShellId>> {
     // get regions
     let regions = regions(b, None)?;
     with_mark_lock(k, ALL_MARKS, |k, mark| -> Result<Vec<ShellId>> {
-        let mut marked: BTreeMap<ShellId, Topology> = BTreeMap::new();
         let mut out = Vec::new();
         // for every region
         for r in regions {
             // get this region's shells
             for s in region_shells(b, r, attribute)? {
                 // skip marked shells
-                let rec = marked.entry(s).or_default();
-                if rec.is_marked(&k.context, mark) {
+                let entity = Entity::Shell(s);
+                if marks.is_marked(k, entity, mark) {
                     continue;
                 }
                 // mark and add shell to output
-                rec.mark(Some(&k.context), mark);
+                marks.mark(k, entity, mark);
                 out.push(s);
             }
         }

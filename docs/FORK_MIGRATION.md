@@ -131,3 +131,11 @@ see [root validation contract](BREP_VALIDATION.md). Native root booleans can be
 true with failed reports and cannot stand in for the import acceptance decision.
 Region membership and owner backpointers are stored separately for actual base
 validation rather than inferred from the notification records.
+
+
+Region and Shell local validators now execute their actual base/structural and
+connectivity checks; the root descendant sequence invokes them before the
+remaining Face/Loop/Edge/Vertex barriers. Native marks persist in owning state
+through shared traversal adapters. This is operation-level migration progress,
+not complete local/geometric validation or import acceptance; see
+[the validation contract](BREP_VALIDATION.md).

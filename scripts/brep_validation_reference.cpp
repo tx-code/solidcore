@@ -78,6 +78,8 @@ FIELD(EdgeTol, SmEdge, m_sZoneTol3d, SmZoneTol3d)
 FIELD(VertexTol, SmVertex, m_sZoneTol3d, SmZoneTol3d)
 FIELD(RootTol, SmBrep, m_sThisZoneTol3d, SmZoneTol3d)
 FIELD(ValidateOnly,SmBrep,m_bValidateOnly,SmBoolean)
+FIELD(Mark3,SmTopology,m_lMark3,ULONG)
+FIELD(ListSize,SmOwningTopology,m_lListSize,ULONG)
 FIELD(CacheTree,SmSurfaceCache,m_pTree,SmTree *)
 FIELD(TrimSubdivisionFactor,SmSurfaceCache,m_dTrimSubdivisionFactor,double)
 #undef FIELD
@@ -164,6 +166,7 @@ int main(int argc, char **argv) {
         const bool cache_mode=mode.starts_with("cache_");
         const bool local_mode=mode=="local_bsp";
         const bool root_mode=mode=="assert_root"||mode=="assert_root_walk";
+        const bool topology_mode=mode.starts_with("assert_region")||mode.starts_with("assert_shell");
         SmContext context;
         SmBrepConstructor builder;
         auto b = builder.StartBrep(context);
@@ -230,6 +233,19 @@ int main(int argc, char **argv) {
         require(builder.EndFace());
         require(builder.EndShell(FALSE));
         require(builder.EndBrep());
+        SmShell *target_shell=outer;
+        if(topology_mode && (mode.find("_vertex")!=std::string::npos || mode.find("_wire")!=std::string::npos)) {
+            SmVertex *vertex=nullptr;require(b->MakeShellVertexTopology(nullptr,target_shell,vertex));
+            if(mode.find("_wire")!=std::string::npos) {
+                SmEdge *wire=nullptr;SmVertex *end=nullptr;require(b->MakeEdgeVertexTopology(nullptr,vertex,wire,end));
+                if(mode.find("_chain")!=std::string::npos || mode.find("_branch")!=std::string::npos) {
+                    SmVertex *tip=nullptr;require(b->MakeEdgeVertexTopology(nullptr,end,wire,tip));
+                }
+                if(mode.find("_branch")!=std::string::npos) {
+                    SmVertex *tip=nullptr;require(b->MakeEdgeVertexTopology(nullptr,vertex,wire,tip));
+                }
+            }
+        }
         SmEdge *orphan = nullptr;
         if (defect == "edge_no_uses" || second == "edge_no_uses") {
             orphan = new (b) EmptyEdge();
@@ -249,6 +265,7 @@ int main(int argc, char **argv) {
         record(keys, b, 0);
         record(keys, b->GetInfiniteRegion(), 0);
         record(keys, outer, 0);
+        if(target_shell!=outer)record(keys,target_shell,1);
         record(keys, f, 0);
         record(keys, fu, 0);
         record(keys, fu->GetMate(), 1);
@@ -268,11 +285,23 @@ int main(int argc, char **argv) {
         }
         for (ULONG i = 0; i < vs.GetSize(); ++i)
             record(keys, vs[i], i);
+        const SmMarkType mark_types[]={SM_MT_MARK,SM_MT_MARK2,SM_MT_MARK3,SM_MT_MARKIO,SM_MT_MARKASSERT};
+        std::array<ULONG,5> before_marks{};
+        for(size_t i=0;i<5;++i)before_marks[i]=context.GetCurrentMark(mark_types[i]);
         Restore restore;
         auto apply = [&](const std::string &name) {
             if (name == "none" || name == "surface_offset" || name == "trim_failure" || name == "edge_no_uses" || name.starts_with("reverse_") || name.starts_with("bspline_"))
                 return;
-            if (name == "no_infinite_region")
+            if(name=="empty_shell") {
+                restore.clear(field<List>(target_shell));
+                auto saved=field<ListSize>(target_shell);restore.actions.emplace_back([target_shell,saved]{field<ListSize>(target_shell)=saved;});field<ListSize>(target_shell)=0;
+            }
+            else if(name=="region_mark3_ahead"||name=="shell_mark3_ahead") {
+                SmTopology *object=name=="region_mark3_ahead"?static_cast<SmTopology*>(b->GetInfiniteRegion()):target_shell;
+                auto saved=field<Mark3>(object);restore.actions.emplace_back([object,saved]{field<Mark3>(object)=saved;});
+                field<Mark3>(object)=context.GetCurrentMark(SM_MT_MARK3)+1;
+            }
+            else if (name == "no_infinite_region")
                 restore.clear(field<Infinite>(b));
             else if (name == "region_no_owner")
                 restore.clear(field<Owner>(field<Infinite>(b)));
@@ -369,6 +398,7 @@ int main(int argc, char **argv) {
         auto level = (selection == "given"||selection == "given_empty") ? SM_LEVEL_GIVEN
                      : selection == "one" ? SM_LEVEL_1
                      : selection == "two" ? SM_LEVEL_2
+                     : selection == "heal" ? SM_LEVEL_HEAL
                                           : SM_LEVEL_0;
         auto target = selection == "no_reports" ? nullptr : &reports;
         int reversal = -1;
@@ -380,7 +410,7 @@ int main(int argc, char **argv) {
         SmStatus query_status=SM_SUCCESS;
         auto run_tolerance=[&]{return b->ValidateAndUpdateTolerances(mode=="tolerance_check",violated,ef_trim,ve,vf,target,level,selection=="given"?&requested:nullptr,&ef_trim_obj,&ve_obj,&vf_obj,&ef_obj,&vf_trim_obj,&ef,&vf_trim);};
         auto status =
-            (raw||tolerance||box_mode||cache_mode||local_mode||root_mode) ? SM_SUCCESS
+            (raw||tolerance||box_mode||cache_mode||local_mode||root_mode||topology_mode) ? SM_SUCCESS
                 : b->ValidatePointers(target, level, selection == "given" ? &requested : nullptr,
                                       SM_NO_WALK);
         if (raw)
@@ -394,7 +424,7 @@ int main(int argc, char **argv) {
             status=query_status;
         }
         if(tolerance&&selection=="repeat")status=run_tolerance();
-        if (!raw && !tolerance && !box_mode && !cache_mode && !local_mode && !root_mode && selection == "repeat")
+        if (!raw && !tolerance && !box_mode && !cache_mode && !local_mode && !root_mode && !topology_mode && selection == "repeat")
             status = b->ValidatePointers(target, level, nullptr, SM_NO_WALK);
         bool root_valid=false;
         if(root_mode){
@@ -402,6 +432,12 @@ int main(int argc, char **argv) {
                 (selection=="given"||selection=="given15")?&requested:nullptr);};
             if(selection=="given") {requested.ReSet();requested.Add(8);}
             if(selection=="given15") {level=SM_LEVEL_GIVEN;requested.ReSet();requested.Add(15);}
+            root_valid=call();if(selection=="repeat")root_valid=call();
+        }
+        if(topology_mode){
+            const auto call=[&]{return mode.starts_with("assert_region")
+                ? b->GetInfiniteRegion()->AssertValid(target,level,mode.ends_with("_walk")?SM_WALK:SM_NO_WALK,selection=="given"?&requested:nullptr)
+                : target_shell->AssertValid(target,level,mode.ends_with("_walk")?SM_WALK:SM_NO_WALK,selection=="given"?&requested:nullptr);};
             root_valid=call();if(selection=="repeat")root_valid=call();
         }
         SmBoolean local_found=FALSE;SmSolution local_solution;
@@ -478,6 +514,18 @@ int main(int argc, char **argv) {
             for(ULONG i=0;i<vs.GetSize();++i)std::cout<<','<<vs[i]->GetTolerance();std::cout<<']';
         }
         if(box_mode){auto a=bounds.GetMin(),z=bounds.GetMax();std::cout<<",\"box\":["<<a.x<<','<<a.y<<','<<a.z<<','<<z.x<<','<<z.y<<','<<z.z<<']';}
+        if(topology_mode){
+            std::cout<<",\"local_valid\":"<<(root_valid?"true":"false")<<",\"mark_advances\":[";
+            for(size_t i=0;i<5;++i){if(i)std::cout<<',';std::cout<<context.GetCurrentMark(mark_types[i])-before_marks[i];}std::cout<<']';
+            std::cout<<",\"current_marks\":[";
+            std::vector<const SmTopology*> observed={b->GetInfiniteRegion(),target_shell,fu,fu->GetMate()};
+            for(ULONG j=0;j<vs.GetSize();++j)observed.push_back(vs[j]);
+            for(ULONG j=0;j<edges.GetSize();++j)observed.push_back(edges[j]);
+            for(ULONG j=0;j<vs.GetSize();++j){SmTArray<SmVertexuse*> uses;vs[j]->GetVertexuses(uses);for(ULONG n=0;n<uses.GetSize();++n)observed.push_back(uses[n]);}
+            for(size_t j=0;j<observed.size();++j){if(j)std::cout<<',';std::cout<<'[';
+                for(size_t i=0;i<5;++i){if(i)std::cout<<',';std::cout<<(observed[j]->GetMark(mark_types[i])==context.GetCurrentMark(mark_types[i])?"true":"false");}
+                std::cout<<']';}std::cout<<']';
+        }
         if(root_mode)std::cout<<",\"root_valid\":"<<(root_valid?"true":"false");
         if(local_mode)std::cout<<",\"local\":["<<(local_found?"true":"false")<<','<<local_solution.m_vStart[0]<<','<<local_solution.m_vStart[1]<<','<<local_solution.m_vStart.m_dSolutionValue<<']';
         if(cache_mode){

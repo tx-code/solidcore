@@ -65,6 +65,39 @@ pub enum Entity {
 pub struct Marks(BTreeMap<Entity, Topology>);
 
 impl Marks {
+    /// Load the actual model's mark/flag records for a scoped immutable graph
+    /// traversal. Native objects retain marks between calls; a fresh map cannot
+    /// replace configured model state when validation observes it later.
+    pub(crate) fn from_brep(b: &Brep) -> Result<Self> {
+        let mut out = Self::default();
+        for entity in b
+            .faces()
+            .iter()
+            .map(|(id, _)| Entity::Face(id))
+            .chain(b.edges().iter().map(|(id, _)| Entity::Edge(id)))
+            .chain(b.vertices().iter().map(|(id, _)| Entity::Vertex(id)))
+            .chain(b.faceuses().iter().map(|(id, _)| Entity::Faceuse(id)))
+            .chain(b.vertexuses().iter().map(|(id, _)| Entity::Vertexuse(id)))
+            .chain(b.shells().iter().map(|(id, _)| Entity::Shell(id)))
+        {
+            let key = crate::topology::brep::p2::object_ref(b, entity_reference(entity))?.key;
+            if let Some(record) = b.notifications().topology.get(&key) {
+                out.0.insert(entity, *record);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Restore traversal effects before returning either success or failure.
+    /// The graph is borrowed immutably while this snapshot is active, so copying
+    /// the retained record also preserves its existing flags/user/link fields.
+    pub(crate) fn store_in_brep(self, b: &mut Brep) -> Result<()> {
+        for (entity, record) in self.0 {
+            *b.notification_topology_mut(entity_reference(entity))? = record;
+        }
+        Ok(())
+    }
+
     /// Whether `entity` carries the kernel's current `mark` value.
     #[must_use]
     pub fn is_marked(&self, k: &Kernel, entity: Entity, mark: MarkType) -> bool {
@@ -81,6 +114,18 @@ impl Marks {
             .entry(entity)
             .or_default()
             .mark(Some(&k.context), mark);
+    }
+}
+
+fn entity_reference(entity: Entity) -> crate::error::EntityRef {
+    use crate::error::EntityRef;
+    match entity {
+        Entity::Face(id) => EntityRef::Face(id),
+        Entity::Edge(id) => EntityRef::Edge(id),
+        Entity::Vertex(id) => EntityRef::Vertex(id),
+        Entity::Faceuse(id) => EntityRef::Faceuse(id),
+        Entity::Vertexuse(id) => EntityRef::Vertexuse(id),
+        Entity::Shell(id) => EntityRef::Shell(id),
     }
 }
 

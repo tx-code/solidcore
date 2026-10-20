@@ -23,6 +23,9 @@
 mod assertions;
 pub use assertions::{assert_valid, AssertValidOptions};
 mod geometry;
+mod local;
+mod local_base;
+pub use local::{assert_region, assert_shell};
 mod pointers;
 mod tolerances;
 pub use tolerances::{validate_and_update_tolerances, ToleranceReport};

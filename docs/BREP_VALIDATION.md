@@ -52,12 +52,16 @@ The ordered root implementation still reaches missing operations:
 - Multi-region `FindInfiniteRegion` ray selection; its native single-region
   branch executes before any ray/bounding-box work.
 - Ray-based `IsInnerShellOf` and complete coincidence detection.
-- `AssertSubTopology`'s once-only Region/Shell/Face/Loop/Edge/Vertex local checks.
+- The root `AssertSubTopology` branch now collects the actual stored lists and
+  face-derived loops, then runs Region and Shell local checks in native order.
+  Face/Loop/Edge/Vertex local validators and the non-root `GetSubTopology` branch
+  remain explicit missing operations.
 - Underlying geometric paths such as a repeated gap check constructing a
   `CrvOnSurf` over an analytic plane, where concrete surface dispatch is missing.
 
 Accordingly a root-only no-walk success establishes only its selected root and
-underlying checks. A walk or selected missing predicate returns `Unported`.
+underlying checks. A walk encountering a missing descendant or selected missing
+predicate returns `Unported`. It cannot silently omit the remaining objects.
 Neither source-schema recognition, root-only success, pointer success nor a mesh
 qualifies strict native STEP import or the [complete migration](FORK_MIGRATION.md).
 
@@ -87,3 +91,40 @@ booleans, ordered diagnostic identity/content, LastAdd and observable NURB state
 across levels, requests, missing links, tolerance faults and repeated calls.
 Deferred cases are recorded separately. Run receipts and private model data stay
 local; these are operation requests, not model-library import qualification.
+
+
+## Region and Shell local checks
+
+`assert_region` and `assert_shell` accept the same explicit level/walk options.
+Region has only the actual native base chain; its source contains no additional
+Region-local predicates. Shell checks vertex, wire and face-use contents against
+independent root scans and actual connectivity traversal. A structurally valid
+curveless wire can pass Shell-local checks; this does not validate its geometry.
+
+The base chain reads membership and backpointers from the graph and mark/flag
+state from the owning model. A mark3 failure intentionally cascades into the
+source ring test7 because native `bOk` is not reset. Shell test24 is used twice
+by the source for different predicates; its emitted identity is preserved.
+Null shell heads and missing first loop heads retain the original early returns.
+Disabled radial/sector checks remain owned by the later local validators.
+
+The same model must retain its owning Kernel context across calls; replacing
+it with a fresh context is not equivalent to constructing a new native graph.
+The existing traversal algorithms now accept owning marks through a shared
+adapter. It loads retained metadata, persists traversal effects even on error,
+and preserves existing flags/user fields. It never uses metadata list links as
+a replacement for the actual graph. Context mark locks are released before
+propagating a traversal error. Non-root walk requests still explicitly require
+the unported non-root `GetSubTopology` branch.
+
+The local native comparison adds vertex shells, single wires, chains and
+branches, missing owner/list/loop cases, mark-limit faults, levels zero/one/two/
+Heal/Given, absent report arrays and repeated calls. It compares ordered
+reports, boolean, LastAdd, context counter advances and final current-mark
+membership on live vertices/edges/faceuses/vertexuses. Counter advances are
+relative to each constructor's starting context; they are not an assertion of
+absolute constructor counter parity. Run with:
+
+```text
+python scripts/brep_local_validation_compare.py --cpp bin/local-validation-reference/brep-validation-reference.exe --rust bin/debug/examples/brep_validation_probe.exe --receipt bin/brep-local-validation.local.json
+```

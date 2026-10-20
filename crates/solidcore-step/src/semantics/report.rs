@@ -59,6 +59,22 @@ struct Report<'a> {
     schema: &'static str,
     scope: &'static str,
     status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy: Option<super::SourcePolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    geometry_scope: Option<super::GeometryScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_interpretation: Option<super::SchemaInterpretation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    applied_interpretation: Option<super::SchemaInterpretation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_binding_verified: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interpretation_diagnostics: Option<&'a [Diagnostic]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preserved_diagnostics: Option<&'a [Diagnostic]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unattached_non_geometric: Option<&'a [usize]>,
     schema_selection: &'a Option<SchemaSelection>,
     binding: &'a str,
     types: &'a str,
@@ -81,10 +97,16 @@ struct Report<'a> {
     planar_rules: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     full_import: Option<&'static str>,
-    limits: Limits,
+    limits: LimitView,
     diagnostics: &'a [Diagnostic],
     snapshot: Option<SnapshotView<'a>>,
     source: crate::report::Report<'a>,
+}
+#[derive(Serialize)]
+struct LimitView {
+    dependency_visits: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preserved_diagnostics: Option<usize>,
 }
 pub(super) fn compile(source: &RawOutcome, outcome: &Outcome) -> Result<Vec<u8>, ReportError> {
     let bound = match (&source.captured, &outcome.source_capture) {
@@ -95,8 +117,14 @@ pub(super) fn compile(source: &RawOutcome, outcome: &Outcome) -> Result<Vec<u8>,
     if !bound {
         return Err(ReportError::SourceMismatch);
     }
+    let explicit = outcome.source_policy() != super::SourcePolicy::Strict;
+    let interpreted = outcome.requested_interpretation()
+        != super::SchemaInterpretation::DeclaredOnly
+        || outcome.applied_interpretation() != super::SchemaInterpretation::DeclaredOnly;
     let report = Report {
-        schema: if outcome.check_geometry_dependencies && outcome.check_part_and_closure {
+        schema: if explicit {
+            "solidcore.step.interoperability-source.v1"
+        } else if outcome.check_geometry_dependencies && outcome.check_part_and_closure {
             "solidcore.step.source-semantics.v1"
         } else if outcome.check_geometry_dependencies {
             "solidcore.step.geometry-dependencies.v1"
@@ -105,7 +133,9 @@ pub(super) fn compile(source: &RawOutcome, outcome: &Outcome) -> Result<Vec<u8>,
         } else {
             "solidcore.step.types-units.v1"
         },
-        scope: if outcome.check_geometry_dependencies && outcome.check_part_and_closure {
+        scope: if explicit {
+            "SourceSemanticsWithInteroperability"
+        } else if outcome.check_geometry_dependencies && outcome.check_part_and_closure {
             "StrictSourceSemantics"
         } else if outcome.check_geometry_dependencies {
             "GeometryDependenciesCheckpoint"
@@ -115,6 +145,14 @@ pub(super) fn compile(source: &RawOutcome, outcome: &Outcome) -> Result<Vec<u8>,
             "TypesAndUnitsCheckpoint"
         },
         status: outcome.status,
+        policy: explicit.then_some(outcome.source_policy()),
+        geometry_scope: (explicit || interpreted).then_some(outcome.geometry_scope()),
+        requested_interpretation: interpreted.then_some(outcome.requested_interpretation()),
+        applied_interpretation: interpreted.then_some(outcome.applied_interpretation()),
+        source_binding_verified: interpreted.then_some(false),
+        interpretation_diagnostics: interpreted.then_some(outcome.interpretation_diagnostics()),
+        preserved_diagnostics: explicit.then_some(outcome.preserved_diagnostics()),
+        unattached_non_geometric: explicit.then_some(outcome.unattached_non_geometric()),
         schema_selection: &outcome.schema_selection,
         binding: outcome.binding,
         types: outcome.types,
@@ -123,7 +161,7 @@ pub(super) fn compile(source: &RawOutcome, outcome: &Outcome) -> Result<Vec<u8>,
         part: outcome.part,
         geometry_dependencies: outcome.geometry_dependencies,
         native_build: "NotRun",
-        interoperability: "NotRun",
+        interoperability: outcome.interoperability,
         repair: "None",
         dependency_visits: outcome.dependency_visits,
         property_attachment_checks: outcome
@@ -136,7 +174,14 @@ pub(super) fn compile(source: &RawOutcome, outcome: &Outcome) -> Result<Vec<u8>,
         geometry_consistency: outcome.check_geometry_dependencies.then_some("NotRun"),
         planar_rules: outcome.check_geometry_dependencies.then_some("NotRun"),
         full_import: outcome.check_geometry_dependencies.then_some("NotRun"),
-        limits: outcome.limits,
+        limits: LimitView {
+            dependency_visits: outcome.limits.dependency_visits,
+            preserved_diagnostics: (explicit
+                || interpreted
+                || outcome.limits.preserved_diagnostics
+                    != Limits::fixtures().preserved_diagnostics)
+                .then_some(outcome.limits.preserved_diagnostics),
+        },
         diagnostics: &outcome.diagnostics,
         snapshot: outcome.snapshot.as_ref().map(|s| SnapshotView {
             registered_types: Names(s),

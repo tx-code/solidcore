@@ -280,7 +280,8 @@ fn budgets_and_report_scope_preserve_unrun_geometry_consistency() {
         semantics::check(
             &raw,
             semantics::Limits {
-                dependency_visits: visits
+                dependency_visits: visits,
+                preserved_diagnostics: 1024,
             },
             &options
         )
@@ -291,6 +292,7 @@ fn budgets_and_report_scope_preserve_unrun_geometry_consistency() {
         &raw,
         semantics::Limits {
             dependency_visits: visits - 1,
+            preserved_diagnostics: 1024,
         },
         &options,
     );

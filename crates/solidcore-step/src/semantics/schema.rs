@@ -2,8 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Fixed schema identity recognition, independent of type/geometry qualification.
 //! Upstream: `source/STEP_SEMANTICS/src/StepSchemaSelection.cpp` (Identify/SelectSchema).
-//! Deviations: strict declared-only bindings; legacy interpretation policies remain unavailable.
-use super::{generated::CATALOGS, GeometryScope, Profile, SchemaIdentifier, SchemaSelection};
+//! Deviations: safe source views and explicit bounded implementation assumptions;
+//! an applied choice never authenticates the original schema declaration.
+use super::{
+    generated::CATALOGS, GeometryScope, Profile, SchemaIdentifier, SchemaInterpretation,
+    SchemaSelection,
+};
 use crate::{Snapshot, Value};
 
 const AP203: &str =
@@ -130,6 +134,7 @@ pub(super) fn select(source: &Snapshot, scope: GeometryScope) -> SchemaSelection
     let mut selection = SchemaSelection {
         identifiers,
         qualified: None,
+        applied_interpretation: SchemaInterpretation::DeclaredOnly,
     };
     if selection.identifiers.len() != 1 {
         return selection;
@@ -166,6 +171,38 @@ pub(super) fn select(source: &Snapshot, scope: GeometryScope) -> SchemaSelection
         });
     }
     selection
+}
+
+pub(super) fn explicit(
+    selection: &SchemaSelection,
+    policy: SchemaInterpretation,
+) -> Option<Profile> {
+    if selection.qualified.is_some() || selection.identifiers.len() != 1 {
+        return None;
+    }
+    let identity = selection.identifiers.first()?;
+    // StepSchemaSelection.cpp at d8ed45a: these are disjoint exact spellings,
+    // not an unknown-schema override or a proof of HEADER edition identity.
+    let eight = policy == SchemaInterpretation::UnregisteredAp214As2010
+        && identity.matched == "UnregisteredVersion"
+        && identity
+            .oid
+            .iter()
+            .map(String::as_str)
+            .eq(words("1 0 10303 214 3 1 1 1"));
+    let bare = policy == SchemaInterpretation::Ap214NameOnlyAs2010
+        && identity.matched == "NameOnly"
+        && identity.oid.is_empty();
+    if identity.name != "AUTOMOTIVE_DESIGN" || (!eight && !bare) {
+        return None;
+    }
+    let catalog = CATALOGS.iter().find(|c| c.kind == "Ap214MbxSource")?;
+    Some(Profile {
+        registry_id: "ap214-mbx-2010".into(),
+        profile: catalog.profile,
+        express_sha256: catalog.schema_sha256,
+        kind: catalog.kind,
+    })
 }
 
 pub(super) const AP203_EXPECTED:&str="AP203_CONFIGURATION_CONTROLLED_3D_DESIGN_OF_MECHANICAL_PARTS_AND_ASSEMBLIES_MIM_LF {1 0 10303 403 2 1 2}";

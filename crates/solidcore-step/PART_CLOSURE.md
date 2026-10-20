@@ -118,6 +118,8 @@ legacy interpretation receipts. Strict typed/ownership checkpoints refuse legacy
 assumptions and retain unsupported diagnostics for unavailable DATA text; those
 source options cannot silently manufacture a checked product identity or role.
 Those require their later original nonphysical-exclusion and approval contracts.
+That separate explicit path is now available through [source interoperability](INTEROPERABILITY.md);
+the strict checkpoint described here retains its original behavior and scope.
 Unknown physical members and strict source errors remain fatal.
 
 ## Compatibility and validation

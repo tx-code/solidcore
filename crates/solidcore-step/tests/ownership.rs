@@ -439,7 +439,8 @@ fn part_budget_and_report_failure_cannot_publish_partial_ownership() {
         semantics::check(
             &source,
             semantics::Limits {
-                dependency_visits: visits
+                dependency_visits: visits,
+                preserved_diagnostics: 1024,
             },
             &options
         )
@@ -450,6 +451,7 @@ fn part_budget_and_report_failure_cannot_publish_partial_ownership() {
         &source,
         semantics::Limits {
             dependency_visits: visits - 1,
+            preserved_diagnostics: 1024,
         },
         &options,
     );
@@ -552,6 +554,7 @@ fn shared_dependencies_are_visited_once_per_reach_and_budget_stop_withholds_part
         &source,
         semantics::Limits {
             dependency_visits: before + 3,
+            preserved_diagnostics: 1024,
         },
         &options,
     );

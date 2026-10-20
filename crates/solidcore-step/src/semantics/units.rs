@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Exact dimensional dependencies, nominal predicates and measure prerequisites.
 //! Upstream: `source/STEP_SEMANTICS/src/StepUnitDependencies.cpp` (`UnitDependencies`).
-//! Deviations: safe Rust indices; strict-only source policy. Explicit DFS frames
+//! Deviations: safe Rust indices and provisional source-error retention. Explicit DFS frames
 //! preserve visits/postorder, so input graph depth never consumes the Rust stack.
 use super::checker::{internal, Checked, Checker};
 use super::number::{compare, Rational};
@@ -194,13 +194,41 @@ fn evaluate(checker: &mut Checker<'_>, nodes: &[Node], node: usize) -> Checked<V
                 let (_, prefix) = checker.field(r, "prefix")?;
                 count(checker, prefix.span)?;
                 if prefix.text != "KILO" {
-                    return Err(rule(checker, r, "prefix", "SI_UNIT.WR1"));
+                    let failure = rule(checker, r, "prefix", "SI_UNIT.WR1");
+                    if !checker.schema()?.ap214()
+                        || checker.outcome.source_policy()
+                            != super::SourcePolicy::PreserveNonGeometric
+                        || name.text != "GRAM"
+                    {
+                        return Err(failure);
+                    }
+                    preserve_pending(checker, failure, r, "prefix")?;
                 }
             }
         }
     } else if checker.is_a(r, "CONVERSION_BASED_UNIT") {
         let edge = current.edges.first().ok_or_else(internal)?;
         dimensions = nodes.get(edge.target).ok_or_else(internal)?.dimensions;
+        if checker.schema()?.ap214() {
+            let (_, bound) = checker.field(r, "dimensions")?;
+            if bound.kind == crate::ValueKind::Reference {
+                // The provisional mass-unit exception preserves a source error,
+                // not an AP214 transport value. Its seven original exponents
+                // must still agree with the factor-derived vector before approval.
+                let source_dimensions = checker.target(bound)?;
+                let mut explicit = [Rational::default(); 7];
+                for (d, name) in explicit.iter_mut().zip(DIMENSIONS) {
+                    *d = decimal(checker, source_dimensions, name)?;
+                }
+                count(checker, bound.span)?;
+                if explicit != dimensions {
+                    return Err(fail(checker, Status::Rejected, r, "dimensions",
+                        "MetadataMassUnitDimensionsConflict", "factor-derived dimensional vector",
+                        "contradictory explicit source vector",
+                        "property-only compatibility guard; no contradictory unit dimensions retained"));
+                }
+            }
+        }
         if matches!(
             checker.schema()?.kind,
             "Ap203e2GeneralSource" | "Ap203N916Source"
@@ -280,6 +308,33 @@ fn evaluate(checker: &mut Checker<'_>, nodes: &[Node], node: usize) -> Checked<V
     }
     Ok(dimensions)
 }
+// UnitDependencies::PreservePending has its own capacity timing/field diagnostic.
+// Do not replace it with the outer Preserve helper: schema assumptions share the
+// final quota but this original unit-phase check counts pending issues alone.
+fn preserve_pending(
+    checker: &mut Checker<'_>,
+    failure: Box<super::checker::Failure>,
+    r: usize,
+    field: &str,
+) -> Checked<()> {
+    if checker.pending.len() >= checker.outcome.limits.preserved_diagnostics {
+        return Err(fail(
+            checker,
+            Status::ResourceLimit,
+            r,
+            field,
+            "PreservedDiagnosticLimit",
+            "configured preserved diagnostic capacity",
+            &(checker.pending.len() + 1).to_string(),
+            "explicit interoperability capacity; no diagnostics silently discarded",
+        ));
+    }
+    checker.pending.push(super::interop::Pending {
+        failure,
+        proof: super::interop::Proof::ExistingMetadata,
+    });
+    Ok(())
+}
 fn measures(checker: &mut Checker<'_>, nodes: &[Node], indices: &[Option<usize>]) -> Checked<()> {
     for r in 0..checker.source.records().len() {
         let value_item = checker.is_a(r, "VALUE_REPRESENTATION_ITEM")
@@ -287,74 +342,92 @@ fn measures(checker: &mut Checker<'_>, nodes: &[Node], indices: &[Option<usize>]
         if !checker.is_a(r, "MEASURE_WITH_UNIT") && !value_item {
             continue;
         }
-        let (_, value) = checker.field(r, "value_component")?;
-        let tag = value.text.as_str();
-        if matches!(
-            tag,
-            "POSITIVE_RATIO_MEASURE"
-                | "POSITIVE_LENGTH_MEASURE"
-                | "NON_NEGATIVE_LENGTH_MEASURE"
-                | "POSITIVE_PLANE_ANGLE_MEASURE"
-        ) {
-            count(checker, value.span)?;
-            checker.outcome.unit_dependency_checks.type_predicates += 1;
-            let sign = compare(&value.children.first().ok_or_else(internal)?.text, "0.");
-            if sign < 0 || (sign == 0 && tag != "NON_NEGATIVE_LENGTH_MEASURE") {
-                return Err(rule(checker, r, "value_component", &format!("{tag}.WR1")));
-            }
-        }
-        if value_item {
-            continue;
-        } // A VRI has no unit_component; never borrow the body's unit.
-        let (_, unit) = checker.field(r, "unit_component")?;
-        let target = checker.target(unit)?;
-        let required = match tag {
-            "MASS_MEASURE" => basis(1),
-            "LENGTH_MEASURE" | "NON_NEGATIVE_LENGTH_MEASURE" | "POSITIVE_LENGTH_MEASURE" => {
-                basis(0)
-            }
-            "PLANE_ANGLE_MEASURE"
-            | "POSITIVE_PLANE_ANGLE_MEASURE"
-            | "RATIO_MEASURE"
-            | "POSITIVE_RATIO_MEASURE" => [Rational::default(); 7],
-            _ => {
-                return Err(fail(
-                    checker,
-                    Status::Unsupported,
-                    r,
-                    "value_component",
-                    "UnsupportedMeasureDimensionBranch",
-                    "interpreted length/mass/ratio measure family",
-                    tag,
-                    "profile dimensional interpretation subset; no guessed dimension",
-                ))
-            }
-        };
-        count(checker, unit.span)?;
-        if nodes
-            .get(node_index(indices, target)?)
-            .ok_or_else(internal)?
-            .dimensions
-            != required
-        {
-            return Err(rule(checker, r, "unit_component", "MEASURE_WITH_UNIT.WR1"));
-        }
-        for (subtype, nominal_type) in [
-            ("LENGTH_MEASURE_WITH_UNIT", "LENGTH_UNIT"),
-            ("MASS_MEASURE_WITH_UNIT", "MASS_UNIT"),
-            ("PLANE_ANGLE_MEASURE_WITH_UNIT", "PLANE_ANGLE_UNIT"),
-        ] {
-            if checker.is_a(r, subtype) {
-                count(checker, unit.span)?;
-                if !checker.is_a(target, nominal_type) {
-                    return Err(rule(
-                        checker,
-                        r,
-                        "unit_component",
-                        &format!("{subtype}.WR1"),
-                    ));
+        let result = (|| -> Checked<()> {
+            let (_, value) = checker.field(r, "value_component")?;
+            let tag = value.text.as_str();
+            if matches!(
+                tag,
+                "POSITIVE_RATIO_MEASURE"
+                    | "POSITIVE_LENGTH_MEASURE"
+                    | "NON_NEGATIVE_LENGTH_MEASURE"
+                    | "POSITIVE_PLANE_ANGLE_MEASURE"
+            ) {
+                count(checker, value.span)?;
+                checker.outcome.unit_dependency_checks.type_predicates += 1;
+                let sign = compare(&value.children.first().ok_or_else(internal)?.text, "0.");
+                if sign < 0 || (sign == 0 && tag != "NON_NEGATIVE_LENGTH_MEASURE") {
+                    return Err(rule(checker, r, "value_component", &format!("{tag}.WR1")));
                 }
             }
+            if value_item {
+                return Ok(());
+            } // A VRI has no unit_component; never borrow the body's unit.
+            let (_, unit) = checker.field(r, "unit_component")?;
+            let target = checker.target(unit)?;
+            let required = match tag {
+                "MASS_MEASURE" => basis(1),
+                "LENGTH_MEASURE" | "NON_NEGATIVE_LENGTH_MEASURE" | "POSITIVE_LENGTH_MEASURE" => {
+                    basis(0)
+                }
+                "PLANE_ANGLE_MEASURE"
+                | "POSITIVE_PLANE_ANGLE_MEASURE"
+                | "RATIO_MEASURE"
+                | "POSITIVE_RATIO_MEASURE" => [Rational::default(); 7],
+                _ => {
+                    return Err(fail(
+                        checker,
+                        Status::Unsupported,
+                        r,
+                        "value_component",
+                        "UnsupportedMeasureDimensionBranch",
+                        "interpreted length/mass/ratio measure family",
+                        tag,
+                        "profile dimensional interpretation subset; no guessed dimension",
+                    ))
+                }
+            };
+            count(checker, unit.span)?;
+            if nodes
+                .get(node_index(indices, target)?)
+                .ok_or_else(internal)?
+                .dimensions
+                != required
+            {
+                return Err(rule(checker, r, "unit_component", "MEASURE_WITH_UNIT.WR1"));
+            }
+            for (subtype, nominal_type) in [
+                ("LENGTH_MEASURE_WITH_UNIT", "LENGTH_UNIT"),
+                ("MASS_MEASURE_WITH_UNIT", "MASS_UNIT"),
+                ("PLANE_ANGLE_MEASURE_WITH_UNIT", "PLANE_ANGLE_UNIT"),
+            ] {
+                if checker.is_a(r, subtype) {
+                    count(checker, unit.span)?;
+                    if !checker.is_a(target, nominal_type) {
+                        return Err(rule(
+                            checker,
+                            r,
+                            "unit_component",
+                            &format!("{subtype}.WR1"),
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(failure) = result {
+            let key = failure.diagnostic.source.key.as_str();
+            if checker.outcome.source_policy() != super::SourcePolicy::PreserveNonGeometric
+                || (!checker.is_a(r, "MEASURE_REPRESENTATION_ITEM") && !value_item)
+                || failure.status != Status::Rejected
+                || !matches!(
+                    key,
+                    "SourceRuleViolation:MEASURE_WITH_UNIT.WR1"
+                        | "SourceRuleViolation:POSITIVE_RATIO_MEASURE.WR1"
+                )
+            {
+                return Err(failure);
+            }
+            preserve_pending(checker, failure, r, "value_component")?;
         }
     }
     Ok(())

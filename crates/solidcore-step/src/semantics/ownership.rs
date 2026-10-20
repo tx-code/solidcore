@@ -3,15 +3,17 @@
 //! Strict selected-part identities and source dependency closure.
 //! Upstream: `source/STEP_SEMANTICS/src/StepSemantics.cpp`, Product/Closure/Reach.
 //! Rust Ownership corresponds to those C++ phase methods. Deviations: checked
-//! source indices, explicit iterative traversal, no interoperability exceptions.
+//! source indices, explicit iterative traversal and provisional interop evidence.
 //! Geometry dependency qualification and native construction remain separate.
 
 mod metadata;
 mod presentation;
 
 use super::checker::{internal, Checked, Checker, Failure};
+use super::interop::{OwnershipEvidence, Proof};
 use super::{GeometryScope, Part, PropertyAttachment, Role, Status};
 use crate::{Span, Value};
+use std::collections::BTreeSet;
 
 struct Selected {
     definition: usize,
@@ -33,6 +35,8 @@ struct Ownership<'c, 's> {
     outgoing: Vec<Vec<usize>>,
     presentation_roots: Vec<usize>,
     representation_use: Vec<bool>,
+    administrative: Vec<bool>,
+    style_overrides: BTreeSet<usize>,
 }
 impl<'s> Ownership<'_, 's> {
     fn field(&self, r: usize, name: &str) -> Checked<&'s Value> {
@@ -443,8 +447,66 @@ impl<'s> Ownership<'_, 's> {
     fn product(&mut self) -> Checked<()> {
         // The strict chain is selected by source identity, never by an APD year,
         // duplicate textual product ID, representation ordering or display name.
-        let ac = self.one("APPLICATION_CONTEXT")?;
-        let apd = self.one("APPLICATION_PROTOCOL_DEFINITION")?;
+        let (single_application, mut distinct_issue) = match self.one("APPLICATION_CONTEXT") {
+            Ok(r) => (Some(r), None),
+            Err(failure) => {
+                if !self.c.general_interoperability()
+                    || self.population("APPLICATION_CONTEXT")?.len() < 2
+                {
+                    return Err(failure);
+                }
+                (None, Some(failure))
+            }
+        };
+        let mut apd = None;
+        let mut definition_protocol = None;
+        match self.one("APPLICATION_PROTOCOL_DEFINITION") {
+            Ok(r) => apd = Some(r),
+            Err(failure) => {
+                let protocols = self.population("APPLICATION_PROTOCOL_DEFINITION")?;
+                if self.c.general_interoperability() && protocols.len() > 1 {
+                    let pc = self.one("PRODUCT_CONTEXT")?;
+                    let pdc = self.one("PRODUCT_DEFINITION_CONTEXT")?;
+                    let product_application = self.target_field(pc, "frame_of_reference")?;
+                    let definition_application = self.target_field(pdc, "frame_of_reference")?;
+                    for protocol in protocols {
+                        let application = self.target_field(protocol, "application")?;
+                        if application == product_application {
+                            if apd.is_some() {
+                                return Err(failure);
+                            }
+                            apd = Some(protocol);
+                        }
+                        if application == definition_application {
+                            if definition_protocol.is_some() {
+                                return Err(failure);
+                            }
+                            definition_protocol = Some(protocol);
+                        }
+                        if application != product_application
+                            && application != definition_application
+                        {
+                            return Err(failure);
+                        }
+                    }
+                    if apd.is_none() || definition_protocol.is_none() {
+                        return Err(failure);
+                    }
+                    self.c
+                        .preserve(failure, Proof::ContextApplicationProtocols)?;
+                } else {
+                    if !self.c.can_preserve_missing_protocol()
+                        || !self.c.general_interoperability()
+                        || !protocols.is_empty()
+                    {
+                        return Err(failure);
+                    }
+                    self.part.application_protocol_present = false;
+                    self.c
+                        .preserve(failure, Proof::MissingApplicationProtocol)?;
+                }
+            }
+        }
         let pc = self.one("PRODUCT_CONTEXT")?;
         let pdc = self.one("PRODUCT_DEFINITION_CONTEXT")?;
         let product = self.one("PRODUCT")?;
@@ -452,6 +514,42 @@ impl<'s> Ownership<'_, 's> {
         let pd = self.one("PRODUCT_DEFINITION")?;
         let pds = self.one("PRODUCT_DEFINITION_SHAPE")?;
         let sdr = self.one("SHAPE_DEFINITION_REPRESENTATION")?;
+        let distinct = distinct_issue.is_some();
+        let product_application = if distinct {
+            self.target_field(pc, "frame_of_reference")?
+        } else {
+            single_application.ok_or_else(internal)?
+        };
+        let definition_application = if distinct {
+            self.target_field(pdc, "frame_of_reference")?
+        } else {
+            single_application.ok_or_else(internal)?
+        };
+        let protocol_application = if distinct {
+            match apd {
+                Some(apd) => self.target_field(apd, "application")?,
+                None => product_application,
+            }
+        } else {
+            product_application
+        };
+        let ac = single_application.unwrap_or(protocol_application);
+        if let Some(failure) = distinct_issue.take() {
+            let selected = [
+                product_application,
+                definition_application,
+                protocol_application,
+            ];
+            if self
+                .population("APPLICATION_CONTEXT")?
+                .iter()
+                .any(|r| !selected.contains(r))
+            {
+                return Err(failure);
+            }
+            self.c
+                .preserve(failure, Proof::DistinctApplicationContexts)?;
+        }
         let selected = if self.planar() {
             let rep = self.one("REPRESENTATION")?;
             self.context = Some(self.one("REPRESENTATION_CONTEXT")?);
@@ -474,7 +572,6 @@ impl<'s> Ownership<'_, 's> {
         self.construction = selected.construction;
         for (name, r) in [
             ("application_context", ac),
-            ("application_protocol", apd),
             ("product_context", pc),
             ("definition_context", pdc),
             ("product", product),
@@ -486,6 +583,22 @@ impl<'s> Ownership<'_, 's> {
             ("unit_context", self.context.ok_or_else(internal)?),
         ] {
             self.role(name, r);
+        }
+        if distinct {
+            self.role("product_application_context", product_application);
+            self.role("definition_application_context", definition_application);
+        }
+        if let Some(apd) = apd {
+            self.part.roles.insert(
+                1,
+                Role {
+                    name: "application_protocol".into(),
+                    record_index: apd,
+                },
+            );
+        }
+        if let Some(protocol) = definition_protocol.filter(|r| Some(*r) != apd) {
+            self.role("definition_application_protocol", protocol);
         }
         if let Some(link) = selected.relationship {
             self.role("definition_representation", selected.definition);
@@ -505,9 +618,26 @@ impl<'s> Ownership<'_, 's> {
                 selected.construction_relationship.ok_or_else(internal)?,
             );
         }
-        self.link(apd, "application", ac, None)?;
-        self.link(pc, "frame_of_reference", ac, None)?;
-        self.link(pdc, "frame_of_reference", ac, None)?;
+        if let Some(apd) = apd {
+            self.link(
+                apd,
+                "application",
+                if distinct { protocol_application } else { ac },
+                None,
+            )?;
+        }
+        self.link(
+            pc,
+            "frame_of_reference",
+            if distinct { product_application } else { ac },
+            None,
+        )?;
+        self.link(
+            pdc,
+            "frame_of_reference",
+            if distinct { definition_application } else { ac },
+            None,
+        )?;
         if self.field(product, "frame_of_reference")?.children.len() != 1 {
             return Err(self.field_failure(
                 Status::Unsupported,
@@ -537,12 +667,14 @@ impl<'s> Ownership<'_, 's> {
         ] {
             self.link(owner, field, target, None)?;
         }
-        self.part.apd_status = self.field(apd, "status")?.text.clone();
-        self.part.apd_schema_claim = self
-            .field(apd, "application_interpreted_model_schema_name")?
-            .text
-            .clone();
-        self.part.apd_year = self.field(apd, "application_protocol_year")?.text.clone();
+        if let Some(apd) = apd {
+            self.part.apd_status = self.field(apd, "status")?.text.clone();
+            self.part.apd_schema_claim = self
+                .field(apd, "application_interpreted_model_schema_name")?
+                .text
+                .clone();
+            self.part.apd_year = self.field(apd, "application_protocol_year")?.text.clone();
+        }
         for (r, typ, field, expected, clause) in [
             (
                 pc,
@@ -594,7 +726,7 @@ impl<'s> Ownership<'_, 's> {
             ),
         ] {
             if self.field(r, field)?.text != expected {
-                return Err(self.field_failure(
+                let failure = self.field_failure(
                     Status::Unsupported,
                     key,
                     r,
@@ -604,7 +736,11 @@ impl<'s> Ownership<'_, 's> {
                     expected,
                     &self.field(r, field)?.text,
                     "profile role guard",
-                ));
+                );
+                if key != "UnsupportedDefinitionContextRole" || !self.c.interoperability() {
+                    return Err(failure);
+                }
+                self.c.preserve(failure, Proof::ExistingMetadata)?;
             }
         }
         if [
@@ -658,7 +794,7 @@ impl<'s> Ownership<'_, 's> {
                 || self.c.target(products.first().ok_or_else(internal)?)? != product
                 || self.field(category, "name")?.text != "part"
             {
-                return Err(self.field_failure(
+                let failure = self.field_failure(
                     Status::Unsupported,
                     "UnsupportedProductCategory",
                     category,
@@ -668,7 +804,14 @@ impl<'s> Ownership<'_, 's> {
                     "part for this product",
                     &self.field(category, "name")?.text,
                     "profile category guard",
-                ));
+                );
+                if !self.c.interoperability()
+                    || products.len() != 1
+                    || self.c.target(products.first().ok_or_else(internal)?)? != product
+                {
+                    return Err(failure);
+                }
+                self.c.preserve(failure, Proof::ExistingMetadata)?;
             }
             self.role("category", category);
         }
@@ -775,37 +918,52 @@ impl<'s> Ownership<'_, 's> {
         }
         Ok(())
     }
-    fn reach(&mut self, mut pending: Vec<usize>, geometry_only: bool) -> Checked<Vec<bool>> {
-        let mut visited = vec![false; self.c.source.records().len()];
-        while let Some(r) = pending.pop() {
-            if *visited.get(r).ok_or_else(internal)? {
-                continue;
-            }
-            *visited.get_mut(r).ok_or_else(internal)? = true;
-            self.c.visit(self.c.record(r)?.span)?;
-            for index in self.outgoing.get(r).ok_or_else(internal)? {
-                let reference = self
-                    .c
-                    .source
-                    .references()
-                    .get(*index)
-                    .ok_or_else(internal)?;
-                self.c.visit(reference.span)?;
-                let bridge = geometry_only
-                    && self.is_a(r, "COMPOSITE_CURVE")
-                    && self.is_a(reference.target_record_index, "COMPOSITE_CURVE_SEGMENT");
-                if !geometry_only
-                    || self.is_a(reference.target_record_index, "REPRESENTATION_ITEM")
-                    || bridge
-                {
-                    pending.push(reference.target_record_index);
-                }
-            }
-        }
-        Ok(visited)
+    fn reach(&mut self, pending: Vec<usize>, geometry_only: bool) -> Checked<Vec<bool>> {
+        reach(self.c, &self.outgoing, pending, geometry_only)
     }
     fn roots(&self) -> Vec<usize> {
         self.part.roles.iter().map(|r| r.record_index).collect()
+    }
+    fn nondefining_residue(&mut self, r: usize, body_use: &[bool]) -> Checked<bool> {
+        self.c.visit(self.c.record(r)?.span)?;
+        if self.is_a(r, "STYLED_ITEM") {
+            let target = self.field(r, "item")?;
+            self.c.visit(target.span)?;
+            return Ok(body_use
+                .get(self.c.target(target)?)
+                .copied()
+                .unwrap_or(false));
+        }
+        let record = self.c.record(r)?;
+        let single = record.components.len() == 1;
+        let name = record.components.first().map(|c| c.name.as_str());
+        if (self.kind()? == "Ap203e2GeneralSource" || self.ap214())
+            && single
+            && name == Some("PRODUCT_CATEGORY")
+        {
+            return Ok(self.outgoing.get(r).ok_or_else(internal)?.is_empty());
+        }
+        let category_link = self.ap214() && single && name == Some("PRODUCT_CATEGORY_RELATIONSHIP");
+        if !category_link && !self.c.non_geometric_style(r) {
+            return Ok(false);
+        }
+        for index in self.outgoing.get(r).ok_or_else(internal)? {
+            let reference = self
+                .c
+                .source
+                .references()
+                .get(*index)
+                .ok_or_else(internal)?;
+            self.c.visit(reference.span)?;
+            if !(if category_link {
+                self.is_a(reference.target_record_index, "PRODUCT_CATEGORY")
+            } else {
+                self.c.non_geometric_style(reference.target_record_index)
+            }) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
     fn closure(&mut self) -> Checked<()> {
         self.outgoing = self.c.source.records().iter().map(|_| Vec::new()).collect();
@@ -864,7 +1022,24 @@ impl<'s> Ownership<'_, 's> {
                     .related
                     .push(self.c.record(*r)?.id_span);
             }
-            return Err(failure);
+            if !self.c.interoperability() {
+                return Err(failure);
+            }
+            let mut body_use = Vec::new();
+            if orphans.iter().any(|r| self.is_a(*r, "STYLED_ITEM")) {
+                let mut items = Vec::new();
+                for value in &self.field(self.rep()?, "items")?.children {
+                    items.push(self.c.target(value)?);
+                }
+                body_use = self.reach(items, true)?;
+            }
+            for r in &orphans {
+                if !self.nondefining_residue(*r, &body_use)? {
+                    return Err(failure);
+                }
+            }
+            self.c.outcome.qualification.unattached = orphans;
+            self.c.preserve(failure, Proof::ExistingMetadata)?;
         }
         let mut items = Vec::new();
         for item in &self.field(self.rep()?, "items")?.children {
@@ -899,6 +1074,8 @@ pub(super) fn check(c: &mut Checker<'_>, scope: GeometryScope) -> Checked<String
         outgoing: Vec::new(),
         presentation_roots: Vec::new(),
         representation_use: Vec::new(),
+        administrative: Vec::new(),
+        style_overrides: BTreeSet::new(),
     };
     ownership.product()?;
     ownership.closure()?;
@@ -907,7 +1084,47 @@ pub(super) fn check(c: &mut Checker<'_>, scope: GeometryScope) -> Checked<String
         .record(ownership.context.ok_or_else(internal)?)?
         .id
         .clone();
+    if ownership.c.interoperability() {
+        ownership.c.ownership_evidence = Some(OwnershipEvidence {
+            outgoing: ownership.outgoing,
+            presentation_roots: ownership.presentation_roots,
+            administrative: ownership.administrative,
+            style_overrides: ownership.style_overrides,
+        });
+    }
     ownership.c.part = Some(ownership.part);
     ownership.c.representation_use = Some(ownership.representation_use);
     Ok(context)
+}
+
+// Same traversal/edge order and charged visits for broad ownership and approval.
+// This shared helper avoids constructing a second interpreted reference graph.
+pub(super) fn reach(
+    c: &mut Checker<'_>,
+    outgoing: &[Vec<usize>],
+    mut pending: Vec<usize>,
+    geometry_only: bool,
+) -> Checked<Vec<bool>> {
+    let mut visited = vec![false; c.source.records().len()];
+    while let Some(r) = pending.pop() {
+        if *visited.get(r).ok_or_else(internal)? {
+            continue;
+        }
+        *visited.get_mut(r).ok_or_else(internal)? = true;
+        c.visit(c.record(r)?.span)?;
+        for index in outgoing.get(r).ok_or_else(internal)? {
+            let reference = c.source.references().get(*index).ok_or_else(internal)?;
+            c.visit(reference.span)?;
+            let bridge = geometry_only
+                && c.is_a(r, "COMPOSITE_CURVE")
+                && c.is_a(reference.target_record_index, "COMPOSITE_CURVE_SEGMENT");
+            if !geometry_only
+                || c.is_a(reference.target_record_index, "REPRESENTATION_ITEM")
+                || bridge
+            {
+                pending.push(reference.target_record_index);
+            }
+        }
+    }
+    Ok(visited)
 }

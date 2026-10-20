@@ -157,9 +157,10 @@ impl Ownership<'_, '_> {
                 self.c.visit(item.span)?;
                 let target = self.c.target(item)?;
                 let value_item = self.is_a(target, "VALUE_REPRESENTATION_ITEM");
-                if !self.is_a(target, "MEASURE_REPRESENTATION_ITEM")
-                    && !self.is_a(target, "DESCRIPTIVE_REPRESENTATION_ITEM")
-                    && !value_item
+                if !(self.is_a(target, "MEASURE_REPRESENTATION_ITEM")
+                    || self.is_a(target, "DESCRIPTIVE_REPRESENTATION_ITEM")
+                    || value_item
+                    || self.c.general_interoperability() && self.c.borrowed_real(target))
                 {
                     return Err(self.property_reject(
                         rep,
@@ -350,6 +351,7 @@ impl Ownership<'_, '_> {
                 return Err(self.record_failure("UnsupportedAdministrativeAttachment", r, ""));
             }
         }
+        self.administrative = attached;
         Ok(())
     }
     pub(super) fn category_hierarchy(&mut self) -> Checked<()> {

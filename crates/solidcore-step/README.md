@@ -22,10 +22,11 @@ or through `--source-semantics`, which runs the maintained strict source phases 
 C++ order. This still leaves planar/global rules, interoperability approval,
 continuous geometry evidence and exact native construction to be migrated.
 
-[Explicit carrier policies](CARRIER.md) now preserve opaque HEADER/DATA bytes and
-legacy level-1 interpretation receipts. They grant no semantic acceptance; the
-strict semantic checkpoints refuse legacy assumptions until the separate general
-interoperability approval is migrated.
+[Explicit carrier policies](CARRIER.md) preserve opaque HEADER/DATA bytes and
+legacy level-1 interpretation receipts. [Explicit source interoperability](INTEROPERABILITY.md)
+now retains the original admitted errors and schema assumptions only after the
+complete ownership and physical-exclusion proof. Default strict checkpoints
+continue to refuse legacy assumptions.
 
 ## Use
 
@@ -100,7 +101,7 @@ heals source defects, or relaxes quality thresholds.
 
 | Stage | Exit gate before claiming the capability |
 |---|---|
-| Full semantic qualification | Strict type/unit, geometry prerequisites and part/closure checkpoints are implemented; schema assumptions, planar/global rules and interoperability approval remain separate |
+| Full AP/geometry qualification | Fixed source checks, exact schema assumptions and explicit nongeometric approval are implemented; planar/global rules and continuous geometric evidence remain separate |
 | Planar qualification | Stable rule identities/order, budgets, oriented regions, shared edges, holes and source surface/solid roles pass the analytic fixtures |
 | Native adapter | Validate solidcore geometry/topology construction and failed-candidate cleanup; retain source-to-native correspondence and UV definitions |
 | General exact BRep | Analytic/NURBS, trims, pcurves, seams, degeneracies and assemblies meet their individual error and ownership contracts |

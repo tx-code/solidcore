@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Opt-in strict source checkpoint CLI; filesystem stays outside the library.
+//! Opt-in source checkpoint and interoperability CLI; host I/O stays outside the library.
 //! Upstream: `source/STEP_SEMANTICS/app/step_semantics.cpp` (source capture and checks).
-//! Deviations: only selected migrated phases; no geometry/native claims or
-//! interoperability/legacy-carrier interpretation options.
+//! Deviations: selected source phases and explicit interoperability remain separate
+//! from planar/global qualification and native construction.
 #![forbid(unsafe_code)]
 use solidcore_step::{
     inspect_with_options, report, semantics, DataStringPolicy, HeaderNamePolicy, InspectOptions,
@@ -14,7 +14,8 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE:&str="step-semantic-inspect --fixture-limits [--general-brep-source] [--source-semantics | --geometry-dependencies | --part-and-closure] [--preserve-opaque-header-name] [--preserve-opaque-data-strings] [--unit-context ID] [--dependency-visits N] [--input-bytes N] [--report-bytes N] FILE\n--source-semantics runs the maintained strict source phases, including geometry prerequisites and source ownership. Continuous geometry/planar qualification and native build are NOT RUN. Opaque source retention does not approve unavailable typed text.";
+const USAGE: &str = "step-semantic-inspect --fixture-limits [--general-brep-source] [--source-semantics | --geometry-dependencies | --part-and-closure] [--interop-nongeometric] [--interpret-unregistered-ap214-2010 | --interpret-ap214-name-only-as-2010] [--interpret-level1-as-corrected | --interpret-level1-with-lowercase-hex] [--preserve-opaque-header-name] [--preserve-opaque-data-strings] [--unit-context ID] [--dependency-visits N] [--preserved-diagnostics N] [source budget overrides] FILE\n--interop-nongeometric runs the complete source pipeline and final exclusion proof. Schema/carrier interpretations require explicit general interoperability.\nSource overrides: --input-bytes, --records, --values, --references, --nesting, --string-bytes, --record-bytes, --report-bytes, --id-digits.\nPlanar/global qualification, continuous geometry consistency, native build and repair are NOT RUN.";
+
 struct Request {
     path: PathBuf,
     source_limits: Limits,
@@ -62,6 +63,49 @@ fn arguments() -> Result<Option<Request>, ()> {
             source_options.data_string_policy = DataStringPolicy::PreserveOpaqueBytes;
             continue;
         }
+        if flags && arg == "--interop-nongeometric" {
+            options.source_policy = semantics::SourcePolicy::PreserveNonGeometric;
+            continue;
+        }
+        if flags
+            && matches!(
+                arg.to_str(),
+                Some("--interpret-unregistered-ap214-2010" | "--interpret-ap214-name-only-as-2010")
+            )
+        {
+            let interpretation = if arg == "--interpret-unregistered-ap214-2010" {
+                semantics::SchemaInterpretation::UnregisteredAp214As2010
+            } else {
+                semantics::SchemaInterpretation::Ap214NameOnlyAs2010
+            };
+            if options.schema_interpretation != semantics::SchemaInterpretation::DeclaredOnly
+                && options.schema_interpretation != interpretation
+            {
+                return Err(());
+            }
+            options.schema_interpretation = interpretation;
+            continue;
+        }
+        if flags
+            && matches!(
+                arg.to_str(),
+                Some("--interpret-level1-as-corrected" | "--interpret-level1-with-lowercase-hex")
+            )
+        {
+            let interpretation = if arg == "--interpret-level1-as-corrected" {
+                solidcore_step::CarrierInterpretation::Level1AsCorrectedEncoding
+            } else {
+                solidcore_step::CarrierInterpretation::Level1AsCorrectedEncodingWithLowercaseHex
+            };
+            if source_options.carrier_interpretation
+                != solidcore_step::CarrierInterpretation::DeclaredOnly
+                && source_options.carrier_interpretation != interpretation
+            {
+                return Err(());
+            }
+            source_options.carrier_interpretation = interpretation;
+            continue;
+        }
         if flags && arg == "--part-and-closure" {
             options.check_part_and_closure = true;
             continue;
@@ -90,8 +134,16 @@ fn arguments() -> Result<Option<Request>, ()> {
             let value = number(&args.next().ok_or(())?)?;
             match arg.to_str().ok_or(())? {
                 "--dependency-visits" => limits.dependency_visits = value,
+                "--preserved-diagnostics" => limits.preserved_diagnostics = value,
                 "--input-bytes" => source_limits.input_bytes = value,
                 "--report-bytes" => source_limits.report_bytes = value,
+                "--records" => source_limits.records = value,
+                "--values" => source_limits.values = value,
+                "--references" => source_limits.references = value,
+                "--nesting" => source_limits.nesting = value,
+                "--string-bytes" => source_limits.string_bytes = value,
+                "--record-bytes" => source_limits.record_bytes = value,
+                "--id-digits" => source_limits.id_digits = value,
                 _ => return Err(()),
             }
         } else if path.replace(PathBuf::from(arg)).is_some() {
@@ -99,6 +151,17 @@ fn arguments() -> Result<Option<Request>, ()> {
         }
     }
     if !explicit {
+        return Err(());
+    }
+    // Preserve Check's invalid-request precedence even if capture would fail.
+    // The library repeats this guard for direct callers and immutable receipts.
+    let assumption = options.schema_interpretation != semantics::SchemaInterpretation::DeclaredOnly
+        || source_options.carrier_interpretation
+            != solidcore_step::CarrierInterpretation::DeclaredOnly;
+    if assumption
+        && !(options.source_policy == semantics::SourcePolicy::PreserveNonGeometric
+            && options.geometry_scope == semantics::GeometryScope::GeneralBrep)
+    {
         return Err(());
     }
     Ok(Some(Request {
@@ -154,15 +217,21 @@ fn run() -> u8 {
         return 6;
     }
     match outcome.status {
-        semantics::Status::Checked => 0,
+        semantics::Status::Checked | semantics::Status::CheckedWithDiagnostics => 0,
         semantics::Status::Deferred => {
-            if request.options.check_part_and_closure {
+            if request.options.check_part_and_closure
+                || request.options.source_policy == semantics::SourcePolicy::PreserveNonGeometric
+            {
                 7
             } else {
                 0
             }
         }
-        semantics::Status::SourceFailure if request.options.check_part_and_closure => {
+        semantics::Status::SourceFailure
+            if request.options.check_part_and_closure
+                || request.options.source_policy
+                    == semantics::SourcePolicy::PreserveNonGeometric =>
+        {
             match source.status {
                 solidcore_step::Status::Rejected => 1,
                 solidcore_step::Status::Unsupported => 2,

@@ -24,9 +24,32 @@ def invoke(binary, path, flags):
     return result.returncode, json.loads(result.stdout)
 
 
-def direct_source(cpp, rust, path, cpp_flags, rust_flags):
-    c_code, c = invoke(cpp, path, cpp_flags)
-    r_code, r = invoke(rust, path, rust_flags)
+def diagnostic_facts(values):
+    diagnostics = []
+    for d in values:
+        source = {key: d[key] for key in ['key', 'stage', 'record_id', 'component',
+                                         'parameter_path', 'target_id']}
+        source['primary'] = d['span']
+        source['related'] = [related['span'] for related in d['related']]
+        diagnostics.append(dict(source=source, **{key: d[key] for key in
+            ['classification', 'field', 'declared_in', 'declared_type', 'expected', 'actual', 'responsibility']}))
+        # The fixed full C++ report uses Writer::String (byte projection) for
+        # diagnostic std::strings. Decoded text must be compared as UTF-8; raw
+        # lexeme diagnostics keep their byte projection, including opaque bytes.
+        # This maps JSON representation only, never a diagnostic identity/value.
+        for field in ['expected', 'actual', 'responsibility']:
+            if field == 'actual' and d['key'] in {'BooleanValueInvalid', 'LogicalValueInvalid', 'DerivedSlotMarkerRequired'}:
+                continue
+            diagnostics[-1][field] = d[field].encode('latin1').decode('utf-8')
+    return norm(diagnostics)
+
+
+def direct_source(cpp, rust, path, cpp_flags, rust_flags, observations=None):
+    if observations is None:
+        c_code, c = invoke(cpp, path, cpp_flags)
+        r_code, r = invoke(rust, path, rust_flags)
+    else:
+        (c_code, c), (r_code, r) = observations
     assert c_code == r_code and c['status'] == r['status']
     for c_key, r_key in [('schema_binding', 'binding'), ('type_fields', 'types'),
                          ('single_part_profile', 'part'), ('si_units', 'si_units')]:
@@ -40,15 +63,7 @@ def direct_source(cpp, rust, path, cpp_flags, rust_flags):
         assert r['property_attachment_checks']==stats.get('property_attachment_checks',0)
     assert c['statistics']['dependency_visits'] == r['dependency_visits']
     assert selection(c['schema_selection']) == selection(r['schema_selection'])
-    diagnostics = []
-    for d in c['diagnostics']:
-        source = {key: d[key] for key in ['key', 'stage', 'record_id', 'component',
-                                         'parameter_path', 'target_id']}
-        source['primary'] = d['span']
-        source['related'] = [related['span'] for related in d['related']]
-        diagnostics.append(dict(source=source, **{key: d[key] for key in
-            ['classification', 'field', 'declared_in', 'declared_type', 'expected', 'actual', 'responsibility']}))
-    assert norm(diagnostics) == norm(r['diagnostics']), 'direct P0 diagnostic contract differs'
+    assert diagnostic_facts(c['diagnostics']) == norm(r['diagnostics']), 'direct source diagnostic contract differs'
     if c['snapshot'] is None:
         assert r['snapshot'] is None
         return
@@ -70,9 +85,10 @@ def direct_source(cpp, rust, path, cpp_flags, rust_flags):
         return None if index is None else rs['records'][index]['id']
     assert list(cs['part']['roles'].items()) == [(role['name'], source_id(role['record_index'])) for role in part['roles']]
     assert cs['part']['source_shape_role'] == part['shape_role']
-    assert cs['part']['apd_status'] == part['apd_status']
-    assert cs['part']['apd_schema_claim'] == part['apd_schema_claim']
-    assert cs['part']['apd_year_lexeme'] == part['apd_year']
+    present = part['application_protocol_present']
+    assert cs['part']['apd_status'] == (part['apd_status'] if present else None)
+    assert cs['part']['apd_schema_claim'] == (part['apd_schema_claim'] if present else None)
+    assert cs['part']['apd_year_lexeme'] == (part['apd_year'] if present else None)
     assert cs['part']['shape_geometry_verified'] is False
     assert cs['part'].get('property_attachments',[])==[{key:source_id(value) for key,value in item.items()} for item in part['property_attachments']]
     if 'deferred_region_faces' in cs['part']:

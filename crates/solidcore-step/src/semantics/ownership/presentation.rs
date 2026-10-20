@@ -104,6 +104,14 @@ impl Ownership<'_, '_> {
                     self.c.visit(ancestor.span)?;
                     current = self.c.target(ancestor)?;
                     if !self.is_a(current, "STYLED_ITEM") {
+                        if self.kind()? == "Ap214MbxSource"
+                            && self.c.interoperability()
+                            && self.is_a(current, "CLOSED_SHELL")
+                            && used.get(current) == Some(&true)
+                        {
+                            self.style_overrides.insert(owner);
+                            break;
+                        }
                         return Err(self.field_failure(
                             Status::Unsupported,
                             "UnsupportedPresentationAttachment",

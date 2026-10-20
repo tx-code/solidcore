@@ -59,18 +59,31 @@ fn report_limit_and_semantic_budget_never_publish_a_partial_typed_snapshot() {
 }
 
 #[test]
-fn invalid_requests_and_unmigrated_interpretation_flags_are_refused() {
+fn invalid_requests_and_unqualified_interpretation_flags_are_refused() {
     for options in [
         vec![],
         vec!["--fixture-limits", "--unit-context", "1"],
         vec!["--fixture-limits", "--unit-context", "012"],
         vec!["--fixture-limits", "--dependency-visits", "-1"],
-        vec!["--fixture-limits", "--interop-nongeometric"],
+        vec!["--fixture-limits", "--unknown-policy"],
         vec!["--fixture-limits", "--interpret-unregistered-ap214-2010"],
         vec!["--fixture-limits", "--interpret-level1-as-corrected"],
         vec!["--fixture-limits", "--interpret-level1-with-lowercase-hex"],
     ] {
         let output = invoke(&options).unwrap();
+        assert_eq!(output.status.code(), Some(64));
+        assert!(output.stdout.is_empty());
+    }
+    let missing = fixture().join("absent.step");
+    for flag in [
+        "--interpret-level1-as-corrected",
+        "--interpret-unregistered-ap214-2010",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_step-semantic-inspect"))
+            .args(["--fixture-limits", flag])
+            .arg(&missing)
+            .output()
+            .unwrap();
         assert_eq!(output.status.code(), Some(64));
         assert!(output.stdout.is_empty());
     }
@@ -120,6 +133,56 @@ fn opaque_capture_cannot_turn_unavailable_product_text_into_checked_ownership() 
             assert_eq!(json["part"], "Passed");
         }
     }
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(directory).unwrap();
+}
+
+#[test]
+fn explicit_schema_cli_preserves_unverified_identity_and_refuses_zero_capacity() {
+    let directory =
+        std::env::temp_dir().join(format!("solidcore-schema-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("public.step");
+    let bytes = std::fs::read_to_string(fixture()).unwrap().replace(
+        "AP203_CONFIGURATION_CONTROLLED_3D_DESIGN_OF_MECHANICAL_PARTS_AND_ASSEMBLIES_MIM_LF {1 0 10303 403 2 1 2}",
+        "AUTOMOTIVE_DESIGN {1 0 10303 214 3 1 1 1}");
+    std::fs::write(&path, &bytes).unwrap();
+    let command = [
+        "--fixture-limits",
+        "--general-brep-source",
+        "--interop-nongeometric",
+        "--interpret-unregistered-ap214-2010",
+    ];
+    let good = Command::new(env!("CARGO_BIN_EXE_step-semantic-inspect"))
+        .args(command)
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert_eq!(good.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_slice(&good.stdout).unwrap();
+    assert_eq!(json["status"], "CheckedWithDiagnostics");
+    assert_eq!(json["binding"], "InterpretedUnverified");
+    assert_eq!(json["source_binding_verified"], false);
+    assert_eq!(
+        json["interpretation_diagnostics"][0]["source"]["key"],
+        "UnsupportedSchemaBinding"
+    );
+    assert_eq!(json["source"]["raw"], bytes);
+    assert_eq!(json["native_build"], "NotRun");
+    let limited = Command::new(env!("CARGO_BIN_EXE_step-semantic-inspect"))
+        .args(command)
+        .args(["--preserved-diagnostics", "0"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert_eq!(limited.status.code(), Some(3));
+    let json: serde_json::Value = serde_json::from_slice(&limited.stdout).unwrap();
+    assert!(json["snapshot"].is_null());
+    assert!(json["schema_selection"]["qualified"].is_null());
+    assert_eq!(
+        json["diagnostics"][0]["source"]["key"],
+        "PreservedDiagnosticLimit"
+    );
     std::fs::remove_file(path).unwrap();
     std::fs::remove_dir(directory).unwrap();
 }

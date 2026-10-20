@@ -16,8 +16,8 @@ accepts three independent explicit choices:
 The source CLI accepts `--preserve-opaque-header-name`,
 `--preserve-opaque-data-strings` and one of `--interpret-level1-as-corrected` /
 `--interpret-level1-with-lowercase-hex`. Conflicting choices are invalid arguments.
-The semantic CLI does not enable legacy interpretation: its required general
-interoperability approval is still unmigrated.
+The semantic CLI enables legacy interpretation only with explicit general
+[source interoperability](INTEROPERABILITY.md), including its final approval.
 
 ## Source and evidence ownership
 
@@ -59,15 +59,15 @@ retain their own immutable receipt.
 
 ## Downstream boundary and validation
 
-Current semantic checkpoints are strict. They refuse any requested or owner-applied
+Default semantic checkpoints are strict. They refuse any requested or owner-applied
 legacy assumption as `InvalidRequest`, including enabled-but-unused options:
 original `STEP_SEMANTICS::Check` requires explicit general interoperability. C++
 throws an argument error; Rust returns the structured
 `UnverifiedCarrierRequiresInteroperability` request diagnostic. Opaque DATA in a
 declared STRING field retains `OpaqueDataTextUnestablished` and its original
-unsupported classification/position; it cannot become an accepted product ID or
-manufacture ownership. An opaque HEADER filename remains metadata. Field-specific
-nongeometric preservation proofs remain separate work.
+unsupported classification/position. The explicit interoperability path may
+retain it only after its exact field/ownership proof; text stays unavailable and
+cannot manufacture an owner. An opaque HEADER filename remains metadata.
 
 Independent synthetic Rust tests cover byte recovery, exact policy boundaries,
 failure precedence, default report compatibility, immutable receipts, completed

@@ -475,7 +475,8 @@ fn exact_visit_budget_and_explicit_context_selection_never_default() {
         semantics::check(
             &source,
             semantics::Limits {
-                dependency_visits: visits
+                dependency_visits: visits,
+                preserved_diagnostics: 1024,
             },
             &options
         )
@@ -486,6 +487,7 @@ fn exact_visit_budget_and_explicit_context_selection_never_default() {
         &source,
         semantics::Limits {
             dependency_visits: visits - 1,
+            preserved_diagnostics: 1024,
         },
         &options,
     );
@@ -497,6 +499,7 @@ fn exact_visit_budget_and_explicit_context_selection_never_default() {
         &source,
         semantics::Limits {
             dependency_visits: 10_000_001,
+            preserved_diagnostics: 1024,
         },
         &options,
     );

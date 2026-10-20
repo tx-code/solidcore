@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Strict typed source mapping and physical-context prerequisites.
 //! Upstream: `source/STEP_SEMANTICS/src/StepSemantics.cpp` (Binding/Mapping/Fields/UnitContext).
-//! Rust Checker corresponds to the C++ Checker; no part/geometry/interop phases run.
+//! Rust Checker corresponds to the C++ Checker with explicit phase selection.
 //! Deviations: checked indexing, owning immutable source sharing and explicit
 //! checkpoint selection; nested aggregates keep the source depth ceiling.
 
@@ -66,6 +66,9 @@ pub(super) struct Checker<'a> {
     pub units: Units,
     pub part: Option<super::Part>,
     pub representation_use: Option<Vec<bool>>,
+    pub scope: super::GeometryScope,
+    pub pending: Vec<super::interop::Pending>,
+    pub ownership_evidence: Option<super::interop::OwnershipEvidence>,
     pub outcome: Outcome,
 }
 impl<'a> Checker<'a> {
@@ -115,7 +118,7 @@ impl<'a> Checker<'a> {
     pub fn raw(&self, span: Span) -> String {
         self.source
             .raw(span)
-            .map_or_else(String::new, |v| String::from_utf8_lossy(v).into_owned())
+            .map_or_else(String::new, |v| v.iter().copied().map(char::from).collect())
     }
     fn borrowed(&self, r: usize) -> bool {
         self.catalog.is_some_and(|c| c.kind == "Ap203N916Source")
@@ -315,8 +318,10 @@ impl<'a> Checker<'a> {
             ));
         }
         let identity = selection.identifiers.first().ok_or_else(internal)?;
-        let Some(profile) = selection.qualified.clone() else {
-            return Err(self.failure(
+        let profile = if let Some(profile) = selection.qualified.clone() {
+            profile
+        } else {
+            let failure = self.failure(
                 Status::Unsupported,
                 "UnsupportedSchemaBinding",
                 "D2",
@@ -328,7 +333,38 @@ impl<'a> Checker<'a> {
                 schema::AP203_EXPECTED,
                 &identity.literal,
                 "profile registry; no APD/year inference",
-            ));
+            );
+            let Some(profile) = schema::explicit(selection, options.schema_interpretation) else {
+                return Err(failure);
+            };
+            if self.outcome.limits.preserved_diagnostics == 0 {
+                return Err(self.failure(
+                    Status::ResourceLimit,
+                    "PreservedDiagnosticLimit",
+                    "D2",
+                    "Source interpretation diagnostic capacity exceeded",
+                    identity.span,
+                    None,
+                    0,
+                    &[],
+                    "",
+                    "",
+                    "",
+                ));
+            }
+            self.outcome
+                .qualification
+                .interpretation
+                .push(failure.diagnostic);
+            self.outcome.qualification.applied = options.schema_interpretation;
+            let selection = self
+                .outcome
+                .schema_selection
+                .as_mut()
+                .ok_or_else(internal)?;
+            selection.qualified = Some(profile.clone());
+            selection.applied_interpretation = options.schema_interpretation;
+            profile
         };
         self.catalog = CATALOGS.iter().find(|c| c.kind == profile.kind);
         self.profile = Some(profile);
@@ -522,7 +558,7 @@ impl<'a> Checker<'a> {
             for r in self.population(name)? {
                 let record = self.record(r)?;
                 if *name == "REAL_REPRESENTATION_ITEM" {
-                    return Err(self.failure(
+                    let failure = self.failure(
                         Status::Unsupported,
                         "UnsupportedEntityType",
                         "D2",
@@ -534,13 +570,24 @@ impl<'a> Checker<'a> {
                         "registered profile entity",
                         name,
                         "closed type guard; unknown content is not skipped",
-                    ));
+                    );
+                    if !self.general_interoperability() {
+                        return Err(failure);
+                    }
+                    self.preserve(failure, super::interop::Proof::ForeignRealItem)?;
+                    continue;
                 }
                 if kind == "Ap203N916Source" && !record.components.iter().any(|c| c.name == *name) {
                     continue;
                 }
                 self.visit(record.span)?;
-                return Err(self.failure(Status::Unsupported,"UnsupportedEntityType","D2","Required content is outside the selected source declarations",record.span,Some(r),0,&[],if kind=="Ap203N916Source"{"modified N916 declaration"}else{"AP214E3_2010.exp declaration"},name,if kind=="Ap203N916Source"{"modified N916 source type membership; borrowed transport does not admit an entity"}else{"AP214 source type membership"}));
+                let failure = self.failure(Status::Unsupported,"UnsupportedEntityType","D2","Required content is outside the selected source declarations",record.span,Some(r),0,&[],if kind=="Ap203N916Source"{"modified N916 declaration"}else{"AP214E3_2010.exp declaration"},name,if kind=="Ap203N916Source"{"modified N916 source type membership; borrowed transport does not admit an entity"}else{"AP214 source type membership"});
+                if !self.general_interoperability()
+                    || (kind == "Ap203N916Source" && *name != "PRESENTATION_LAYER_ASSIGNMENT")
+                {
+                    return Err(failure);
+                }
+                self.preserve(failure, super::interop::Proof::ExistingMetadata)?;
             }
         }
         Ok(())
@@ -578,7 +625,7 @@ impl<'a> Checker<'a> {
     ) -> Checked<()> {
         let catalog = self.schema()?;
         if kind == Kind::String && v.kind == ValueKind::OpaqueString {
-            return Err(self.failure(
+            let failure = self.failure(
                 Status::Unsupported,
                 "OpaqueDataTextUnestablished",
                 "D1",
@@ -590,7 +637,37 @@ impl<'a> Checker<'a> {
                 f.declared_type,
                 "OpaqueString",
                 "project DATA carrier policy; not established source STRING semantics",
-            ));
+            );
+            let issue = &failure.diagnostic;
+            let display = (issue.declared_in == "PRODUCT"
+                && matches!(issue.field.as_str(), "id" | "name"))
+                || (issue.declared_in == "PRESENTATION_LAYER_ASSIGNMENT" && issue.field == "name");
+            let identity = issue.field == "id"
+                && matches!(
+                    issue.declared_in.as_str(),
+                    "PRODUCT_DEFINITION_FORMATION" | "PRODUCT_DEFINITION"
+                );
+            let caption = issue.declared_in == "REPRESENTATION_ITEM"
+                && issue.field == "name"
+                && self.is_a(r, "MANIFOLD_SOLID_BREP");
+            let administrative = (issue.declared_in == "APPROVAL" && issue.field == "level")
+                || (issue.declared_in == "PERSON" && issue.field == "id");
+            if !self.general_interoperability()
+                || !(display || identity || caption || administrative)
+                || path.len() != 1
+            {
+                return Err(failure);
+            }
+            let proof = if display {
+                super::interop::Proof::OpaqueDisplayText
+            } else if identity {
+                super::interop::Proof::OpaquePartIdentity
+            } else if caption {
+                super::interop::Proof::OpaqueShapeCaption
+            } else {
+                super::interop::Proof::OpaqueAdministrativeLabel
+            };
+            return self.preserve(failure, proof);
         }
         let valid = match kind {
             Kind::String => v.kind == ValueKind::String,
@@ -672,7 +749,20 @@ impl<'a> Checker<'a> {
                         );
                         failure.diagnostic.source.target_id.clone_from(&v.text);
                         failure.diagnostic.source.related.push(record.id_span);
-                        return Err(failure);
+                        let approval = catalog.kind == "Ap203e2GeneralSource"
+                            && f.declared_type == "APPROVED_ITEM"
+                            && self.is_a(r, "CC_DESIGN_APPROVAL")
+                            && (self.is_a(target, "PRODUCT_DEFINITION")
+                                || self.is_a(target, "PRODUCT_DEFINITION_FORMATION"));
+                        let style = catalog.kind == "Ap214MbxSource"
+                            && self.scope == super::GeometryScope::GeneralBrep
+                            && f.name == "over_ridden_style"
+                            && self.is_a(r, "OVER_RIDING_STYLED_ITEM")
+                            && self.is_a(target, "CLOSED_SHELL");
+                        if !self.interoperability() || (!approval && !style) {
+                            return Err(failure);
+                        }
+                        self.preserve(failure, super::interop::Proof::ExistingMetadata)?;
                     }
                     true
                 } else {
@@ -921,7 +1011,7 @@ impl<'a> Checker<'a> {
                     let path = [p + 1];
                     if a.derived_slot {
                         if v.kind != ValueKind::Derived {
-                            return Err(self.failure(
+                            let failure = self.failure(
                                 Status::Rejected,
                                 "DerivedSlotMarkerRequired",
                                 "D1",
@@ -933,7 +1023,18 @@ impl<'a> Checker<'a> {
                                 "*",
                                 &self.raw(v.span),
                                 "explicit-to-derived redeclaration",
-                            ));
+                            );
+                            if !self.interoperability()
+                                || !catalog.ap214()
+                                || f.name != "dimensions"
+                                || v.kind != ValueKind::Reference
+                                || !self.is_a(r, "CONVERSION_BASED_UNIT")
+                                || !self.is_a(r, "MASS_UNIT")
+                            {
+                                return Err(failure);
+                            }
+                            self.scalar(v, Kind::Reference, f, r, c, &path)?;
+                            self.preserve(failure, super::interop::Proof::ExistingMetadata)?;
                         }
                         continue;
                     }
@@ -941,7 +1042,7 @@ impl<'a> Checker<'a> {
                         if f.optional {
                             continue;
                         }
-                        return Err(self.failure(
+                        let failure = self.failure(
                             Status::Rejected,
                             "RequiredAttributeMissing",
                             "D1",
@@ -953,12 +1054,36 @@ impl<'a> Checker<'a> {
                             f.declared_type,
                             "$",
                             &format!("{} required attribute", self.authority(r)),
-                        ));
+                        );
+                        let label = f.name == "name"
+                            && f.kind == Kind::String
+                            && (self.is_a(r, "REPRESENTATION_ITEM")
+                                || self.is_a(r, "REPRESENTATION")
+                                || (self.non_geometric_style(r)
+                                    && !self.is_a(r, "PRE_DEFINED_ITEM")));
+                        let rendering = f.name == "rendering_method"
+                            && f.kind == Kind::Enumeration
+                            && self.is_a(r, "SURFACE_STYLE_RENDERING");
+                        if !self.interoperability() || (!label && !rendering) {
+                            return Err(failure);
+                        }
+                        self.preserve(failure, super::interop::Proof::ExistingMetadata)?;
+                        continue;
                     }
                     if f.kind == Kind::Aggregate {
                         self.aggregate(v, f, r, c, &path, a.declared_in, 0)?;
-                    } else {
-                        self.scalar(v, f.kind, f, r, c, &path)?;
+                    } else if let Err(failure) = self.scalar(v, f.kind, f, r, c, &path) {
+                        if !self.general_interoperability()
+                            || !catalog.ap214()
+                            || !self.is_a(r, "CURVE_STYLE")
+                            || f.name != "curve_width"
+                            || f.kind != Kind::SizeSelect
+                            || v.kind != ValueKind::String
+                            || failure.diagnostic.source.key != "AttributeTypeMismatch"
+                        {
+                            return Err(failure);
+                        }
+                        self.preserve(failure, super::interop::Proof::CurveStyleWidth)?;
                     }
                 }
             }
@@ -1190,6 +1315,11 @@ impl<'a> Checker<'a> {
                 self.outcome.si_units = "Deferred";
             }
         }
+        if self.interoperability() {
+            let result = self.approve_preserved();
+            self.outcome.interoperability = progress(&result);
+            result?;
+        }
         Ok(())
     }
 }
@@ -1206,7 +1336,16 @@ fn progress<T>(result: &Checked<T>) -> &'static str {
     }
 }
 pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> Outcome {
+    let mut effective = options.clone();
+    // Original Check always executes the full source pipeline for this policy;
+    // no shortened checkpoint may publish provisionally preserved source errors.
+    if options.source_policy == super::SourcePolicy::PreserveNonGeometric {
+        effective.check_geometry_dependencies = true;
+        effective.check_part_and_closure = true;
+    }
+    let options = &effective;
     let mut outcome = Outcome {
+        qualification: super::interop::Qualification::new(options),
         source_capture: source.captured.clone(),
         check_part_and_closure: options.check_part_and_closure,
         check_geometry_dependencies: options.check_geometry_dependencies,
@@ -1220,6 +1359,7 @@ pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> O
         geometry_dependency_checks: super::GeometryChecks::default(),
         si_units: "NotRun",
         part: "NotRun",
+        interoperability: "NotRun",
         property_attachment_checks: 0,
         dependency_visits: 0,
         unit_dependency_checks: UnitChecks::default(),
@@ -1227,18 +1367,42 @@ pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> O
         diagnostics: Vec::new(),
     };
     // STEP_SEMANTICS::Check requires explicit general interoperability even for
-    // an enabled-but-unused legacy option. This strict checkpoint has no such
-    // approval phase. Consult the immutable owner, never resettable notices.
-    if source.options().carrier_interpretation != crate::CarrierInterpretation::DeclaredOnly
+    // an enabled-but-unused legacy option. Consult the immutable owner, never
+    // resettable notices; shortened strict checkpoints cannot acquire approval.
+    let general_interop = options.source_policy == super::SourcePolicy::PreserveNonGeometric
+        && options.geometry_scope == super::GeometryScope::GeneralBrep;
+    if options.schema_interpretation != super::SchemaInterpretation::DeclaredOnly
+        && !general_interop
+    {
+        outcome.status = Status::InvalidRequest;
+        outcome.diagnostics.push(
+            simple_failure(
+                Status::InvalidRequest,
+                "UnverifiedSchemaRequiresInteroperability",
+                "InvalidRequest",
+                "Unverified schema interpretation requires explicit general interoperability",
+            )
+            .diagnostic,
+        );
+        return outcome;
+    }
+    if (source.options().carrier_interpretation != crate::CarrierInterpretation::DeclaredOnly
         || source
             .source
             .as_ref()
-            .is_some_and(|s| s.carrier_assumption().is_some())
+            .is_some_and(|s| s.carrier_assumption().is_some()))
+        && !general_interop
     {
         outcome.status = Status::InvalidRequest;
-        outcome.diagnostics.push(simple_failure(Status::InvalidRequest,
-            "UnverifiedCarrierRequiresInteroperability", "InvalidRequest",
-            "Unverified carrier interpretation requires explicit general interoperability, which is not migrated yet").diagnostic);
+        outcome.diagnostics.push(
+            simple_failure(
+                Status::InvalidRequest,
+                "UnverifiedCarrierRequiresInteroperability",
+                "InvalidRequest",
+                "Unverified carrier interpretation requires explicit general interoperability",
+            )
+            .diagnostic,
+        );
         return outcome;
     }
     let Some(raw) = source
@@ -1283,9 +1447,14 @@ pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> O
         units: Units::default(),
         part: None,
         representation_use: None,
+        scope: options.geometry_scope,
+        pending: Vec::new(),
+        ownership_evidence: None,
         outcome,
     };
-    match checker.run(options) {
+    let result = checker.run(options);
+    checker.publish_qualification_progress();
+    match result {
         Ok(()) => {
             checker.outcome.status = if (options.physical_context.is_some()
                 || options.check_part_and_closure)
@@ -1296,9 +1465,17 @@ pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> O
             } else {
                 Status::Checked
             };
+            if checker.outcome.status == Status::Checked
+                && (!checker.outcome.preserved_diagnostics().is_empty()
+                    || !checker.outcome.interpretation_diagnostics().is_empty()
+                    || raw.carrier_assumption().is_some())
+            {
+                checker.outcome.status = Status::CheckedWithDiagnostics;
+            }
             if let (Some(catalog), Some(profile)) = (checker.catalog, checker.profile.take()) {
                 checker.outcome.snapshot = Some(Snapshot {
                     data: Arc::new(Data {
+                        qualification: checker.outcome.qualification.clone(),
                         source: raw.clone(),
                         catalog,
                         profile,

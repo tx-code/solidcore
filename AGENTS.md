@@ -15,6 +15,15 @@ plan/                  modules.toml (units, claims), STATUS.md, findings.md, ord
 
 ## 1. Hard rules
 
+**Complete fork migration.** When porting the maintained C++ fork, follow the
+[full coverage ledger](docs/FORK_MIGRATION.md). The user-authorized scope includes
+all current SDK implementations, bindings and tools, not just STEP inspection or
+the kernel pin. Corresponding fork code/tests and `SmPyLib`/`SmPyDevLib`/GUI sources
+are authorized references for this migration; the exclusions below continue to
+apply to removed USD/OCCT layers and copyleft code. Preserve live C++ work and
+keep private models, inventories and derived content local. A passing increment
+does not complete the full migration. Follow the user's no-PR delivery policy.
+
 **STEP migration (this fork).** For `crates/solidcore-step`, read its
 [contract and migration stages](crates/solidcore-step/README.md). The additional
 authorized references are the usd-brep STEP fork's `source/STEP_SOURCE`,
@@ -30,7 +39,7 @@ belongs to the opt-in CLI. Cite the owning contract beside critical logic.
 `upstream/tests/SM_API_test`, `upstream/tests/prog_test`, `upstream/TestFiles/pt_TestFiles`,
 `upstream/AGENTS.md`, `upstream/.agents/` (skip any file about OCCT or USD). Never open,
 read or build `OCCT_BREP_*`, `SM_API_USD`, `BREP_SM_USD`, `BREP_USD_DATA`, `HYDRA_USD_BREP`,
-`USD_BREP_UTILS`, `schema`, `SmPyLib`, `SmPyDevLib` or `proposals/`. Never read GPL/LGPL code
+`USD_BREP_UTILS`, `schema` or `proposals/`. Never read GPL/LGPL code
 anywhere (including dependencies; `deny.toml` bans copyleft crates).
 
 **Library code (`crates/solidcore`).**

@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE:&str="step-semantic-inspect --fixture-limits [--general-brep-source] [--part-and-closure] [--unit-context ID] [--dependency-visits N] [--input-bytes N] [--report-bytes N] FILE\nStrict source checkpoint; --part-and-closure proves selected source identities and derives their unit context. Geometry and native build are NOT RUN.";
+const USAGE:&str="step-semantic-inspect --fixture-limits [--general-brep-source] [--source-semantics | --geometry-dependencies | --part-and-closure] [--unit-context ID] [--dependency-visits N] [--input-bytes N] [--report-bytes N] FILE\n--source-semantics runs the maintained strict source phases, including geometry prerequisites and source ownership. Continuous geometry/planar qualification and native build are NOT RUN.";
 struct Request {
     path: PathBuf,
     source_limits: Limits,
@@ -50,6 +50,15 @@ fn arguments() -> Result<Option<Request>, ()> {
             continue;
         }
         if flags && arg == "--part-and-closure" {
+            options.check_part_and_closure = true;
+            continue;
+        }
+        if flags && arg == "--geometry-dependencies" {
+            options.check_geometry_dependencies = true;
+            continue;
+        }
+        if flags && arg == "--source-semantics" {
+            options.check_geometry_dependencies = true;
             options.check_part_and_closure = true;
             continue;
         }

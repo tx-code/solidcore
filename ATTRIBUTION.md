@@ -43,6 +43,14 @@ capture adapter; their original C++ observations/assertions are not changed or
 used as Rust expected values. Their Python product/evidence implementation is
 not a Rust runtime dependency or a Python translator port. Captures remain local.
 
+The fixed source geometry prerequisite pass ports
+`source/STEP_SEMANTICS/src/StepGeometryDependencies.cpp` from the same STEP fork
+snapshot. Its spline/weight constraints, curve graphs and representation member
+predicates retain the fixed artifact responsibilities in source diagnostics.
+The expanded complete-fork goal also authorizes maintained SDK/binding/tool
+references as recorded in `docs/FORK_MIGRATION.md`; those layers remain pending
+until their real implementations and parity evidence exist.
+
 The three STEP inputs under `crates/solidcore-step/tests/fixtures` are public
 analytic design fixtures S203-P01, S203-P04 and S203-P05 from the STEP fork's
 `tools/step_import_validation/corpus/ap203e2-planar/v1/cases`; they contain no

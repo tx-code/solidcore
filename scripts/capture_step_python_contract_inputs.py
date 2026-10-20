@@ -22,6 +22,8 @@ MODULES = [
     'test_supporting_geometry', 'test_wireframe', 'test_value_item',
     'test_ap203_general', 'test_ap203_n916', 'test_composite_curve',
 ]
+GEOMETRY_MODULES = ['test_ap214_geometry', 'test_rational', 'test_trimmed',
+                    'test_surface_role', 'test_ap214_angles', 'test_ap214_entities']
 
 
 def main():
@@ -29,6 +31,8 @@ def main():
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--module', choices=MODULES+GEOMETRY_MODULES, action='append',
+                        help='Run only explicitly selected public contract modules')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     output = args.output.resolve()
@@ -52,7 +56,7 @@ def main():
         return original_run(command, *positional, **keywords)
 
     suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromName(
-        'tools.step_semantic_validation.tests.' + module) for module in MODULES)
+        'tools.step_semantic_validation.tests.' + module) for module in (args.module or MODULES))
     subprocess.run = record
     try:
         result = unittest.TextTestRunner(verbosity=1).run(suite)

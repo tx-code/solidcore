@@ -5,8 +5,8 @@
 //! Deviations: explicit checkpoint scope; no geometry/native claims. Reuses the
 //! source writer budget and traverses records without a second report object graph.
 use super::{
-    Attribute, Diagnostic, Limits, Outcome, ReportError, SchemaSelection, Snapshot, Status,
-    UnitChecks, Units,
+    Attribute, Diagnostic, GeometryChecks, Limits, Outcome, ReportError, SchemaSelection, Snapshot,
+    Status, UnitChecks, Units,
 };
 use crate::Outcome as RawOutcome;
 use serde::ser::SerializeSeq;
@@ -73,6 +73,14 @@ struct Report<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     property_attachment_checks: Option<usize>,
     unit_dependency_checks: UnitChecks,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    geometry_dependency_checks: Option<GeometryChecks>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    geometry_consistency: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    planar_rules: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    full_import: Option<&'static str>,
     limits: Limits,
     diagnostics: &'a [Diagnostic],
     snapshot: Option<SnapshotView<'a>>,
@@ -88,12 +96,20 @@ pub(super) fn compile(source: &RawOutcome, outcome: &Outcome) -> Result<Vec<u8>,
         return Err(ReportError::SourceMismatch);
     }
     let report = Report {
-        schema: if outcome.check_part_and_closure {
+        schema: if outcome.check_geometry_dependencies && outcome.check_part_and_closure {
+            "solidcore.step.source-semantics.v1"
+        } else if outcome.check_geometry_dependencies {
+            "solidcore.step.geometry-dependencies.v1"
+        } else if outcome.check_part_and_closure {
             "solidcore.step.part-closure.v1"
         } else {
             "solidcore.step.types-units.v1"
         },
-        scope: if outcome.check_part_and_closure {
+        scope: if outcome.check_geometry_dependencies && outcome.check_part_and_closure {
+            "StrictSourceSemantics"
+        } else if outcome.check_geometry_dependencies {
+            "GeometryDependenciesCheckpoint"
+        } else if outcome.check_part_and_closure {
             "PartAndClosureCheckpoint"
         } else {
             "TypesAndUnitsCheckpoint"
@@ -105,7 +121,7 @@ pub(super) fn compile(source: &RawOutcome, outcome: &Outcome) -> Result<Vec<u8>,
         unit_dependencies: outcome.unit_dependencies,
         si_units: outcome.si_units,
         part: outcome.part,
-        geometry_dependencies: "NotRun",
+        geometry_dependencies: outcome.geometry_dependencies,
         native_build: "NotRun",
         interoperability: "NotRun",
         repair: "None",
@@ -114,6 +130,12 @@ pub(super) fn compile(source: &RawOutcome, outcome: &Outcome) -> Result<Vec<u8>,
             .check_part_and_closure
             .then_some(outcome.property_attachment_checks),
         unit_dependency_checks: outcome.unit_dependency_checks,
+        geometry_dependency_checks: outcome
+            .check_geometry_dependencies
+            .then_some(outcome.geometry_dependency_checks),
+        geometry_consistency: outcome.check_geometry_dependencies.then_some("NotRun"),
+        planar_rules: outcome.check_geometry_dependencies.then_some("NotRun"),
+        full_import: outcome.check_geometry_dependencies.then_some("NotRun"),
         limits: outcome.limits,
         diagnostics: &outcome.diagnostics,
         snapshot: outcome.snapshot.as_ref().map(|s| SnapshotView {

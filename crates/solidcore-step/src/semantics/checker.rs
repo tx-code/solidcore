@@ -1128,6 +1128,11 @@ impl<'a> Checker<'a> {
             let result = super::units::check(self);
             self.outcome.unit_dependencies = progress(&result);
             result?;
+            if options.check_geometry_dependencies {
+                let result = super::geometry::check(self);
+                self.outcome.geometry_dependencies = progress(&result);
+                result?;
+            }
         }
         let mut selected_context = None;
         if options.check_part_and_closure {
@@ -1186,12 +1191,15 @@ pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> O
     let mut outcome = Outcome {
         source_capture: source.captured.clone(),
         check_part_and_closure: options.check_part_and_closure,
+        check_geometry_dependencies: options.check_geometry_dependencies,
         status: Status::SourceFailure,
         snapshot: None,
         schema_selection: None,
         binding: "NotRun",
         types: "NotRun",
         unit_dependencies: "NotRun",
+        geometry_dependencies: "NotRun",
+        geometry_dependency_checks: super::GeometryChecks::default(),
         si_units: "NotRun",
         part: "NotRun",
         property_attachment_checks: 0,

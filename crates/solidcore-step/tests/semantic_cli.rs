@@ -146,3 +146,36 @@ fn deferred_ownership_mode_retains_the_cpp_exit_code_without_changing_old_mode()
     assert_eq!(json["status"], "Deferred");
     assert_eq!(json["part"], "Deferred");
 }
+
+#[test]
+fn full_source_mode_keeps_p0_geometry_scope_and_reports_unrun_native_work() {
+    let output = invoke(&["--fixture-limits", "--source-semantics"]).unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["schema"], "solidcore.step.source-semantics.v1");
+    assert_eq!(json["geometry_dependencies"], "NotRun");
+    assert_eq!(json["part"], "Passed");
+    assert_eq!(json["full_import"], "NotRun");
+    let output = invoke(&[
+        "--fixture-limits",
+        "--source-semantics",
+        "--general-brep-source",
+    ])
+    .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["geometry_dependencies"], "Passed");
+    assert_eq!(json["geometry_consistency"], "NotRun");
+    assert_eq!(json["planar_rules"], "NotRun");
+    assert_eq!(json["native_build"], "NotRun");
+    let output = invoke(&[
+        "--fixture-limits",
+        "--source-semantics",
+        "--general-brep-source",
+        "--report-bytes",
+        "1",
+    ])
+    .unwrap();
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+}

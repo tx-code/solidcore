@@ -2,6 +2,10 @@
 
 # solidcore
 
+This fork's complete migration objective covers the maintained C++ fork's SDK,
+bindings and tools; see the [coverage ledger](docs/FORK_MIGRATION.md). Individual
+source checkpoints and upstream kernel unit counts are partial progress only.
+
 **📊 Live progress: [tangency-labs.github.io/solidcore](https://tangency-labs.github.io/solidcore/)**: every unit's port status and difftest results, the upstream-issues log, and the surface/surface intersection corpus scores, regenerated on every merge.
 
 solidcore is a Rust port of NVIDIA's SMLib: a boundary-representation (B-rep) solid
@@ -15,7 +19,7 @@ curves and surfaces. solidcore's first consumer is **SolidCraft**.
 This fork also develops a native Rust STEP reader in
 [`solidcore-step`](crates/solidcore-step/README.md). It provides lossless Part 21
 inspection, strict types/units and opt-in selected-part/closure checkpoints for
-five fixed source catalogs. It does **not yet convert STEP into a solidcore BRep**;
+five fixed source catalogs, plus their fixed source geometry prerequisites. It does **not yet convert STEP into a solidcore BRep**;
 geometry qualification and native construction remain separate migration stages.
 The kernel-port status below describes the
 upstream project, not STEP import qualification.
@@ -25,7 +29,10 @@ math, curve and surface geometry, B-rep topology, intersections, booleans, fille
 chamfers, offset/shell, sweeps and skins, primitives, healing/stitching, mass
 properties and queries.
 
-Out of scope: upstream's OCCT translators, USD/Hydra integration and Python bindings.
+The upstream kernel project's scope excludes its OCCT translators, USD/Hydra
+integration and Python bindings. This fork's user-authorized migration additionally
+covers the maintained fork's bindings and tools over Rust; removed USD/OCCT layers
+are not reintroduced. Private libraries and derived material remain local.
 See [ATTRIBUTION.md](ATTRIBUTION.md).
 
 Goals: no `unsafe` in the kernel, no panics on bad input, deterministic results, no

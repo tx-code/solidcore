@@ -47,7 +47,7 @@ def compare(cpp,rust,path,options=()):
     observations=[]
     for binary in [cpp,rust]:
         p=subprocess.run([str(binary),'--fixture-limits',*options,str(path)],capture_output=True,timeout=30,check=False)
-        assert p.returncode in ({0,1,2,3,7} if '--part-and-closure' in options else {0,1,2,3}),f'reader infrastructure/argument failure: {p.returncode}: {p.stderr.decode(errors="replace")}'
+        assert p.returncode in ({0,1,2,3,7} if {'--part-and-closure','--source-semantics'} & set(options) else {0,1,2,3}),f'reader infrastructure/argument failure: {p.returncode}: {p.stderr.decode(errors="replace")}'
         observations.append((p.returncode,json.loads(p.stdout)))
     (c_code,c),(r_code,r)=observations
     assert c_code==r_code,'exit differs'
@@ -55,12 +55,16 @@ def compare(cpp,rust,path,options=()):
         assert norm(c[key])==norm(r[key]),f'{key} differs: {str(norm(c[key]))[:600]} / {str(norm(r[key]))[:600]}'
     assert selection(c['schema_selection'])==selection(r['schema_selection']),'schema observations differ'
     assert c['part']==r['part']
-    ownership='--part-and-closure' in options
+    ownership=bool({'--part-and-closure','--source-semantics'} & set(options))
     if ownership:
         assert c['property_attachment_checks']==r['property_attachment_checks'],'property visit count differs'
     else:
         assert c['part']=='NotRun'
-    assert c['geometry_dependencies']==r['geometry_dependencies']=='NotRun'
+    assert c['geometry_dependencies']==r['geometry_dependencies']
+    if {'--geometry-dependencies','--source-semantics'} & set(options):
+        assert c['geometry_dependency_checks']==r['geometry_dependency_checks'],'geometry prerequisite counters differ'
+    else:
+        assert c['geometry_dependencies']=='NotRun'
     assert r['native_build']=='NotRun' and r['interoperability']=='NotRun' and r['repair']=='None'
     if c['snapshot'] is None: assert r['snapshot'] is None,'partial typed snapshot published'
     else:

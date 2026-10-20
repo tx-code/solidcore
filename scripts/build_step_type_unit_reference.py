@@ -57,8 +57,8 @@ def main():
         'source_sha256':hashlib.sha256(raw).hexdigest(),
         'access_change':'private -> public, one Checker access label only',
         'entrypoint_sha256':hashlib.sha256(shim.encode()).hexdigest(),
-        'supported_scopes':['TypesAndUnitsCheckpoint','PartAndClosureCheckpoint'],
-        'unrun':['GeometryDependencies','native construction','interoperability approval']
+        'supported_scopes':['TypesAndUnitsCheckpoint','PartAndClosureCheckpoint','GeometryDependenciesCheckpoint','StrictSourceSemantics'],
+        'always_unrun':['native construction','interoperability approval','continuous geometry consistency','planar/global rules']
     },indent=2)+'\n',encoding='utf-8')
 
 

@@ -9,14 +9,15 @@
 #include <iostream>
 #include <fstream>
 
-void CheckpointJson(step_source::report::Writer& w, const step_source::InspectOutcome& source, const step_semantics::Outcome& result, bool ownership=false)
+void CheckpointJson(step_source::report::Writer& w, const step_source::InspectOutcome& source, const step_semantics::Outcome& result, bool ownership=false, bool geometry=false)
 {
     using namespace step_semantics;
-    w.Add("{\"schema\":");w.String(ownership?"cpp.step.part-closure.checkpoint.v1":"cpp.step.types-units.checkpoint.v1");w.Add(",\"status\":"); w.String(StatusName(result.status));
+    w.Add("{\"schema\":");w.String(geometry?"cpp.step.geometry-source.checkpoint.v1":ownership?"cpp.step.part-closure.checkpoint.v1":"cpp.step.types-units.checkpoint.v1");w.Add(",\"status\":"); w.String(StatusName(result.status));
     w.Add(",\"schema_selection\":"); report::WriteSchemaSelection(w,result.schemaSelection);
     w.Add(",\"binding\":");w.String(result.binding);w.Add(",\"types\":");w.String(result.types);
     w.Add(",\"unit_dependencies\":");w.String(result.unitDependencies);w.Add(",\"si_units\":");w.String(result.siUnits);
-    w.Add(",\"part\":");w.String(result.part);w.Add(",\"geometry_dependencies\":\"NotRun\",\"dependency_visits\":");w.Number(result.dependencyVisits);
+    w.Add(",\"part\":");w.String(result.part);w.Add(",\"geometry_dependencies\":");w.String(result.geometryDependencies);w.Add(",\"dependency_visits\":");w.Number(result.dependencyVisits);
+    if(geometry){w.Add(",\"geometry_dependency_checks\":{\"total\":");w.Number(result.geometryDependencyChecks.total);w.Add(",\"type_predicates\":");w.Number(result.geometryDependencyChecks.typePredicates);w.Add(",\"entity_predicates\":");w.Number(result.geometryDependencyChecks.entityPredicates);w.Add("}");}
     if(ownership){w.Add(",\"property_attachment_checks\":");w.Number(result.propertyAttachmentChecks);}
     w.Add(",\"unit_dependency_checks\":{\"total\":");w.Number(result.unitDependencyChecks.total);
     w.Add(",\"unit_definitions\":");w.Number(result.unitDependencyChecks.unitDefinitions);
@@ -100,11 +101,14 @@ int main(int argc, char** argv)
         auto scope = GeometryScope::ExplicitOuterBounds;
         bool explicitLimits = false;
         bool ownership = false;
+        bool geometry = false;
         for (int i = 1; i < argc; ++i)
         {
             std::string arg(argv[i]);
             if (arg == "--fixture-limits") explicitLimits = true;
             else if (arg == "--part-and-closure") ownership = true;
+            else if (arg == "--geometry-dependencies") geometry = true;
+            else if (arg == "--source-semantics") {geometry=true;ownership=true;}
             else if (arg == "--general-brep-source") scope = GeometryScope::GeneralBrep;
             else if (arg == "--unit-context" && i + 1 < argc) context = argv[++i];
             else if (arg == "--dependency-visits" && i + 1 < argc) limits.dependencyVisits = std::stoull(argv[++i]);
@@ -142,6 +146,16 @@ int main(int argc, char** argv)
                         }
                     });
                 }
+                if(geometry && data->profile.kind != ProfileKind::Ap203e2Planar)
+                {
+                    checker.RunPhase(Checker::Phase::GeometryDependencies,[&]{
+                        if(auto issue=CheckAp214GeometryDependencies(*data,[&](step_source::Span span){checker.Visit(span);},result.geometryDependencyChecks))
+                        {
+                            checker.State(Checker::Phase::GeometryDependencies)=Checker::Progress::Rejected;
+                            throw Failure{Status::Rejected,std::move(*issue)};
+                        }
+                    });
+                }
                 if(ownership){checker.RunPhase(Checker::Phase::Part,[&]{checker.Product();checker.Closure();});}
                 if (!context.empty() || ownership)
                 {
@@ -165,7 +179,7 @@ int main(int argc, char** argv)
             checker.PublishProgress();
         }
         std::string json;
-        if (!step_source::report::Writer::Publish(sourceLimits.reportBytes,json,[&](auto& w){CheckpointJson(w,source,result,ownership);})) return 5;
+        if (!step_source::report::Writer::Publish(sourceLimits.reportBytes,json,[&](auto& w){CheckpointJson(w,source,result,ownership,geometry);})) return 5;
         std::cout << json;
         if (!std::cout) return 6;
         if (result.status == Status::SourceFailure) {

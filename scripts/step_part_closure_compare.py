@@ -24,13 +24,20 @@ def invoke(binary, path, flags):
     return result.returncode, json.loads(result.stdout)
 
 
-def direct_p0(cpp, rust, path):
-    c_code, c = invoke(cpp, path, [])
-    r_code, r = invoke(rust, path, ['--part-and-closure'])
+def direct_source(cpp, rust, path, cpp_flags, rust_flags):
+    c_code, c = invoke(cpp, path, cpp_flags)
+    r_code, r = invoke(rust, path, rust_flags)
     assert c_code == r_code and c['status'] == r['status']
     for c_key, r_key in [('schema_binding', 'binding'), ('type_fields', 'types'),
                          ('single_part_profile', 'part'), ('si_units', 'si_units')]:
         assert c['checks'][c_key] == r[r_key], 'direct P0 phase differs'
+    if 'geometry_dependency_checks' in r:
+        assert c['checks'].get('unit_dependencies','NotRun')==r['unit_dependencies']
+        assert c['checks'].get('geometry_dependencies','NotRun')==r['geometry_dependencies']
+        stats=c['statistics']
+        assert r['geometry_dependency_checks']==dict(total=stats.get('geometry_dependency_checks',0),type_predicates=stats.get('geometry_type_predicate_checks',0),entity_predicates=stats.get('geometry_entity_predicate_checks',0))
+        assert r['unit_dependency_checks']==dict(total=stats.get('unit_dependency_checks',0),unit_definitions=stats.get('unit_dimension_definitions',0),type_predicates=stats.get('unit_type_predicate_checks',0))
+        assert r['property_attachment_checks']==stats.get('property_attachment_checks',0)
     assert c['statistics']['dependency_visits'] == r['dependency_visits']
     assert selection(c['schema_selection']) == selection(r['schema_selection'])
     diagnostics = []
@@ -67,6 +74,9 @@ def direct_p0(cpp, rust, path):
     assert cs['part']['apd_schema_claim'] == part['apd_schema_claim']
     assert cs['part']['apd_year_lexeme'] == part['apd_year']
     assert cs['part']['shape_geometry_verified'] is False
+    assert cs['part'].get('property_attachments',[])==[{key:source_id(value) for key,value in item.items()} for item in part['property_attachments']]
+    if 'deferred_region_faces' in cs['part']:
+        assert cs['part']['deferred_region_faces']==[source_id(i) for i in part['deferred_region_faces']]
     for quantity in ['length_unit', 'plane_angle_unit', 'solid_angle_unit']:
         assert cs['units'][quantity] == source_id(rs['units'][quantity])
     def scale(power):
@@ -80,11 +90,18 @@ def direct_p0(cpp, rust, path):
         assert (cu['prefix'] or '') == ru['prefix']
         assert cu['scale'] == scale(ru['canonical_power10'])
         assert cu['dimensions'] == ru['dimensions']
+    if 'dimension_definitions' in cs['units']:
+        expected_dimensions=[dict(source_id=source_id(d['record_index']),nominal=d['nominal'],dimensions=[dict(kind='rational',num=x['numerator'],den=x['denominator']) for x in d['dimensions']]) for d in rs['units']['dimension_definitions']]
+        assert cs['units']['dimension_definitions']==expected_dimensions
     expected = {name: [record['id'] for record in rs['records'] if name in record['types']]
                 for name in rs['registered_types']}
     assert cs['type_populations'] == expected
     assert c['source']['input']['sha256'] == r['source']['sha256']
     assert c['source']['input']['raw'] == r['source']['raw'] == path.read_bytes().decode('ascii')
+
+
+def direct_p0(cpp,rust,path):
+    return direct_source(cpp,rust,path,[],['--part-and-closure'])
 
 
 def main():

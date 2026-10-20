@@ -27,3 +27,8 @@ required-features = ["cli"]
 [features]
 default = []
 cli = []
+
+[[bin]]
+name = "step-planar-inspect"
+path = "src/bin/step-planar-inspect.rs"
+required-features = ["cli"]

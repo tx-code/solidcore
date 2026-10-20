@@ -19,14 +19,19 @@ approval and native construction remain separate unrun stages.
 
 [Source geometry prerequisites](GEOMETRY_SOURCE.md) are now available separately
 or through `--source-semantics`, which runs the maintained strict source phases in
-C++ order. This still leaves planar/global rules, interoperability approval,
-continuous geometry evidence and exact native construction to be migrated.
+C++ order. Continuous general geometry evidence and exact native construction
+remain separate stages.
 
 [Explicit carrier policies](CARRIER.md) preserve opaque HEADER/DATA bytes and
 legacy level-1 interpretation receipts. [Explicit source interoperability](INTEROPERABILITY.md)
 now retains the original admitted errors and schema assumptions only after the
 complete ownership and physical-exclusion proof. Default strict checkpoints
 continue to refuse legacy assumptions.
+
+[Planar source qualification](PLANAR.md) now ports the fixed P0 local/global rules,
+exact directed LINE/PLANE regions, incidence and conversion-unit interpretation.
+It preserves partial diagnostic evidence and refuses unsupported rule profiles;
+no native model, target UV, repair or material-volume qualification is created.
 
 ## Use
 
@@ -101,8 +106,7 @@ heals source defects, or relaxes quality thresholds.
 
 | Stage | Exit gate before claiming the capability |
 |---|---|
-| Full AP/geometry qualification | Fixed source checks, exact schema assumptions and explicit nongeometric approval are implemented; planar/global rules and continuous geometric evidence remain separate |
-| Planar qualification | Stable rule identities/order, budgets, oriented regions, shared edges, holes and source surface/solid roles pass the analytic fixtures |
+| Full AP/geometry qualification | Fixed source checks, exact schema assumptions, nongeometric approval and fixed P0 rules/regions are implemented; other protocol rules and continuous general geometry evidence remain separate |
 | Native adapter | Validate solidcore geometry/topology construction and failed-candidate cleanup; retain source-to-native correspondence and UV definitions |
 | General exact BRep | Analytic/NURBS, trims, pcurves, seams, degeneracies and assemblies meet their individual error and ownership contracts |
 | Publication and repair | Complete owning read-only result plus diagnostics, cancellation/commit boundary; optional repair remains separately budgeted |

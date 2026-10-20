@@ -18,6 +18,7 @@
 
 mod carrier;
 mod parser;
+pub mod planar;
 pub mod report;
 pub mod semantics;
 

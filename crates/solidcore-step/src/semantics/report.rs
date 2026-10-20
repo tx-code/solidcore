@@ -55,7 +55,7 @@ struct SnapshotView<'a> {
     part_definition: Option<&'a super::Part>,
 }
 #[derive(Serialize)]
-struct Report<'a> {
+pub(crate) struct Report<'a> {
     schema: &'static str,
     scope: &'static str,
     status: Status,
@@ -109,6 +109,13 @@ struct LimitView {
     preserved_diagnostics: Option<usize>,
 }
 pub(super) fn compile(source: &RawOutcome, outcome: &Outcome) -> Result<Vec<u8>, ReportError> {
+    crate::report::compile_value(&view(source, outcome)?, source.limits.report_bytes)
+        .map_err(ReportError::Output)
+}
+pub(crate) fn view<'a>(
+    source: &'a RawOutcome,
+    outcome: &'a Outcome,
+) -> Result<Report<'a>, ReportError> {
     let bound = match (&source.captured, &outcome.source_capture) {
         (Some(a), Some(b)) => Arc::ptr_eq(a, b),
         (None, None) => true,
@@ -191,5 +198,5 @@ pub(super) fn compile(source: &RawOutcome, outcome: &Outcome) -> Result<Vec<u8>,
         }),
         source: crate::report::view(source),
     };
-    crate::report::compile_value(&report, source.limits.report_bytes).map_err(ReportError::Output)
+    Ok(report)
 }

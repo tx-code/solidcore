@@ -17,7 +17,7 @@ mod interop;
 mod generated;
 mod number;
 mod ownership;
-mod report;
+pub(crate) mod report;
 mod schema;
 mod units;
 
@@ -593,6 +593,9 @@ pub struct Outcome {
 }
 
 impl Outcome {
+    pub(crate) fn captured_owner(&self) -> Option<Arc<[u8]>> {
+        self.source_capture.clone()
+    }
     /// Requested source policy, bound to the immutable successful snapshot.
     pub fn source_policy(&self) -> SourcePolicy {
         self.snapshot

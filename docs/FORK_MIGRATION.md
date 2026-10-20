@@ -74,8 +74,10 @@ with part/closure in the maintained strict C++ phase order. They still do not
 establish native import or complete AP/source validity. Explicit opaque/legacy
 source carrier policies now retain immutable receipts and downstream refusal.
 Exact schema interpretation choices and the original nongeometric approval path
-are implemented separately from default strict checks. Planar/local/global rules,
-native STEP construction, bindings/tool backends, kernel/API gaps and the
+are implemented separately from default strict checks. The fixed P0 planar
+implementation now includes local/global rules, exact directed regions, incidence
+and unit conversion evidence; it still creates no native model. Native STEP
+construction, bindings/tool backends, kernel/API gaps and the
 remaining fork changes are still required work. Consult the live source and
 component contracts rather than treating this paragraph as a frozen completion
 count.

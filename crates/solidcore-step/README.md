@@ -6,6 +6,12 @@ instance identity and all DATA references passed. It does not mean an AP profile
 unit, surface, solid or modeling operation has passed. The JSON report explicitly
 marks every later stage `NotRun` and repair `None`.
 
+A separate [strict types/units checkpoint](TYPES_UNITS.md) now binds the five
+fixed source catalogs and checks exact unit dependencies. The opt-in
+`step-semantic-inspect` CLI can also check an explicitly selected physical unit
+context. Source inspection remains unchanged; checkpoint success does not
+establish part ownership, complete AP validity, geometry or a native model.
+
 ## Use
 
 ```sh
@@ -78,7 +84,7 @@ heals source defects, or relaxes quality thresholds.
 | Stage | Exit gate before claiming the capability |
 |---|---|
 | Explicit carrier options | Opaque HEADER/DATA and legacy level-1 interpretation retain source diagnostics/receipts; strict behavior remains unchanged |
-| Typed semantics and units | Schema/profile selection, attribute/select bindings, mandatory dependencies, dimensions and unit contexts match the existing contracts |
+| Full semantic qualification | Strict type/unit checkpoint is implemented; selected-part ownership, representation-use constraints and interoperability proofs remain separate |
 | Planar qualification | Stable rule identities/order, budgets, oriented regions, shared edges, holes and source surface/solid roles pass the analytic fixtures |
 | Native adapter | Validate solidcore geometry/topology construction and failed-candidate cleanup; retain source-to-native correspondence and UV definitions |
 | General exact BRep | Analytic/NURBS, trims, pcurves, seams, degeneracies and assemblies meet their individual error and ownership contracts |

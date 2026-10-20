@@ -29,7 +29,7 @@ struct Scope {
 }
 
 #[derive(Serialize)]
-struct Report<'a> {
+pub(crate) struct Report<'a> {
     schema: &'static str,
     status: Status,
     sha256: &'a Option<String>,
@@ -77,8 +77,12 @@ pub enum Error {
 /// Reports contain source strings and parameters and may contain confidential
 /// information. Choosing where to publish is the caller's responsibility.
 pub fn compile(outcome: &Outcome) -> Result<Vec<u8>, Error> {
+    compile_value(&view(outcome), outcome.limits.report_bytes)
+}
+
+pub(crate) fn view(outcome: &Outcome) -> Report<'_> {
     let source = outcome.source.as_ref();
-    let report = Report {
+    Report {
         schema: SCHEMA,
         status: outcome.status,
         sha256: &outcome.sha256,
@@ -102,13 +106,16 @@ pub fn compile(outcome: &Outcome) -> Result<Vec<u8>, Error> {
         header: source.map(crate::Snapshot::header),
         records: source.map(crate::Snapshot::records),
         references: source.map(crate::Snapshot::references),
-    };
+    }
+}
+
+pub(crate) fn compile_value(value: &impl Serialize, limit: usize) -> Result<Vec<u8>, Error> {
     let mut writer = Bounded {
         bytes: Vec::new(),
-        limit: outcome.limits.report_bytes,
+        limit,
         exceeded: false,
     };
-    if serde_json::to_writer(&mut writer, &report).is_err() {
+    if serde_json::to_writer(&mut writer, value).is_err() {
         return Err(if writer.exceeded {
             Error::ReportByteLimit
         } else {

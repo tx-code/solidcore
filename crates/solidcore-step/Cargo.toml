@@ -19,6 +19,11 @@ name = "step-inspect"
 path = "src/bin/step-inspect.rs"
 required-features = ["cli"]
 
+[[bin]]
+name = "step-semantic-inspect"
+path = "src/bin/step-semantic-inspect.rs"
+required-features = ["cli"]
+
 [features]
 default = []
 cli = []

@@ -19,6 +19,7 @@
 
 mod parser;
 pub mod report;
+pub mod semantics;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -229,8 +230,13 @@ pub struct Statistics {
 }
 
 /// Owning immutable source snapshot; only a complete graph can be published.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Snapshot {
+    data: Arc<SourceData>,
+}
+
+#[derive(Debug)]
+struct SourceData {
     bytes: Arc<[u8]>,
     header: Vec<Component>,
     records: Vec<Record>,
@@ -243,44 +249,51 @@ pub struct Snapshot {
 impl Snapshot {
     /// Exact, immutable original bytes.
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+        &self.data.bytes
     }
     /// Required HEADER records, in source order.
     pub fn header(&self) -> &[Component] {
-        &self.header
+        &self.data.header
     }
     /// DATA records in source order, without schema-dependent reordering.
     pub fn records(&self) -> &[Record] {
-        &self.records
+        &self.data.records
     }
     /// Resolved references in source traversal order.
     pub fn references(&self) -> &[Reference] {
-        &self.references
+        &self.data.references
     }
     /// Look up a canonical ID without integer narrowing or sparse allocation.
     pub fn find(&self, canonical_id: &str) -> Option<&Record> {
-        self.index
+        self.data
+            .index
             .get(canonical_id)
-            .and_then(|i| self.records.get(*i))
+            .and_then(|i| self.data.records.get(*i))
     }
     /// Indices into [`Self::references`] for incoming references to an ID.
     pub fn incoming(&self, canonical_id: &str) -> &[usize] {
-        self.incoming.get(canonical_id).map_or(&[], Vec::as_slice)
+        self.data
+            .incoming
+            .get(canonical_id)
+            .map_or(&[], Vec::as_slice)
     }
     /// Checked access to original bytes. Reversed/out-of-range spans return `None`.
     pub fn raw(&self, span: Span) -> Option<&[u8]> {
-        self.bytes.get(span.begin..span.end)
+        self.data.bytes.get(span.begin..span.end)
     }
     /// Locate a byte offset, including EOF. Invalid offsets return `None`.
     pub fn locate(&self, offset: usize) -> Option<Location> {
-        if offset > self.bytes.len() {
+        if offset > self.data.bytes.len() {
             return None;
         }
-        let line = self.lines.partition_point(|start| *start <= offset);
-        self.lines.get(line.checked_sub(1)?).map(|start| Location {
-            line,
-            column: offset - start + 1,
-        })
+        let line = self.data.lines.partition_point(|start| *start <= offset);
+        self.data
+            .lines
+            .get(line.checked_sub(1)?)
+            .map(|start| Location {
+                line,
+                column: offset - start + 1,
+            })
     }
 }
 

@@ -25,6 +25,16 @@ References are `source/STEP_SOURCE/inc/StepSource.h`,
 `source/STEP_SOURCE/app/step_inspect.cpp`, under Apache-2.0 with their NVIDIA
 copyright notices retained in the ported files.
 
+The strict types/units checkpoint additionally ports
+`source/STEP_SEMANTICS/inc/StepSemantics.h` and the selected
+Binding/Mapping/Fields/UnitContext methods in `StepSemantics.cpp`, plus
+`StepSchemaSelection.cpp`, `StepUnitDependencies.cpp`, `StepUnitRational.cpp`,
+`StepSourceNumber.cpp` and the immutable catalog query contracts. The generated
+Rust descriptors come from the public `StepCatalogSnapshot.cpp` export of all
+five fixed catalogs. No EXPRESS artifact, C++ product reader or schema generator
+is needed to build or run Rust. The generated file records the exact descriptor
+payload fingerprint; it is a porting identity, not an independent schema witness.
+
 The three STEP inputs under `crates/solidcore-step/tests/fixtures` are public
 analytic design fixtures S203-P01, S203-P04 and S203-P05 from the STEP fork's
 `tools/step_import_validation/corpus/ap203e2-planar/v1/cases`; they contain no

@@ -2,7 +2,7 @@ name: STEP source migration
 
 on:
   push:
-    branches: [codex/step-import]
+    branches: ['codex/step-*']
     paths:
       - 'crates/solidcore-step/**'
       - 'Cargo.toml'

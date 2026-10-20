@@ -34,8 +34,8 @@
 //! - `DoStitching` collects the modified faces (`sModifiedFaces`) as upstream, though
 //!   only commented-out code reads them; its `dMinEdgeLength` is dropped for the same
 //!   reason (the lengths are still computed).
-//! - The calls into `SmBrep::Notify` (`topology.brep_p2`), `CalculateBoundingBox`
-//!   (`query.brep`), `DeleteFace`, `SqueezeEdge` (`topology.brep_p3`), `GlueVertices`,
+//! - Root pre-edit notifications use the actual owning `BRep` runtime and context;
+//!   cached bounds use the shared query implementation. Remaining `DeleteFace`, `SqueezeEdge` (`topology.brep_p3`), `GlueVertices`,
 //!   `FindAndSetInfiniteRegion` (`topology.brep_p5`), `GlueEdgesGeneral`
 //!   (`topology.brep_p7`), `MakeVertexSplitEdge` (`topology.brep_p9`, through
 //!   [`test_and_split_edge`]) and `SmFace::IsLamina`, `IsDegenerate`, `Notify`
@@ -262,7 +262,7 @@ impl Stitch<'_> {
     ) -> Result<()> {
         let tol_3d = self.stitch_tol_3d();
         // (status not checked)
-        ignore_status(brep_notify_pre_edit(b))?;
+        ignore_status(brep_notify_pre_edit(k, b))?;
 
         // when asked find and remove sliver laminar faces
         if self.remove_laminar_slivers {
@@ -613,7 +613,7 @@ impl Stitch<'_> {
 
         // if edges were stitched - notify all modified Brep faces of impending change
         if out.stitched_edges > 0 {
-            ignore_status(brep_notify_pre_edit(b))?;
+            ignore_status(brep_notify_pre_edit(k, b))?;
             for f in bp1::faces(b, None)? {
                 ignore_status(face_notify(
                     b,

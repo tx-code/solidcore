@@ -116,3 +116,10 @@ caller; full notification/registration/checkout integration is still required.
 The B-spline local solver carries live face tolerance into its seam test, with
 analytic and actual native point comparisons; this does not qualify other
 remaining owner or general-projection paths.
+
+
+Root BRep notifications now own persistent metadata/attributes/spatial cache,
+execute the actual cache/base/attribute/user/system callback chain, and are wired
+to Stitch's pre-edit path. See [notification scope and remaining integration](BREP_NOTIFICATIONS.md).
+Cross-model resolution, all element producers, checkout/display-list behavior,
+full root/local validation and native import acceptance remain required work.

@@ -966,7 +966,7 @@ impl<'c> Stitch<'c> {
             b.set_editing_enabled(true);
             let r = (|| -> Result<SimpleFaceStitch> {
                 // status ignored
-                ignore_status(brep_notify_pre_edit(b))?;
+                ignore_status(brep_notify_pre_edit(k, b))?;
 
                 // glue the coincident vertices
                 let wire_edges = bp1::wire_edges(b, None)?;
@@ -2081,10 +2081,14 @@ fn local_identity(type_code: i64, index: u32) -> ObjectRef {
 }
 
 /// `SmBrep::Notify(SM_NO_PRE_EDIT, this, NULL, NULL)` (unit `topology.brep_p2`).
-pub(crate) fn brep_notify_pre_edit(b: &mut Brep) -> Result<()> {
-    let _ = b;
-    // UNPORTED(topology.brep_p2): SmBrep::Notify
-    Err(SolidError::unported("SmBrep::Notify", "topology.brep_p2"))
+pub(crate) fn brep_notify_pre_edit(k: &mut Kernel, b: &mut Brep) -> Result<()> {
+    let this = crate::topology::brep::p2::root_ref(b);
+    crate::topology::brep::p2::notify(
+        k,
+        b,
+        crate::geom::object::NotifyOperation::PreEdit,
+        [Some(this), None, None],
+    )
 }
 
 /// `SmBrep::CalculateBoundingBox(rBox, bApprox, bTight, bExpandByZoneTol3d)` (unit

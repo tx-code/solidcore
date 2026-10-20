@@ -2143,13 +2143,12 @@ mod tests {
             executive.set_offset_brep(Brep::new());
             executive.set_create_offset_solid(solid);
             executive.relate_edgeuses(EdgeuseId::from_index(1), EdgeuseId::from_index(2));
-            // Both stitch variants now reach the actual notification dependency.
-            let (symbol, owner) = ("SmBrep::Notify", "topology.brep_p2");
-            assert_dependency(
-                executive.piecewise_merge(&mut kernel, &mut original),
-                symbol,
-                owner,
-            );
+            // The real root pre-edit now completes for this empty model, so
+            // both variants reach their actual successful ownership transfer.
+            let result = executive
+                .piecewise_merge(&mut kernel, &mut original)
+                .unwrap();
+            assert!(result.face_list().is_empty());
             assert!(executive.offset_brep().is_none());
             assert_eq!(executive.offset_edgeuse(EdgeuseId::from_index(1)), None);
         }

@@ -535,6 +535,8 @@ impl Default for Vertexuse {
 /// vertices linked by typed ids.
 #[derive(Debug, Clone)]
 pub struct Brep {
+    /// Persistent native notification metadata, attributes and spatial cache.
+    notifications: brep::p2::NotificationState,
     shells: Arena<ShellId, Shell>,
     faces: Arena<FaceId, Face>,
     loops: Arena<LoopId, Loop>,
@@ -584,6 +586,7 @@ pub struct Brep {
 impl Default for Brep {
     fn default() -> Self {
         Self {
+            notifications: brep::p2::NotificationState::default(),
             shells: Arena::default(),
             faces: Arena::default(),
             loops: Arena::default(),
@@ -913,6 +916,8 @@ impl Brep {
     }
 
     /// Sets the identity the B-rep is attributed and notified under.
+    // Set identity before attaching model-local notification attributes/references.
+    // Rekeying a registered multi-model object is a separate resolver operation.
     pub fn set_key(&mut self, key: ObjectKey) {
         self.key = key;
     }

@@ -26,6 +26,18 @@ def cases():
                                                         ['none','initial_validate_only'],['cache_build','cache_editing']):
         yield [defect,selection,prior,mode]
 
+    for defect,selection,prior,mode in itertools.product(['none','gap_above','gap_large'],['zero','repeat'],
+            ['none','initial_validate_only'],['cache_boolean','cache_boolean_tree','cache_reuse',
+                                              'cache_rebuild','cache_reuse_editing','cache_rebuild_boolean']):
+        yield [defect,selection,prior,mode]
+    # Explicit factory-failure protocol cases, not numerical-model truth.
+    for selection,prior,mode in itertools.product(['zero','repeat'],['none','initial_validate_only'],
+                                                 ['cache_build','cache_reuse','cache_base_tree']):
+        yield ['trim_failure',selection,prior,mode]
+
+    for defect,selection in itertools.product(['bspline_inside','bspline_boundary','bspline_outside'],['zero','repeat']):
+        yield [defect,selection,'none','local_bsp']
+
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -46,7 +58,7 @@ def main():
             rows.append({'input':case,'status':'fail','error':str(e)})
     failed=[r for r in rows if r['status']=='fail']
     deferred=[r for r in rows if r['status']=='deferred']
-    receipt={'scope':'native tolerance/check-update and box operation contracts; no import acceptance',
+    receipt={'scope':'native caches, point solves, tolerance/check-update and boxes; no import acceptance',
              'passed':sum(r['status']=='pass' for r in rows),'failed':len(failed),'deferred':len(deferred),'cases':rows}
     args.receipt.parent.mkdir(parents=True,exist_ok=True)
     args.receipt.write_text(json.dumps(receipt,indent=2)+'\n',encoding='utf-8')

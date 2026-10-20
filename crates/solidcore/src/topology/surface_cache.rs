@@ -19,9 +19,7 @@ use crate::math::Point2;
 use crate::nurbs::b_spline_curve::BSplineCurve;
 use crate::query::face::p2::{point_classify, PointClassifyOptions};
 use crate::surface::cache_topology::CacheTopology;
-use crate::surface::surface::p1::{cache_tolerances, CacheTolerances};
 use crate::surface::surface::Surface;
-use crate::surface::surface_cache::p1::SurfaceCacheOptions;
 use crate::surface::trim_srf_cache::TrimSrfCache;
 use crate::topology::{edgeuse::p1 as eu, face, loopuse, vertex, vertexuse, Brep, FaceId};
 
@@ -210,22 +208,59 @@ pub fn make_face_cache(k: &Kernel, b: &mut Brep, face: FaceId) -> Result<TrimSrf
         .as_ref()
         .ok_or_else(|| SolidError::null_pointer(OP))?
         .clone_for_evaluation()?;
-    let CacheTolerances {
-        chord_height_tol,
-        angle_tol_rad,
-    } = cache_tolerances(&surface)?;
-    let mut cache = TrimSrfCache::new(
-        surface,
-        SurfaceCacheOptions {
-            chord_height_tolerance: chord_height_tol,
-            ang_tol_rad: angle_tol_rad,
-            ..SurfaceCacheOptions::default()
-        },
-    );
-    // Native caches delay construction during Booleans. This operation explicitly
-    // asks for the built cache needed by ComputeUVPoint, so GetTree builds it here.
-    cache.build_tree_with_topology(k, &mut BrepSurfaceContext { brep: b, face })?;
+    let mut context = BrepSurfaceContext { brep: b, face };
+    let mut cache = crate::surface::surface::p1::make_trim_srf_cache_with_topology(
+        k,
+        &surface,
+        None,
+        &mut context,
+    )?;
+    // This API explicitly asks for a built trim cache; the role-preserving native
+    // getter below leaves Boolean construction delayed until an actual GetTree.
+    if cache.base().tree().is_none() {
+        cache.build_tree_with_topology(k, &mut context)?;
+    }
     Ok(cache)
+}
+
+/// `smsurf_GetSurfaceCache` for a real face, optionally consuming its old single
+/// cache slot. Dynamic role, reuse flags and Boolean delays remain observable.
+/// The caller owns this model-bound slot and invalidates it after geometric edits.
+pub fn get_face_surface_cache(
+    k: &Kernel,
+    b: &mut Brep,
+    face: FaceId,
+    old: Option<crate::surface::cache_topology::OwnedSurfaceCache<EntityRef>>,
+) -> Result<crate::surface::cache_topology::OwnedSurfaceCache<EntityRef>> {
+    // Native reuse reads owner/base flags only. Avoid copying a potentially large
+    // NURBS/owned-geometry graph (and its copy-depth checks) for a retained slot.
+    let source = b
+        .face(face)?
+        .surface
+        .as_ref()
+        .ok_or_else(|| SolidError::null_pointer(OP))?;
+    if let Some(old) = old {
+        let editing_disabled =
+            old.base().face_was_modified && !b.editing_enabled() && source.face()?.is_some();
+        if !old.requires_replacement(editing_disabled) {
+            return Ok(old);
+        }
+        // Match DeleteObjectsCache before constructing/evaluating a replacement.
+        drop(old);
+    }
+    let surface = b
+        .face(face)?
+        .surface
+        .as_ref()
+        .ok_or_else(|| SolidError::null_pointer(OP))?
+        .clone_for_evaluation()?;
+    crate::surface::surface::p1::get_owned_surface_cache_with_topology(
+        k,
+        &surface,
+        None,
+        None,
+        &mut BrepSurfaceContext { brep: b, face },
+    )
 }
 
 #[cfg(test)]
@@ -369,5 +404,132 @@ mod tests {
             b.face(face).unwrap().surface.as_ref().unwrap().owner(),
             owner
         );
+    }
+
+    #[test]
+    fn boolean_lookup_delays_the_actual_trimmed_build_until_get_tree() {
+        let (mut k, mut b, face) = triangle();
+        k.context.set_doing_boolean(true);
+        let mut cache = get_face_surface_cache(&k, &mut b, face, None).unwrap();
+        assert!(cache.view().trimmed().is_some());
+        assert!(cache.base().tree().is_none());
+        assert!(!cache.base().have_t_surface_cache);
+        cache
+            .get_tree_with_topology(&k, &mut BrepSurfaceContext { brep: &mut b, face })
+            .unwrap();
+        assert!(cache.base().tree().is_some());
+        assert!(cache.base().have_t_surface_cache);
+        assert!(k.context.doing_boolean());
+        assert!(!b.editing_enabled());
+    }
+
+    #[test]
+    fn cache_reuse_keeps_native_state_until_modified_and_editing_disabled() {
+        let (k, mut b, face) = triangle();
+        let mut old = get_face_surface_cache(&k, &mut b, face, None).unwrap();
+        // Use retained state rather than allocator addresses to witness reuse.
+        old.base_mut().trim_subdivision_factor = 37.;
+        let mut reused = get_face_surface_cache(&k, &mut b, face, Some(old)).unwrap();
+        assert_eq!(reused.base().trim_subdivision_factor, 37.);
+        reused.base_mut().face_was_modified = true;
+        b.set_editing_enabled(true);
+        let retained = get_face_surface_cache(&k, &mut b, face, Some(reused)).unwrap();
+        assert!(retained.base().face_was_modified);
+        assert_eq!(retained.base().trim_subdivision_factor, 37.);
+        b.set_editing_enabled(false);
+        let rebuilt = get_face_surface_cache(&k, &mut b, face, Some(retained)).unwrap();
+        assert!(!rebuilt.base().face_was_modified);
+        assert_eq!(rebuilt.base().trim_subdivision_factor, 20.);
+    }
+
+    #[test]
+    fn a_plain_cache_stays_plain_on_single_slot_reuse_and_fast_projection() {
+        use crate::geom::{
+            global_solver::{SolutionRequested, SolverOperation},
+            solution_array::SolutionArray,
+        };
+        use crate::surface::cache_topology::OwnedSurfaceCache;
+        let (k, mut b, face) = triangle();
+        let surface = b
+            .face(face)
+            .unwrap()
+            .surface
+            .as_ref()
+            .unwrap()
+            .clone_for_evaluation()
+            .unwrap();
+        let base = crate::surface::surface::p1::make_surface_cache_with_topology(
+            &k,
+            &surface,
+            None,
+            &mut BrepSurfaceContext { brep: &mut b, face },
+        )
+        .unwrap();
+        let mut cache = get_face_surface_cache(
+            &k,
+            &mut b,
+            face,
+            Some(OwnedSurfaceCache::Surface(Box::new(base))),
+        )
+        .unwrap();
+        assert!(cache.view().trimmed().is_none());
+        // Native GlobalPointSolve tests the dynamic TrimSrfCache role as well as
+        // flags; this point is outside the triangular trim but in the surface.
+        cache.base_mut().point_test_enabled = true;
+        let mut solutions = SolutionArray::<EntityRef>::new();
+        surface
+            .global_point_solve_into_with_surface_cache(
+                &k,
+                None,
+                &surface.natural_uv_domain(),
+                SolverOperation::Minimize,
+                Vec3::new(0.8, 0.8, 1.),
+                1e-5,
+                None,
+                SolutionRequested::All,
+                &mut solutions,
+                Some(cache.view()),
+                &mut BrepSurfaceContext { brep: &mut b, face },
+            )
+            .unwrap();
+        assert_eq!(solutions.len(), 1);
+        assert!(solutions.get_at(0).unwrap().start.param(0).unwrap() > 0.7);
+        assert!(solutions.get_at(0).unwrap().start.param(1).unwrap() > 0.7);
+    }
+
+    #[test]
+    fn owned_bspline_local_projection_keeps_face_tolerance_in_boundary_seam_test() {
+        use crate::geom::global_solver::SolverOperation;
+        let (k, b, face) = triangle();
+        let original = b.face(face).unwrap().surface.as_ref().unwrap();
+        let crate::surface::surface::SurfaceKind::Plane(plane) = original.kind() else {
+            panic!("plane fixture")
+        };
+        let mut surface = Surface::from(plane.base_with_nurb().unwrap().clone_exact());
+        surface.set_owner(original.owner());
+        let tol = b.face(face).unwrap().tolerance;
+        let domain = surface.natural_uv_domain();
+        let point = Vec3::new(1.01, -0.01, 0.01);
+        let guess = Point2::new(1., 0.);
+        let r = surface
+            .local_point_solve_1_for_face::<EntityRef>(
+                &k,
+                &domain,
+                SolverOperation::Minimize,
+                point,
+                guess,
+                None,
+                Some(tol),
+            )
+            .unwrap();
+        // Analytic independent truth for this degree-one identity patch: the
+        // nearest point in the rectangular domain is its (1,0) corner.
+        assert!(r.found);
+        assert_eq!(r.solution.start.param(0).unwrap(), 1.);
+        assert_eq!(r.solution.start.param(1).unwrap(), 0.);
+        let expected = point.distance(Vec3::X);
+        assert!((r.solution.start.solution_value - expected).abs() <= expected.abs() * 1e-9);
+        assert_eq!(surface.owner(), original.owner());
+        assert_eq!(b.face(face).unwrap().tolerance, tol);
     }
 }

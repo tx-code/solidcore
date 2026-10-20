@@ -794,10 +794,22 @@ pub struct CacheTolerances {
 ///
 /// Those of the evaluations.
 pub fn cache_tolerances(surface: &Surface) -> Result<CacheTolerances> {
+    cache_tolerances_ordered(surface, false)
+}
+
+fn cache_tolerances_ordered(surface: &Surface, trimmed: bool) -> Result<CacheTolerances> {
     // Get some point positions scattered over the Surface's Natural Domain.
     let uv_domain = surface.natural_uv_domain();
-    let p1 = surface.evaluate_point(uv_domain.min())?;
-    let p_mid = surface.evaluate_point(uv_domain.evaluate(0.5, 0.5))?;
+    // SmSurface.cpp CacheMakeOrValidate evaluates MID first for SM_OC_TRIMSRF,
+    // MIN first for SM_OC_SURFACE. Keep the failure/evaluation order as well as
+    // the original floating-point summation order below.
+    let (p1, p_mid) = if trimmed {
+        let mid = surface.evaluate_point(uv_domain.evaluate(0.5, 0.5))?;
+        (surface.evaluate_point(uv_domain.min())?, mid)
+    } else {
+        let min = surface.evaluate_point(uv_domain.min())?;
+        (min, surface.evaluate_point(uv_domain.evaluate(0.5, 0.5))?)
+    };
     let p_mid2 = surface.evaluate_point(uv_domain.evaluate(0.9, 0.1))?;
     let p_mid3 = surface.evaluate_point(uv_domain.evaluate(0.1, 0.9))?;
     let p2 = surface.evaluate_point(uv_domain.max())?;
@@ -871,6 +883,21 @@ pub fn make_surface_cache<O: Copy + PartialEq>(
     surface: &Surface,
     handle: Option<O>,
 ) -> Result<SurfaceCache<O>> {
+    make_surface_cache_with_topology(
+        k,
+        surface,
+        handle,
+        &mut crate::surface::cache_topology::UnresolvedTopology,
+    )
+}
+
+/// The same native cache factory with scoped live topology access.
+pub fn make_surface_cache_with_topology<O: Copy + PartialEq>(
+    k: &Kernel,
+    surface: &Surface,
+    handle: Option<O>,
+    topology: &mut impl crate::surface::cache_topology::CacheTopology<O>,
+) -> Result<SurfaceCache<O>> {
     let tol = cache_tolerances(surface)?;
 
     // construct new SurfaceCache Object
@@ -885,7 +912,9 @@ pub fn make_surface_cache<O: Copy + PartialEq>(
     cache.set_surface_handle(handle);
 
     // build the surface subdivision tree
-    cache.build_tree(k, false)?;
+    cache.build_tree_with(k, false, &mut |cache, k, node| {
+        cache.test_against_tolerances_with_topology(k, node, topology)
+    })?;
     Ok(cache)
 }
 
@@ -902,7 +931,22 @@ pub fn make_trim_srf_cache<O: Copy + PartialEq>(
     surface: &Surface,
     handle: Option<O>,
 ) -> Result<TrimSrfCache<O>> {
-    let tol = cache_tolerances(surface)?;
+    make_trim_srf_cache_with_topology(
+        k,
+        surface,
+        handle,
+        &mut crate::surface::cache_topology::UnresolvedTopology,
+    )
+}
+
+/// The same native cache factory with scoped live topology access.
+pub fn make_trim_srf_cache_with_topology<O: Copy + PartialEq>(
+    k: &Kernel,
+    surface: &Surface,
+    handle: Option<O>,
+    topology: &mut impl crate::surface::cache_topology::CacheTopology<O>,
+) -> Result<TrimSrfCache<O>> {
+    let tol = cache_tolerances_ordered(surface, true)?;
 
     // construct new SurfaceCache Object
     // the cache refers to the surface itself upstream (`m_cpSurface`): an exact copy,
@@ -915,7 +959,7 @@ pub fn make_trim_srf_cache<O: Copy + PartialEq>(
     //    until some function calls SmSurfaceCache::GetTree()
     if !k.context.doing_boolean() {
         // build the surface subdivision tree annotated with UVTrimBoundary classifications
-        cache.build_tree(k)?;
+        cache.build_tree_with_topology(k, topology)?;
     }
     Ok(cache)
 }
@@ -938,6 +982,45 @@ pub fn get_surface_cache<O: Copy + PartialEq>(
         Err(e @ SolidError::Unported { .. }) => Err(e),
         // else - get or make SurfaceCache
         Err(_) => make_surface_cache(k, surface, handle),
+    }
+}
+
+/// Native single-slot `smsurf_GetSurfaceCache`, including reuse, invalidation,
+/// Boolean-delayed trim creation and ordinary-failure fallback. `old` belongs to
+/// this exact surface and context. Editing and geometric notifications outside
+/// this operation must invalidate the caller's slot as the native owner does.
+/// Missing implementations propagate instead of masquerading as native failures.
+pub fn get_owned_surface_cache_with_topology<O: Copy + PartialEq>(
+    k: &Kernel,
+    surface: &Surface,
+    handle: Option<O>,
+    old: Option<crate::surface::cache_topology::OwnedSurfaceCache<O>>,
+    topology: &mut impl crate::surface::cache_topology::CacheTopology<O>,
+) -> Result<crate::surface::cache_topology::OwnedSurfaceCache<O>> {
+    use crate::surface::cache_topology::OwnedSurfaceCache;
+    // SmCacheMgr.cpp (without SM_USE_GLOBAL_CACHE) returns the single old object
+    // independently of the requested cache enum. The common base flags are read;
+    // preserving the actual role avoids the source's unchecked downcast.
+    if let Some(old) = old {
+        let editing_disabled = if old.base().face_was_modified {
+            match topology.face(surface)? {
+                Some(face) => !topology.editing_enabled(face)?,
+                None => false,
+            }
+        } else {
+            false
+        };
+        if !old.requires_replacement(editing_disabled) {
+            return Ok(old);
+        }
+        // Native DeleteObjectsCache occurs before evaluating a replacement.
+        drop(old);
+    }
+    match make_trim_srf_cache_with_topology(k, surface, handle, topology) {
+        Ok(cache) => Ok(OwnedSurfaceCache::Trim(Box::new(cache))),
+        Err(error @ SolidError::Unported { .. }) => Err(error),
+        Err(_) => make_surface_cache_with_topology(k, surface, handle, topology)
+            .map(|cache| OwnedSurfaceCache::Surface(Box::new(cache))),
     }
 }
 

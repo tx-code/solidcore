@@ -59,20 +59,39 @@ The shared trim-cache algorithm retains native guard restoration and virtual
 containment classification. Planar UV construction dispatches to the actual
 `SmPlane::DropCurve` port and retains its line/B-spline kinds and intervals.
 
-`topology::surface_cache::make_face_cache` builds an owning temporary cache with
-live typed model handles. `ComputeUVPoint` builds it before temporarily changing
-its point/boundary flags, then restores those flags on every return. The context
-cannot outlive its model borrow; cache reuse/invalidation across edits and the
-full native cache manager remain separate required work. Generic callers without
-an owning-model resolver still report missing dependencies. Nonplanar projection
-and remaining geometric dispatch are not implied by the planar comparisons.
+`topology::surface_cache::make_face_cache` explicitly builds a trimmed cache.
+`get_face_surface_cache` instead implements the native role-preserving getter:
+it consumes an optional model-bound old slot, retains it while current or editing,
+deletes modified data when editing ends, tries trimmed construction, and falls
+back to the real plain factory after an ordinary construction failure. Missing
+implementations propagate separately and never trigger a false fallback success.
+`OwnedSurfaceCache` preserves the actual plain/trimmed dynamic role; the fast
+point solver classifies trim boundaries only for an actual trimmed cache.
 
-The current `ComputeUVPoint` integration qualifies successful trim-cache builds.
-The native owned `smsurf_GetSurfaceCache` fallback to a plain surface cache after
-an ordinary trim-cache build failure still needs to be wired; this caller
-currently returns the build error. Its remaining owned B-spline local-solver
-paths can also reach unresolved face tolerance/seam context. These cases do not
-establish full method parity or native import acceptance.
+This is the single-slot behavior of `SmCacheMgr.cpp` without
+`SM_USE_GLOBAL_CACHE` at `d8ed45a`, including reuse of a plain fallback when a
+trimmed cache is requested later. Old geometry-bound cache storage belongs to the
+caller and must be discarded on geometric edit notifications. Retaining a current
+slot reads owner/base flags before any geometry copy or evaluation; it does not
+deep-copy a large NURBS definition just to reuse its cache. Full cache-manager
+registration, notification-driven invalidation and checkout/lifetime behavior
+remain separate required work.
+
+Boolean-time trim creation leaves the tree absent. An explicit `GetTree` follows
+the native predicate and dispatches to the actual plain or trimmed builder; it
+does not relabel the object. Native factory sample evaluation order is retained:
+midpoint first for trimmed construction, minimum first for plain construction.
+`ComputeUVPoint` uses this getter before temporarily changing its solver flags,
+then restores those flags on every return. No live owner context or working
+tolerance snapshot is retained beyond its scoped model borrow.
+
+The owned B-spline local solver now carries the supplied live face working
+tolerance into its nested boundary/seam check. This is distinct from its
+convergence/acceptance budgets. The direct inside, boundary and outside point
+probes compare real B-spline definitions and owned-face tolerances. Root checks
+and other owned B-spline paths can still reach unresolved owner dependencies;
+general projection remains incomplete. These operations do not establish native
+import acceptance.
 
 Native check mode can still update working tolerances indirectly when it creates
 UV curves inside this cache path: `CreateUVTrimCurves(TRUE, ...)` invokes the native
@@ -88,7 +107,13 @@ The matrix varies gap thresholds, check/update mode, report selection, repeated
 calls, prior validation flags, box flags and locks. It compares diagnostics and
 values, maxima and witnesses, resulting working tolerances, restored flags and
 boxes. Cache cases also compare flag/domain state, UV curve kinds and parameters,
-point classifications and actual topology identities. Deferred cache/solver paths
+point classifications and actual topology identities. Lifecycle cases additionally
+compare dynamic role, delayed trees, reuse markers, modified/editing flags and
+explicit factory failures. The `trim_failure` cases inject a known factory failure
+in C++ and at the trim-boundary build in Rust, then execute actual getter/plain
+cache operations; they establish control-flow semantics, not numerical-model
+correctness. The displaced-plane crashing C++ probe is excluded and recorded in
+`plan/upstream-issues.md`. Deferred cache/solver paths
 are reported separately, never passed.
 
 ```text

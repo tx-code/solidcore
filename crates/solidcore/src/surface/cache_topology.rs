@@ -1,9 +1,12 @@
 //! Scoped topology access for a surface's subdivision and trim caches.
 //!
-//! Upstream: `source/SMLib/src/SmSurfaceCache.cpp`, `SmTrimSrfCache.cpp`.
+//! Upstream: `source/SMLib/src/SmSurfaceCache.cpp`, `SmTrimSrfCache.cpp`,
+//! `SmSurface.cpp::CacheMakeOrValidate`, `SmCacheMgr.cpp` (default single slot).
 //! | Rust | Upstream |
 //! |------|----------|
 //! | [`CacheTopology`] | owner calls reached by `SmTrimSrfCache` / `SmSurfaceCache` |
+//! | [`OwnedSurfaceCache`], [`SurfaceCacheView`] | owning/borrowed dynamic surface-cache role |
+//! | [`OwnedSurfaceCache::get_tree_with_topology`] | virtual `SmSurfaceCache::GetTree` |
 //!
 //! Deviations: native owner pointers become a caller-borrowed resolver. The cache
 //! never owns the `BRep`, detaches geometry, or retains a tolerance snapshot.
@@ -13,6 +16,106 @@ use crate::kernel::Kernel;
 use crate::math::Point2;
 use crate::nurbs::b_spline_curve::BSplineCurve;
 use crate::surface::surface::Surface;
+use crate::surface::surface_cache::p1::{FaceContainment, SurfaceCache};
+use crate::surface::trim_srf_cache::TrimSrfCache;
+
+/// The actual dynamic role of an owning native surface cache. Both allocations
+/// occupy the one object cache slot used by `SmCacheMgr` without
+/// `SM_USE_GLOBAL_CACHE`; a plain fallback remains a plain cache on reuse.
+#[derive(Debug)]
+pub enum OwnedSurfaceCache<O> {
+    /// `SmSurfaceCache`, including a successful fallback after trim build failure.
+    Surface(Box<SurfaceCache<O>>),
+    /// `SmTrimSrfCache`, including a cache whose Boolean build was delayed.
+    Trim(Box<TrimSrfCache<O>>),
+}
+
+/// A borrowed cache preserving its actual dynamic role for virtual dispatch.
+pub enum SurfaceCacheView<'a, O> {
+    /// The plain cache base class.
+    Surface(&'a SurfaceCache<O>),
+    /// The trimmed cache override.
+    Trim(&'a TrimSrfCache<O>),
+}
+
+impl<O: Copy + PartialEq> SurfaceCacheView<'_, O> {
+    /// The common base state; the returned data alone does not imply trim support.
+    pub const fn base(&self) -> &SurfaceCache<O> {
+        match self {
+            Self::Surface(cache) => cache,
+            Self::Trim(cache) => cache.base(),
+        }
+    }
+
+    /// The trimmed override when the actual object is an `SmTrimSrfCache`.
+    pub const fn trimmed(&self) -> Option<&TrimSrfCache<O>> {
+        match self {
+            Self::Surface(_) => None,
+            Self::Trim(cache) => Some(cache),
+        }
+    }
+}
+
+impl<O: Copy + PartialEq> OwnedSurfaceCache<O> {
+    /// Common native invalidation predicate, shared by the generic and `BRep`
+    /// getters so a reusable slot needs no geometry copy or evaluation.
+    pub(crate) fn requires_replacement(&self, editing_disabled: bool) -> bool {
+        self.base().face_was_modified && editing_disabled
+    }
+
+    /// Borrow the common state while retaining the allocation's dynamic type.
+    pub fn view(&self) -> SurfaceCacheView<'_, O> {
+        match self {
+            Self::Surface(cache) => SurfaceCacheView::Surface(cache),
+            Self::Trim(cache) => SurfaceCacheView::Trim(cache),
+        }
+    }
+
+    /// The base fields shared by both native cache roles.
+    pub fn base(&self) -> &SurfaceCache<O> {
+        match self {
+            Self::Surface(cache) => cache,
+            Self::Trim(cache) => cache.base(),
+        }
+    }
+
+    /// Mutable native base fields, including temporary solver flags.
+    pub fn base_mut(&mut self) -> &mut SurfaceCache<O> {
+        match self {
+            Self::Surface(cache) => cache,
+            Self::Trim(cache) => cache.base_mut(),
+        }
+    }
+
+    /// Native `GetTree` predicate followed by the actual virtual `BuildTree`.
+    /// Delayed Boolean caches and owner-attached plain fallback caches retain
+    /// the same rebuild predicate. No plain object is promoted to a trimmed one.
+    pub fn get_tree_with_topology(
+        &mut self,
+        k: &Kernel,
+        topology: &mut impl CacheTopology<O>,
+    ) -> Result<&mut crate::geom::tree::Tree<O>> {
+        let base = self.base();
+        let needs_build = base.tree().is_none()
+            || (!base.have_t_surface_cache
+                && base.surface().face()?.is_some()
+                && base.face_containment_done != FaceContainment::UnderConstruction);
+        if needs_build {
+            match self {
+                Self::Trim(cache) => cache.build_tree_with_topology(k, topology)?,
+                Self::Surface(cache) => cache.build_tree_with(k, false, &mut |c, k, n| {
+                    c.test_against_tolerances_with_topology(k, n, topology)
+                })?,
+            }
+        }
+        self.base_mut().tree_mut().ok_or_else(|| {
+            SolidError::invalid_input(
+                "surface::cache_topology::get_tree",
+                "cache build produced no tree",
+            )
+        })
+    }
+}
 
 /// The live topology operations used by `SmTrimSrfCache`. Each call must resolve
 /// handles in one model; working tolerances are not import acceptance budgets.

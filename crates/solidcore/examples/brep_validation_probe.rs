@@ -26,6 +26,70 @@ use solidcore::topology::shell::ShellMembers;
 use solidcore::topology::{Edge, EdgeuseOwner, LoopuseStart, VertexuseOwner};
 use std::error::Error;
 
+// A host-only fault at the trim boundary-build phase. The real cache factories,
+// ordinary-failure fallback, BRep context and plain cache algorithms still run.
+struct RejectTrim<'a>(solidcore::topology::surface_cache::BrepSurfaceContext<'a>);
+macro_rules! delegate_cache {
+    ($(fn $name:ident($($arg:ident : $ty:ty),*) -> $ret:ty;)*) => {
+        $(fn $name(&mut self,$($arg:$ty),*) -> $ret {
+            solidcore::surface::cache_topology::CacheTopology::$name(&mut self.0,$($arg),*)
+        })*
+    };
+}
+impl solidcore::surface::cache_topology::CacheTopology<solidcore::error::EntityRef>
+    for RejectTrim<'_>
+{
+    fn create_uv_trim_curves(
+        &mut self,
+        _k: &Kernel,
+        _f: solidcore::error::EntityRef,
+    ) -> solidcore::Result<()> {
+        Err(SolidError::sm_err("synthetic trim factory failure"))
+    }
+    delegate_cache! {
+        fn face(s:&Surface) -> solidcore::Result<Option<solidcore::error::EntityRef>>;
+        fn face_tolerance(f:solidcore::error::EntityRef) -> solidcore::Result<f64>;
+        fn editing_enabled(f:solidcore::error::EntityRef) -> solidcore::Result<bool>;
+        fn set_editing_enabled(f:solidcore::error::EntityRef,e:bool) -> solidcore::Result<()>;
+        fn upward_loopuses(f:solidcore::error::EntityRef) -> solidcore::Result<Vec<solidcore::error::EntityRef>>;
+        fn edgeuses(l:solidcore::error::EntityRef) -> solidcore::Result<Vec<solidcore::error::EntityRef>>;
+        fn uv_trim_curve(e:solidcore::error::EntityRef) -> solidcore::Result<Option<solidcore::nurbs::b_spline_curve::BSplineCurve>>;
+        fn vertexuses(l:solidcore::error::EntityRef) -> solidcore::Result<Vec<solidcore::error::EntityRef>>;
+        fn uv_point(k:&Kernel,v:solidcore::error::EntityRef) -> solidcore::Result<Vec2>;
+        fn vertex_tolerance(v:solidcore::error::EntityRef) -> solidcore::Result<f64>;
+        fn point_classify(k:&Kernel,f:solidcore::error::EntityRef,uv:Vec2,t:f64,flags:(bool,bool)) -> solidcore::Result<(i32,Option<solidcore::error::EntityRef>)>;
+    }
+}
+fn probe_cache(
+    k: &Kernel,
+    b: &mut solidcore::topology::Brep,
+    face: solidcore::topology::FaceId,
+    old: Option<solidcore::surface::cache_topology::OwnedSurfaceCache<solidcore::error::EntityRef>>,
+    fail: bool,
+) -> solidcore::Result<
+    solidcore::surface::cache_topology::OwnedSurfaceCache<solidcore::error::EntityRef>,
+> {
+    if !fail {
+        return solidcore::topology::surface_cache::get_face_surface_cache(k, b, face, old);
+    }
+    // Fault fixtures use only the fixed analytic unit plane. Host-only Copy
+    // retains that exact definition; production factories use clone_for_evaluation.
+    let source = b
+        .face(face)?
+        .surface
+        .as_ref()
+        .ok_or_else(|| SolidError::null_pointer("cache probe"))?;
+    let mut surface = source.clone();
+    surface.set_owner(source.owner());
+    solidcore::surface::surface::p1::get_owned_surface_cache_with_topology(
+        k,
+        &surface,
+        None,
+        old,
+        &mut RejectTrim(solidcore::topology::surface_cache::BrepSurfaceContext { brep: b, face }),
+    )
+}
+
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 fn require<T>(value: Option<T>) -> Result<T> {
     value.ok_or_else(|| "missing fixture identity".into())
@@ -43,7 +107,8 @@ fn run() -> Result<Value> {
     let raw = mode == "raw_fix" || mode == "raw_check";
     let tolerance = mode == "tolerance_check" || mode == "tolerance_update";
     let box_mode = mode.starts_with("bbox_");
-    let cache_mode = mode == "cache_build" || mode == "cache_editing";
+    let cache_mode = mode.starts_with("cache_");
+    let local_mode = mode == "local_bsp";
     let mut k = Kernel::default();
     let mut builder = BrepConstructor::new()?;
     let (outer, _) = builder.start_shell()?;
@@ -51,7 +116,7 @@ fn run() -> Result<Value> {
     let domain = Extent2d::from_bounds(0., 0., 1., 1.);
     builder.set_face_surface(
         Surface::from(Plane::new(
-            Point3::ZERO,
+            Vec3::new(0., 0., if defect == "surface_offset" { 1. } else { 0. }),
             Vec3::X,
             Vec3::Y,
             Vec2::new(1., 1.),
@@ -132,6 +197,16 @@ fn run() -> Result<Value> {
     builder.end_face()?;
     builder.end_shell(&mut k, false)?;
     let mut b = builder.finish()?;
+    if defect.starts_with("bspline_") {
+        let source = b.face(face)?.surface.as_ref().ok_or("synthetic surface")?;
+        let owner = source.owner();
+        let solidcore::surface::surface::SurfaceKind::Plane(plane) = source.kind() else {
+            return Err("synthetic plane".into());
+        };
+        let mut surface = Surface::from(plane.base_with_nurb()?.clone_exact());
+        surface.set_owner(owner);
+        b.face_mut(face)?.surface = Some(surface);
+    }
     if defect == "edge_no_uses" || second == "edge_no_uses" {
         let mut e = Edge::new([*at(&vertices, 0)?, *at(&vertices, 1)?]);
         let id = b.add_edge_record(e.clone())?;
@@ -156,8 +231,8 @@ fn run() -> Result<Value> {
         .ok_or("missing fixture vertex use")?;
     for name in [defect.as_str(), second] {
         match name {
-            "none" | "edge_no_uses" => {}
-            name if name.starts_with("reverse_") => {}
+            "none" | "edge_no_uses" | "surface_offset" | "trim_failure" => {}
+            name if name.starts_with("reverse_") || name.starts_with("bspline_") => {}
             "no_infinite_region" => b.set_infinite_region(None),
             "region_no_owner" => {
                 let r = require(b.infinite_region())?;
@@ -253,8 +328,55 @@ fn run() -> Result<Value> {
     let mut tolerance_output = None;
     let mut box_output = None;
     let mut cache_output = None;
+    let mut cache_slot = None;
+    let mut local_output = None;
     let mut invoke = |reports: Option<&mut AssertArray>| {
         if raw {
+            Ok(())
+        } else if local_mode {
+            let outside = defect == "bspline_outside";
+            let boundary = defect == "bspline_boundary";
+            let point = Vec3::new(
+                if outside {
+                    1.01
+                } else if boundary {
+                    1.
+                } else {
+                    0.2
+                },
+                if outside {
+                    -0.01
+                } else if boundary {
+                    0.
+                } else {
+                    0.3
+                },
+                0.01,
+            );
+            let guess = Vec2::new(
+                if outside { 1. } else { 0.5 },
+                if outside { 0. } else { 0.5 },
+            );
+            let source = b
+                .face(face)?
+                .surface
+                .as_ref()
+                .ok_or_else(|| SolidError::null_pointer("local probe"))?;
+            let r = source.local_point_solve_1_for_face::<solidcore::error::EntityRef>(
+                &k,
+                &domain,
+                solidcore::geom::global_solver::SolverOperation::Minimize,
+                point,
+                guess,
+                None,
+                Some(b.face(face)?.tolerance),
+            )?;
+            local_output = Some(json!([
+                r.found,
+                r.solution.start.param(0)?,
+                r.solution.start.param(1)?,
+                r.solution.start.solution_value
+            ]));
             Ok(())
         } else if tolerance {
             validate_and_update_tolerances(
@@ -270,7 +392,34 @@ fn run() -> Result<Value> {
         } else if cache_mode {
             use solidcore::surface::surface_cache::p1::FaceContainment;
             b.set_editing_enabled(mode == "cache_editing");
-            let cache = solidcore::topology::surface_cache::make_face_cache(&k, &mut b, face)?;
+            k.context
+                .set_doing_boolean(mode == "cache_boolean" || mode == "cache_boolean_tree");
+            let mut cache = probe_cache(
+                &k,
+                &mut b,
+                face,
+                cache_slot.take(),
+                defect == "trim_failure",
+            )?;
+            if matches!(
+                mode,
+                "cache_reuse" | "cache_rebuild" | "cache_reuse_editing" | "cache_rebuild_boolean"
+            ) {
+                cache.base_mut().trim_subdivision_factor = 37.;
+                cache.base_mut().face_was_modified = mode != "cache_reuse";
+                b.set_editing_enabled(mode == "cache_reuse_editing");
+                k.context.set_doing_boolean(mode == "cache_rebuild_boolean");
+                cache = probe_cache(&k, &mut b, face, Some(cache), defect == "trim_failure")?;
+            }
+            if mode == "cache_boolean_tree" || mode == "cache_base_tree" {
+                cache.get_tree_with_topology(
+                    &k,
+                    &mut solidcore::topology::surface_cache::BrepSurfaceContext {
+                        brep: &mut b,
+                        face,
+                    },
+                )?;
+            }
             let base = cache.base();
             let a = base.uv_domain().min();
             let z = base.uv_domain().max();
@@ -304,6 +453,12 @@ fn run() -> Result<Value> {
                     .map_err(|_| SolidError::invalid_input("cache probe", "negative type code"))?;
                 Ok((t << 32) | r.key.0)
             };
+            let cache_role = json!([
+                cache.view().trimmed().is_some(),
+                base.tree().is_some(),
+                base.trim_subdivision_factor,
+                base.face_was_modified
+            ]);
             let mut point_tests = Vec::new();
             for uv in [
                 Vec2::new(0.2, 0.2),
@@ -311,15 +466,22 @@ fn run() -> Result<Value> {
                 Vec2::new(0., 0.),
                 Vec2::new(0.5, 0.),
             ] {
-                let (good, object) = cache.point_test_with_topology(
-                    &k,
-                    uv,
-                    None,
-                    &mut solidcore::topology::surface_cache::BrepSurfaceContext {
-                        brep: &mut b,
-                        face,
-                    },
-                )?;
+                if base.tree().is_none() {
+                    break;
+                }
+                let (good, object) = if let Some(trim) = cache.view().trimmed() {
+                    trim.point_test_with_topology(
+                        &k,
+                        uv,
+                        None,
+                        &mut solidcore::topology::surface_cache::BrepSurfaceContext {
+                            brep: &mut b,
+                            face,
+                        },
+                    )?
+                } else {
+                    (base.point_test(uv), None)
+                };
                 let key = match object {
                     Some(solidcore::error::EntityRef::Face(id)) => {
                         Some(identity(CacheObject::Face(id))?)
@@ -360,7 +522,9 @@ fn run() -> Result<Value> {
                 ]),
                 json!(trims),
                 json!(point_tests),
+                cache_role,
             ));
+            cache_slot = Some(cache);
             Ok(())
         } else if box_mode {
             let result = if mode == "bbox_tight" {
@@ -490,10 +654,14 @@ fn run() -> Result<Value> {
         output.insert("working_tolerances".into(), json!(working));
         output.insert("validate_only".into(), json!(b.validate_only()));
     }
-    if let Some((cache, trims, points)) = cache_output {
+    if let Some(local) = local_output {
+        output.insert("local".into(), local);
+    }
+    if let Some((cache, trims, points, role)) = cache_output {
         output.insert("cache".into(), cache);
         output.insert("uv_trims".into(), trims);
         output.insert("point_tests".into(), points);
+        output.insert("cache_role".into(), role);
     }
     if let Some(bounds) = box_output {
         let a = bounds.min();

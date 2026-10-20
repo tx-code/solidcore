@@ -3167,3 +3167,23 @@ meantime, whoever merges renumbers the new entry and every reference to it (here
 - **How found:** source comparison following the overseer's independent diagnostic of `upstream_piecewise_boxes_2` and `_3`, on two 10×10×10 boxes offset by 5 in X. This author did not debug or replay the crashing inputs.
 - **Confirmed:** the separate diagnostic on `sc-builder-4` at `8df5981c` observed SIGSEGV and the original other B-rep's destruction during the first `ManifoldBoolean(SM_BO_PARTIAL_MERGE)` call. The next surface used that freed B-rep. This entry records the source-level lifetime defect; the provided diagnostic is archived in the swarm status directory.
 - **Guard:** before native construction, the FFI and shim refuse family 4 when the other operand is a box (six surfaces), an options pointer is present, imprinting (`mask & 2`) is on, and keep-other (`mask & 16`) is off. A shell-vertex other operand has no surfaces and never enters the per-surface loop (`SmMerge.cpp:394-407,441,772-778`), so it stays accepted, including when the primary is a box. All other families, non-imprinting options, null options, and imprinting with keep-other remain accepted. The two original fixtures assert this specific refusal without executing C++; `mask | 16` variants keep the imprinting branch exercised. No kernel result is fabricated and no Rust dependency deferral is used to label the refusal.
+
+
+#### Maintained fork cache reference: displaced planar boundary access violation
+
+- **Location/configuration:** `smsurf_GetSurfaceCache` on the public synthetic
+  triangle of `scripts/brep_validation_reference.cpp`, maintained source
+  `d8ed45a`, Windows Release SDK used by the fork comparison. No claim for other
+  builds or for a precisely localized failing instruction.
+- **Trigger:** `surface_offset zero none cache_build`: move the defining face
+  plane to Z=1 while its connected edge/vertex definitions stay at Z=0. The graph
+  is traversable but geometrically inconsistent; it is not a valid import.
+- **Confirmed:** the actual SDK observer exited with Windows status
+  `0xC0000005` (3221225477). Rust reached the explicitly missing
+  `SmSurfaceDropCurve::DoTrace`; no accepted model was returned.
+- **Evidence/guard:** keep this reproduction outside the native pass/fail matrix
+  because the C++ operation has undefined/crashing behavior. Controlled
+  `trim_failure` cases instead reject the initial trim factory through a test-only
+  virtual plane override; the real getter and plain-cache factory establish the
+  fallback protocol. These fault cases are not numerical geometry evidence.
+  Further native crash localization and general projection migration remain open.

@@ -795,10 +795,10 @@ fn global_point_solve(
     point_test: bool,
 ) -> Result<Vec<PointDrop>> {
     use crate::geom::solution_array::SolutionArray;
-    use crate::topology::surface_cache::{make_face_cache, BrepSurfaceContext};
+    use crate::topology::surface_cache::{get_face_surface_cache, BrepSurfaceContext};
     // Native ComputeUVPoint checks out the real owner cache BEFORE changing its
     // flags. Exact evaluation storage avoids copy-constructor knot normalization.
-    let mut cache = make_face_cache(k, b, face)?;
+    let mut cache = get_face_surface_cache(k, b, face, None)?;
     let surface = face_surface(b, face)?.clone_for_evaluation()?;
     let base = cache.base_mut();
     let saved = (
@@ -812,7 +812,7 @@ fn global_point_solve(
         base.point_test_enabled = false;
     }
     let mut solutions = SolutionArray::<EntityRef>::new();
-    let result = surface.global_point_solve_into_with_cache(
+    let result = surface.global_point_solve_into_with_surface_cache(
         k,
         None,
         domain,
@@ -822,7 +822,7 @@ fn global_point_solve(
         None,
         request,
         &mut solutions,
-        Some(&cache),
+        Some(cache.view()),
         &mut BrepSurfaceContext { brep: b, face },
     );
     let base = cache.base_mut();

@@ -5,6 +5,7 @@
 // restored before context teardown, including an exception or early return.
 #include "SmAssertArray.h"
 #include "SmBrep.h"
+#include "SmBSplineSurface.h"
 #include "SmBrepData.h"
 #include "SmContext.h"
 #include "SmEdge.h"
@@ -18,6 +19,7 @@
 #include "SmRegion.h"
 #include "SmShell.h"
 #include "SmSurfaceCache.h"
+#include "SmTrimSrfCache.h"
 #include "SmVertex.h"
 #include "SmVertexuse.h"
 #include <algorithm>
@@ -76,11 +78,27 @@ FIELD(EdgeTol, SmEdge, m_sZoneTol3d, SmZoneTol3d)
 FIELD(VertexTol, SmVertex, m_sZoneTol3d, SmZoneTol3d)
 FIELD(RootTol, SmBrep, m_sThisZoneTol3d, SmZoneTol3d)
 FIELD(ValidateOnly,SmBrep,m_bValidateOnly,SmBoolean)
+FIELD(CacheTree,SmSurfaceCache,m_pTree,SmTree *)
+FIELD(TrimSubdivisionFactor,SmSurfaceCache,m_dTrimSubdivisionFactor,double)
 #undef FIELD
 template <class Tag, class T> static decltype(auto) field(T *p) { return p->*access(Tag{}); }
 struct EmptyEdge final : SmEdge {
     EmptyEdge() = default;
     ~EmptyEdge() override = default;
+};
+
+// Synthetic fault injection for the getter protocol, not a numerical oracle.
+// The actual native getter and plain cache factory still run. Reject only the
+// initial trimmed factory that would otherwise implant this face's UV boundary.
+struct RejectInitialTrimPlane final : SmPlane {
+    using SmPlane::SmPlane;
+    SmStatus CacheMakeOrValidate(SmObjectCacheType kind, const SmAObject *object,
+                                SmCacheObj *old, SmCacheObj *&created) const override {
+        auto face=GetFace();
+        if(kind==SM_OC_TRIMSRF && !old && face && !GetContext()->GetDoingBoolean()
+            && !face->GetBrep()->m_bEditingEnabled){created=nullptr;return SM_ERR;}
+        return SmPlane::CacheMakeOrValidate(kind,object,old,created);
+    }
 };
 
 static void require(SmStatus s) {
@@ -143,7 +161,8 @@ int main(int argc, char **argv) {
         const bool raw = mode == "raw_fix" || mode == "raw_check";
         const bool tolerance=mode=="tolerance_check"||mode=="tolerance_update";
         const bool box_mode=mode.starts_with("bbox_");
-        const bool cache_mode=mode=="cache_build"||mode=="cache_editing";
+        const bool cache_mode=mode.starts_with("cache_");
+        const bool local_mode=mode=="local_bsp";
         SmContext context;
         SmBrepConstructor builder;
         auto b = builder.StartBrep(context);
@@ -151,10 +170,17 @@ int main(int argc, char **argv) {
         require(builder.StartShell(outer, inner));
         auto f = builder.StartFace(SM_OT_SAME);
         SmExtent2d domain(0, 0, 1, 1);
-        require(builder.SetFaceSurface(
-            new (&context) SmPlane(SmPoint3d(0, 0, 0), SmVector3d(1, 0, 0), SmVector3d(0, 1, 0),
-                                   SmVector2d(1, 1), domain, &context),
-            domain));
+        SmSurface *source_surface;
+        if(defect=="trim_failure")source_surface=new (&context) RejectInitialTrimPlane(
+            SmPoint3d(0,0,0),SmVector3d(1,0,0),SmVector3d(0,1,0),SmVector2d(1,1),domain,&context);
+        else source_surface=new (&context) SmPlane(SmPoint3d(0,0,defect=="surface_offset"?1.0:0.0),
+            SmVector3d(1,0,0),SmVector3d(0,1,0),SmVector2d(1,1),domain,&context);
+        if(defect.starts_with("bspline_")){
+            const gw_SURFACE* raw=static_cast<SmBSplineSurface*>(source_surface)->GetOrCreateGwNurbPointer();
+            SmSurface* replacement=new (&context) SmBSplineSurface(raw);
+            delete source_surface;source_surface=replacement;
+        }
+        require(builder.SetFaceSurface(source_surface,domain));
         auto loop = builder.StartLoop(SM_OT_SAME);
         std::array<SmPoint3d, 3> points = {SmPoint3d(0, 0, 0), SmPoint3d(1, 0, 0),
                                            SmPoint3d(0, 1, 0)};
@@ -243,7 +269,7 @@ int main(int argc, char **argv) {
             record(keys, vs[i], i);
         Restore restore;
         auto apply = [&](const std::string &name) {
-            if (name == "none" || name == "edge_no_uses" || name.starts_with("reverse_"))
+            if (name == "none" || name == "surface_offset" || name == "trim_failure" || name == "edge_no_uses" || name.starts_with("reverse_") || name.starts_with("bspline_"))
                 return;
             if (name == "no_infinite_region")
                 restore.clear(field<Infinite>(b));
@@ -352,7 +378,7 @@ int main(int argc, char **argv) {
         SmStatus query_status=SM_SUCCESS;
         auto run_tolerance=[&]{return b->ValidateAndUpdateTolerances(mode=="tolerance_check",violated,ef_trim,ve,vf,target,level,selection=="given"?&requested:nullptr,&ef_trim_obj,&ve_obj,&vf_obj,&ef_obj,&vf_trim_obj,&ef,&vf_trim);};
         auto status =
-            (raw||tolerance||box_mode||cache_mode) ? SM_SUCCESS
+            (raw||tolerance||box_mode||cache_mode||local_mode) ? SM_SUCCESS
                 : b->ValidatePointers(target, level, selection == "given" ? &requested : nullptr,
                                       SM_NO_WALK);
         if (raw)
@@ -366,14 +392,34 @@ int main(int argc, char **argv) {
             status=query_status;
         }
         if(tolerance&&selection=="repeat")status=run_tolerance();
-        if (!raw && !tolerance && !box_mode && !cache_mode && selection == "repeat")
+        if (!raw && !tolerance && !box_mode && !cache_mode && !local_mode && selection == "repeat")
             status = b->ValidatePointers(target, level, nullptr, SM_NO_WALK);
+        SmBoolean local_found=FALSE;SmSolution local_solution;
+        if(local_mode){
+            const bool outside=defect=="bspline_outside",boundary=defect=="bspline_boundary";
+            SmPoint3d point(outside?1.01:boundary?1.0:.2,outside?-.01:boundary?0.0:.3,.01);
+            SmPoint2d guess(outside?1.0:.5,outside?0.0:.5);
+            const auto solve=[&]{return f->GetSurface()->LocalPointSolve(domain,SM_SO_MINIMIZE,point,guess,local_found,local_solution);};
+            status=solve();if(selection=="repeat")status=solve();
+        }
         SmSurfaceCache *cache=nullptr;
-        if(cache_mode){
+        auto obtain_cache=[&]{
             b->m_bEditingEnabled=mode=="cache_editing";
+            context.SetDoingBoolean(mode=="cache_boolean"||mode=="cache_boolean_tree");
             cache=smsurf_GetSurfaceCache(f->GetSurface());
             if(!cache)throw std::runtime_error("native surface cache not built");
-        }
+            if(mode=="cache_reuse"||mode=="cache_rebuild"||mode=="cache_reuse_editing"||mode=="cache_rebuild_boolean"){
+                field<TrimSubdivisionFactor>(cache)=37.0;
+                cache->m_bFaceWasModified=mode!="cache_reuse";
+                b->m_bEditingEnabled=mode=="cache_reuse_editing";
+                context.SetDoingBoolean(mode=="cache_rebuild_boolean");
+                cache=smsurf_GetSurfaceCache(f->GetSurface());
+                if(!cache)throw std::runtime_error("native surface cache not rebuilt");
+            }
+            if((mode=="cache_boolean_tree"||mode=="cache_base_tree")&&!cache->GetTree())throw std::runtime_error("native delayed tree failed");
+        };
+        if(cache_mode){obtain_cache();if(selection=="repeat")obtain_cache();}
+
         std::cout << "{\"status\":" << status
                   << ",\"last_add\":" << (reports.GetLastAdd() ? "true" : "false")
                   << ",\"reports\":[";
@@ -422,6 +468,7 @@ int main(int argc, char **argv) {
             for(ULONG i=0;i<vs.GetSize();++i)std::cout<<','<<vs[i]->GetTolerance();std::cout<<']';
         }
         if(box_mode){auto a=bounds.GetMin(),z=bounds.GetMax();std::cout<<",\"box\":["<<a.x<<','<<a.y<<','<<a.z<<','<<z.x<<','<<z.y<<','<<z.z<<']';}
+        if(local_mode)std::cout<<",\"local\":["<<(local_found?"true":"false")<<','<<local_solution.m_vStart[0]<<','<<local_solution.m_vStart[1]<<','<<local_solution.m_vStart.m_dSolutionValue<<']';
         if(cache_mode){
             auto a=cache->GetUVDomain().GetMin(),z=cache->GetUVDomain().GetMax();
             std::cout<<",\"cache\":["<<a.x<<','<<a.y<<','<<z.x<<','<<z.y<<','
@@ -429,9 +476,12 @@ int main(int argc, char **argv) {
                 <<(cache->m_bProcessBoundaryCurves?"true":"false")<<','
                 <<(cache->m_bPointTestEnabled?"true":"false")<<','<<cache->m_bFaceContainmentDone<<','
                 <<(b->m_bEditingEnabled?"true":"false")<<','<<(f->GetSurface()->GetFace()==f?"true":"false")<<']';
+            std::cout<<",\"cache_role\":["<<(cache->IsKindOf(SmTrimSrfCache_TYPE)?"true":"false")<<','
+                <<(field<CacheTree>(cache)?"true":"false")<<','<<field<TrimSubdivisionFactor>(cache)<<','
+                <<(cache->m_bFaceWasModified?"true":"false")<<']';
             const SmPoint2d points[]={SmPoint2d(.2,.2),SmPoint2d(.8,.8),SmPoint2d(0,0),SmPoint2d(.5,0)};
             std::cout<<",\"point_tests\":[";
-            for(int n=0;n<4;++n){
+            for(int n=0;n<4 && field<CacheTree>(cache);++n){
                 if(n)std::cout<<',';
                 SmBoolean good=FALSE;SmObject *object=nullptr;
                 const auto result=cache->PointTest(points[n],good,nullptr,&object);

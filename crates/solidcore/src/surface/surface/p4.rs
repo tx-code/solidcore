@@ -1333,6 +1333,37 @@ impl Surface {
         cache: Option<&crate::surface::trim_srf_cache::TrimSrfCache<O>>,
         topology: &mut impl crate::surface::cache_topology::CacheTopology<O>,
     ) -> Result<()> {
+        self.global_point_solve_into_with_surface_cache(
+            k,
+            surface,
+            uv_domain,
+            op,
+            test_point,
+            src_zone_tol_3d,
+            opt_target_distance,
+            requested,
+            solutions,
+            cache.map(crate::surface::cache_topology::SurfaceCacheView::Trim),
+            topology,
+        )
+    }
+
+    /// The same native solve with the actual plain/trimmed cache dynamic type.
+    #[allow(clippy::too_many_arguments)]
+    pub fn global_point_solve_into_with_surface_cache<O: SolutionObject>(
+        &self,
+        k: &Kernel,
+        surface: Option<O>,
+        uv_domain: &Extent2d,
+        op: SolverOperation,
+        test_point: Point3,
+        src_zone_tol_3d: f64,
+        opt_target_distance: Option<f64>,
+        requested: SolutionRequested,
+        solutions: &mut SolutionArray<O>,
+        cache: Option<crate::surface::cache_topology::SurfaceCacheView<'_, O>>,
+        topology: &mut impl crate::surface::cache_topology::CacheTopology<O>,
+    ) -> Result<()> {
         // init output
         *solutions = SolutionArray::new();
 
@@ -1377,7 +1408,10 @@ impl Surface {
                 // surface cache indicate otherwise.
                 if self.owner().is_some_and(|o| o.type_code == FACE_TYPE) {
                     if let Some(cache) = cache {
-                        if cache.base().point_test_enabled && !cache.base().face_was_modified {
+                        if cache.trimmed().is_some()
+                            && cache.base().point_test_enabled
+                            && !cache.base().face_was_modified
+                        {
                             let face = topology.face(self)?.ok_or_else(|| {
                                 SolidError::null_pointer("surface::global_point_solve")
                             })?;

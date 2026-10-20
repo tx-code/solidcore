@@ -106,5 +106,13 @@ Scoped surface-cache owner access now connects actual face working tolerances,
 editing guards, UV generation, typed trim/vertex handles and face classification.
 The planar virtual curve drop is wired; comparisons include direct cache state
 and check-mode UV/tolerance side effects. Full cache-manager notification/reuse,
-owned base-cache fallback, remaining B-spline/seam context and general projection
+remaining B-spline owner context and general projection
 remain required work; see `BREP_TOLERANCES.md`.
+
+The native owned getter now retains plain/trimmed cache roles, single-slot reuse,
+modified/editing invalidation, ordinary-failure plain fallback, Boolean-delayed
+trees and virtual GetTree builds. Model-bound slots are explicitly owned by the
+caller; full notification/registration/checkout integration is still required.
+The B-spline local solver carries live face tolerance into its seam test, with
+analytic and actual native point comparisons; this does not qualify other
+remaining owner or general-projection paths.

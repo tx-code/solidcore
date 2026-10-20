@@ -528,7 +528,11 @@ impl Surface {
                 next.snap_to_boundaries(loose)?;
                 if next.gap_length()? > loose {
                     let uv = next.uv();
-                    let seam = self.is_on_seam(k, uv, None)?;
+                    // Native IsOnSeam defaults to this owner's zone tolerance.
+                    // LocalPointSolve_1 already received that exact live face
+                    // tolerance; carry it through instead of losing the model
+                    // lookup at this nested call. It is not a solver-error budget.
+                    let seam = self.is_on_seam(k, uv, face_tolerance)?;
                     which = match which {
                         SurfParamType::VMin | SurfParamType::VMax => SurfParamType::V,
                         SurfParamType::UMin | SurfParamType::UMax => SurfParamType::U,

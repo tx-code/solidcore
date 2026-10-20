@@ -8,13 +8,25 @@ agents work here at once: read this whole file before your first change.
 crates/solidcore       the kernel (pure Rust, no unsafe, wasm-ok)        owner: unit porters
 crates/solidcore-ffi   extern "C" bindings to the C++ kernel (feature cpp)
 crates/difftest        side-by-side Rust vs C++ runner
+crates/solidcore-step  bounded STEP source reader and opt-in CLI (this fork)
 harness/cpp            C++ reference build (build.sh -> bin/cpp) + shim/<unit>.cpp
 plan/                  modules.toml (units, claims), STATUS.md, findings.md, order.md
 ```
 
 ## 1. Hard rules
 
-**Licence.** Read only `upstream/source/SMLib`, `upstream/source/SM_API`,
+**STEP migration (this fork).** For `crates/solidcore-step`, read its
+[contract and migration stages](crates/solidcore-step/README.md). The additional
+authorized references are the usd-brep STEP fork's `source/STEP_SOURCE`,
+`STEP_SEMANTICS`, `STEP_PLANAR`, `STEP_IMPORT` and their public synthetic contract
+inputs. Preserve raw bytes, source IDs, units, parameter conventions and roles.
+`Inspected` qualifies only source syntax/references; later stages require their
+own checks. Keep private models, identifying inventories and derived data local.
+This module is outside `plan/modules.toml`'s kernel-unit claims and green gates.
+Its library follows the safe Rust and wasm constraints below; filesystem I/O
+belongs to the opt-in CLI. Cite the owning contract beside critical logic.
+
+**Licence (kernel-port references).** Read only `upstream/source/SMLib`, `upstream/source/SM_API`,
 `upstream/tests/SM_API_test`, `upstream/tests/prog_test`, `upstream/TestFiles/pt_TestFiles`,
 `upstream/AGENTS.md`, `upstream/.agents/` (skip any file about OCCT or USD). Never open,
 read or build `OCCT_BREP_*`, `SM_API_USD`, `BREP_SM_USD`, `BREP_USD_DATA`, `HYDRA_USD_BREP`,

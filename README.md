@@ -12,6 +12,13 @@ curves and surfaces. solidcore's first consumer is **SolidCraft**.
 
 ## Scope
 
+This fork also develops a native Rust STEP reader in
+[`solidcore-step`](crates/solidcore-step/README.md). Its first migrated stage is
+lossless Part 21 source inspection and a `step-inspect` CLI. It does **not yet
+convert STEP into a solidcore BRep**; schema semantics, units and construction
+remain separate migration stages. The kernel-port status below describes the
+upstream project, not STEP import qualification.
+
 In scope: the `SMLib` kernel and the `SM_API` operation layer of upstream — NURBS
 math, curve and surface geometry, B-rep topology, intersections, booleans, fillets and
 chamfers, offset/shell, sweeps and skins, primitives, healing/stitching, mass
@@ -40,6 +47,7 @@ Nothing is usable end to end yet (no primitives, booleans or fillets).
 | `crates/solidcore`      | The kernel library                                           |
 | `crates/solidcore-ffi`  | `extern "C"` bindings to the upstream C++ (feature `cpp`)    |
 | `crates/difftest`       | Runs Rust and C++ side by side on the same inputs           |
+| `crates/solidcore-step` | Lossless STEP source reader and opt-in inspection CLI (fork) |
 | `harness/cpp`           | Builds the upstream C++ reference into `bin/cpp`; FFI shims  |
 | `plan/`                 | Unit list, port order, status, findings                      |
 | `site/`                  | Generator for the GitHub Pages progress site                 |

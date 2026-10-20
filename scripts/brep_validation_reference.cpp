@@ -163,6 +163,7 @@ int main(int argc, char **argv) {
         const bool box_mode=mode.starts_with("bbox_");
         const bool cache_mode=mode.starts_with("cache_");
         const bool local_mode=mode=="local_bsp";
+        const bool root_mode=mode=="assert_root"||mode=="assert_root_walk";
         SmContext context;
         SmBrepConstructor builder;
         auto b = builder.StartBrep(context);
@@ -365,7 +366,8 @@ int main(int argc, char **argv) {
         SmAssertArray reports;
         SmTArray<ULONG> requested;
         requested.Add(0);
-        auto level = selection == "given" ? SM_LEVEL_GIVEN
+        auto level = (selection == "given"||selection == "given_empty") ? SM_LEVEL_GIVEN
+                     : selection == "one" ? SM_LEVEL_1
                      : selection == "two" ? SM_LEVEL_2
                                           : SM_LEVEL_0;
         auto target = selection == "no_reports" ? nullptr : &reports;
@@ -378,7 +380,7 @@ int main(int argc, char **argv) {
         SmStatus query_status=SM_SUCCESS;
         auto run_tolerance=[&]{return b->ValidateAndUpdateTolerances(mode=="tolerance_check",violated,ef_trim,ve,vf,target,level,selection=="given"?&requested:nullptr,&ef_trim_obj,&ve_obj,&vf_obj,&ef_obj,&vf_trim_obj,&ef,&vf_trim);};
         auto status =
-            (raw||tolerance||box_mode||cache_mode||local_mode) ? SM_SUCCESS
+            (raw||tolerance||box_mode||cache_mode||local_mode||root_mode) ? SM_SUCCESS
                 : b->ValidatePointers(target, level, selection == "given" ? &requested : nullptr,
                                       SM_NO_WALK);
         if (raw)
@@ -392,8 +394,16 @@ int main(int argc, char **argv) {
             status=query_status;
         }
         if(tolerance&&selection=="repeat")status=run_tolerance();
-        if (!raw && !tolerance && !box_mode && !cache_mode && !local_mode && selection == "repeat")
+        if (!raw && !tolerance && !box_mode && !cache_mode && !local_mode && !root_mode && selection == "repeat")
             status = b->ValidatePointers(target, level, nullptr, SM_NO_WALK);
+        bool root_valid=false;
+        if(root_mode){
+            const auto call=[&]{return b->AssertValid(target,level,mode=="assert_root_walk"?SM_WALK:SM_NO_WALK,
+                (selection=="given"||selection=="given15")?&requested:nullptr);};
+            if(selection=="given") {requested.ReSet();requested.Add(8);}
+            if(selection=="given15") {level=SM_LEVEL_GIVEN;requested.ReSet();requested.Add(15);}
+            root_valid=call();if(selection=="repeat")root_valid=call();
+        }
         SmBoolean local_found=FALSE;SmSolution local_solution;
         if(local_mode){
             const bool outside=defect=="bspline_outside",boundary=defect=="bspline_boundary";
@@ -468,6 +478,7 @@ int main(int argc, char **argv) {
             for(ULONG i=0;i<vs.GetSize();++i)std::cout<<','<<vs[i]->GetTolerance();std::cout<<']';
         }
         if(box_mode){auto a=bounds.GetMin(),z=bounds.GetMax();std::cout<<",\"box\":["<<a.x<<','<<a.y<<','<<a.z<<','<<z.x<<','<<z.y<<','<<z.z<<']';}
+        if(root_mode)std::cout<<",\"root_valid\":"<<(root_valid?"true":"false");
         if(local_mode)std::cout<<",\"local\":["<<(local_found?"true":"false")<<','<<local_solution.m_vStart[0]<<','<<local_solution.m_vStart[1]<<','<<local_solution.m_vStart.m_dSolutionValue<<']';
         if(cache_mode){
             auto a=cache->GetUVDomain().GetMin(),z=cache->GetUVDomain().GetMax();

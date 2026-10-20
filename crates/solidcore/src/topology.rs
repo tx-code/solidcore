@@ -543,6 +543,9 @@ pub struct Brep {
     edges: Arena<EdgeId, Edge>,
     vertices: Arena<VertexId, Vertex>,
     regions: Arena<RegionId, Region>,
+    /// Native root intrusive-list membership, independent of each region's owner
+    /// backpointer. Detached live arena records are not root children.
+    region_list: Vec<RegionId>,
     infinite_region: Option<RegionId>,
     faceuses: Arena<FaceuseId, Faceuse>,
     loopuses: Arena<LoopuseId, Loopuse>,
@@ -593,6 +596,7 @@ impl Default for Brep {
             edges: Arena::default(),
             vertices: Arena::default(),
             regions: Arena::default(),
+            region_list: Vec::new(),
             infinite_region: None,
             faceuses: Arena::default(),
             loopuses: Arena::default(),
@@ -646,6 +650,7 @@ impl Brep {
         })?;
         b.infinite_region = Some(r);
         // PreInsert: the infinite region heads the region list
+        b.region_list.push(r);
         b.region_list_head = Some(r);
         Ok(b)
     }
@@ -924,7 +929,57 @@ impl Brep {
 
     /// Appends a region record as is (no validation).
     pub fn add_region_record(&mut self, region: Region) -> Result<RegionId> {
-        self.regions.insert(region)
+        let attached = region.in_brep;
+        let id = self.regions.insert(region)?;
+        if attached {
+            self.region_list.push(id);
+        }
+        Ok(id)
+    }
+
+    /// Actual root list membership, separate from owner backpointers and arena life.
+    pub fn region_list(&self) -> &[RegionId] {
+        &self.region_list
+    }
+
+    /// Native root `PostInsert` for a live detached region. Owner and membership
+    /// change together; raw friend writes may still damage one for diagnostics.
+    pub fn attach_region_record(&mut self, id: RegionId) -> Result<()> {
+        self.region_mut(id)?.in_brep = true;
+        if !self.region_list.contains(&id) {
+            if self.region_list.is_empty() {
+                self.region_list_head = Some(id);
+            }
+            self.region_list.push(id);
+        }
+        Ok(())
+    }
+
+    /// Unlink a region and update the circular-list head without deleting its
+    /// arena record. The owning operation still chooses the semantic infinite region.
+    pub fn detach_region_record(&mut self, id: RegionId) -> Result<()> {
+        self.region(id)?;
+        let position = self
+            .region_list
+            .iter()
+            .position(|entry| *entry == id)
+            .ok_or_else(|| SolidError::sm_err("topology::Brep::detach_region_record"))?;
+        let head = self
+            .region_list_head
+            .or_else(|| self.region_list.first().copied());
+        let next_head = if self.region_list.len() == 1 {
+            None
+        } else if head == Some(id) {
+            self.region_list
+                .get((position + 1) % self.region_list.len())
+                .copied()
+        } else {
+            head
+        };
+        self.region_list.remove(position);
+        self.region_mut(id)?.in_brep = false;
+        self.region_list_head = next_head;
+        Ok(())
     }
 
     /// Appends a shell record as is (no validation).

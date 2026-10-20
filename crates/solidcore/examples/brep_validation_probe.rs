@@ -109,6 +109,7 @@ fn run() -> Result<Value> {
     let box_mode = mode.starts_with("bbox_");
     let cache_mode = mode.starts_with("cache_");
     let local_mode = mode == "local_bsp";
+    let root_mode = mode == "assert_root" || mode == "assert_root_walk";
     let mut k = Kernel::default();
     let mut builder = BrepConstructor::new()?;
     let (outer, _) = builder.start_shell()?;
@@ -321,8 +322,12 @@ fn run() -> Result<Value> {
         None
     };
     let level = match selection {
+        "given" if root_mode => CheckLevel::Given(&[8]),
+        "given15" => CheckLevel::Given(&[15]),
         "given" => CheckLevel::Given(&[0]),
         "two" => CheckLevel::Two,
+        "one" => CheckLevel::One,
+        "given_empty" => CheckLevel::Given(&[]),
         _ => CheckLevel::Zero,
     };
     let mut tolerance_output = None;
@@ -330,9 +335,23 @@ fn run() -> Result<Value> {
     let mut cache_output = None;
     let mut cache_slot = None;
     let mut local_output = None;
+    let mut root_output = None;
     let mut invoke = |reports: Option<&mut AssertArray>| {
         if raw {
             Ok(())
+        } else if root_mode {
+            solidcore::topology::brep_validation::assert_valid(
+                &mut k,
+                &mut b,
+                solidcore::topology::brep_validation::AssertValidOptions {
+                    level,
+                    walk: mode == "assert_root_walk",
+                },
+                reports,
+            )
+            .map(|valid| {
+                root_output = Some(valid);
+            })
         } else if local_mode {
             let outside = defect == "bspline_outside";
             let boundary = defect == "bspline_boundary";
@@ -653,6 +672,9 @@ fn run() -> Result<Value> {
         }
         output.insert("working_tolerances".into(), json!(working));
         output.insert("validate_only".into(), json!(b.validate_only()));
+    }
+    if let Some(valid) = root_output {
+        output.insert("root_valid".into(), json!(valid));
     }
     if let Some(local) = local_output {
         output.insert("local".into(), local);

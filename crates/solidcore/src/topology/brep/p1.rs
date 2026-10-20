@@ -392,12 +392,9 @@ fn filtered<I: Copy>(
 ///
 /// [`SolidError::NotFound`] when the list head is a dangling id.
 pub fn regions(b: &Brep, attribute: Option<&AttributeFilter<'_>>) -> Result<Vec<RegionId>> {
-    let on_list: Vec<RegionId> = b
-        .regions()
-        .iter()
-        .filter(|(_, r)| r.in_brep)
-        .map(|(id, _)| id)
-        .collect();
+    // Membership is the intrusive root list, not an owner-pointer filter. A bad
+    // backpointer must remain visible to validation; unlinked arena records do not.
+    let on_list = b.region_list();
     let start = match b.region_list_head() {
         None => 0,
         Some(head) => {

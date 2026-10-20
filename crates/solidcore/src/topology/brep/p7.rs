@@ -142,7 +142,7 @@ fn brep_remove_region(b: &mut Brep, region: RegionId) -> Result<()> {
     } else {
         head
     };
-    b.region_mut(region)?.in_brep = false;
+    b.detach_region_record(region)?;
     b.set_region_list_head(new_head);
     Ok(())
 }

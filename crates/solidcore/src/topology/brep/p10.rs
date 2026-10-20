@@ -551,7 +551,7 @@ fn build_regions(
         add_attributes(env, EntityRef::Region(solid), &rr.topology.attributes)?;
         set_topology(env, EntityRef::Region(solid), &rr.topology);
         // Add region to Brep
-        b.region_mut(solid)?.in_brep = true;
+        b.attach_region_record(solid)?;
 
         // for every BrepData Shell - build 2 Brep SmShells
         for (ii, rs) in data.shells.iter().enumerate() {

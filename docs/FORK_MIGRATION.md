@@ -123,3 +123,11 @@ execute the actual cache/base/attribute/user/system callback chain, and are wire
 to Stitch's pre-edit path. See [notification scope and remaining integration](BREP_NOTIFICATIONS.md).
 Cross-model resolution, all element producers, checkout/display-list behavior,
 full root/local validation and native import acceptance remain required work.
+
+
+The ordered root AssertValid entry now executes its base/pointer/tolerance and
+root region/connectivity logic with explicit missing geometric/descendant gates;
+see [root validation contract](BREP_VALIDATION.md). Native root booleans can be
+true with failed reports and cannot stand in for the import acceptance decision.
+Region membership and owner backpointers are stored separately for actual base
+validation rather than inferred from the notification records.

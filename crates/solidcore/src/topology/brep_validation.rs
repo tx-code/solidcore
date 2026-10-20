@@ -17,8 +17,11 @@
 //! retain the source bound of 100,000 visits; region/use recursion is not used.
 //! Passing the required-link prefix is not full runtime or geometric validity.
 //! A completed pointer walk can return success with reports. Full root/local
-//! `AssertValid` and unavailable geometric dispatches remain separate requirements.
+//! `AssertValid` now has an ordered entry; missing local/geometric gates remain
+//! explicit errors. See `docs/BREP_VALIDATION.md` for qualification boundaries.
 
+mod assertions;
+pub use assertions::{assert_valid, AssertValidOptions};
 mod geometry;
 mod pointers;
 mod tolerances;
@@ -191,6 +194,32 @@ impl Reporter<'_> {
                     tol3d: tol,
                     value,
                     list_index: list,
+                    ..ReportSpec::default()
+                })?);
+            }
+        }
+        Ok(passed)
+    }
+    fn class_predicate(
+        &mut self,
+        class: i64,
+        test: u64,
+        owner: Object,
+        passed: bool,
+    ) -> Result<bool> {
+        if let Some(reports) = self.reports.as_deref_mut() {
+            if passed {
+                reports.set_last_add(false);
+            } else {
+                let (_, _, name) = owner.identity();
+                reports.add_unique_delete_duplicate(AssertReport::new(ReportSpec {
+                    reporter: Some(owner.key()),
+                    test_class: class,
+                    test_index: test,
+                    owner: Some(owner.key()),
+                    owner_type: class,
+                    owner_type_string: Some(name),
+                    other_type_string: Some("NULL"),
                     ..ReportSpec::default()
                 })?);
             }

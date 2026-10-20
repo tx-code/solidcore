@@ -16,6 +16,7 @@ def main():
     parser.add_argument('--sdk', type=Path, required=True, help='Release SDK directory, matching source headers')
     parser.add_argument('--toolchain-env', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--probe', choices=['constructor', 'validation'], default='constructor')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
@@ -24,11 +25,11 @@ def main():
     compiler = shutil.which('cl', path=env.get('Path', env.get('PATH', '')))
     if not compiler:
         raise RuntimeError('selected compiler unavailable')
-    output = (args.output / 'brep-constructor-reference.exe').resolve()
+    output = (args.output / f'brep-{args.probe}-reference.exe').resolve()
     command = [compiler, '/nologo', '/std:c++20', '/EHsc', '/MD', '/O2', '/utf-8', '/DNDEBUG',
                '/fp:precise', '/DNOMINMAX', '/DUNICODE', '/D_UNICODE', '/DNL_DEBUG_CODE',
                '/DSM_GRAPHICS_CALLBACKS=1', '/I' + str((args.source / 'source/SMLib/inc').resolve()),
-               str(Path(__file__).with_name('brep_constructor_reference.cpp').resolve()),
+               str(Path(__file__).with_name(f'brep_{args.probe}_reference.cpp').resolve()),
                str((args.sdk / 'SMLib.lib').resolve()), '/link', '/OUT:' + str(output)]
     subprocess.run(command, cwd=args.output, env=env, check=True)
     shutil.copy2(args.sdk / 'SMLib.dll', args.output / 'SMLib.dll')

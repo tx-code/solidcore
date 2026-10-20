@@ -92,5 +92,7 @@ The actual Rust runtime constructor is being migrated separately from source
 qualification; see [its ownership and verification contract](BREP_CONSTRUCTION.md).
 Root `SmBrep::ValidatePointers` / `AssertValid` and their local validators are a
 required additional owner, `fork.topology_validation`, omitted by the base unit
-inventory. Their absence gates optional constructor stitching and native model
-acceptance. Base reader-unit status cannot stand in for these implementations.
+inventory. The required-link prefix now executes, but the remaining pointer,
+geometry and root/local checks still gate optional constructor stitching and
+native model acceptance. Prefix success or base reader-unit status cannot stand
+in for these implementations.

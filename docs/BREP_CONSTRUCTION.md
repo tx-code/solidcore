@@ -61,8 +61,8 @@ unit conversion or quality-profile selection.
 ## Missing dependencies remain explicit
 
 `EndShell(true)` invokes `SmBrep::ValidatePointers` before stitching in C++. Root
-`ValidatePointers` / `AssertValid` and their local validator contracts have not
-been ported. This additional fork owner is tracked as `fork.topology_validation`,
+`ValidatePointers` / `AssertValid` and their local validator contracts are not
+complete. This additional fork owner is tracked as `fork.topology_validation`,
 outside the base unit inventory. The optional stitch path returns `Unported`
 before the omitted call; it cannot silently succeed by skipping validation.
 
@@ -73,6 +73,46 @@ temporary-edge and surface-owner cleanup. They are not accepted models. General
 geometry, repair, native STEP correspondence and publication require their own
 implementation and evidence; neither this constructor nor a rendered mesh
 establishes full native import.
+
+### Root required-link prefix
+
+`topology::brep_validation::required_links` implements the `ValidatePointers`
+required-pointer prefix (tests 112--146) using the existing `AssertArray` and
+fixed labels. It visits regions/shells, global faces and both loop sides, global
+edges, and global vertices in source order. It stops on the first absent required
+link; the CCW walk retains the source's 100,000-visit bound. These checks always
+run at level zero even when the outer request selects other tests.
+
+Context/global list-container pointers are intrinsic to the owned Rust value
+model. Raw circular sibling pointers have no independent nullable field; their
+relationships come from the owner's typed list. Dangling arena ids or inconsistent
+radial membership are Rust access errors, not invented C++ null-pointer reports.
+The report keys distinguish types and arena indices within one BRep. Cross-model
+report accumulation still needs model-qualified identity; these local keys are
+not global object handles.
+
+Passing this prefix establishes required-link presence only. The public
+`validate_pointers` entry still returns `Unported` for the remaining predicates;
+constructor stitching/publication gates remain in place. Complete validation must
+also preserve CheckFace/CheckLoop, geometric checks, live-owner and backpointer
+checks, selected-test behavior, root/local AssertValid and gap/tolerance checks.
+The C++ validator's ordinary final success code does not mean its report is empty.
+Its geometry callees can materialize caches and even adjust NURBS control points;
+those effects must be preserved and checked against source before acceptance.
+
+The synthetic negative observer invokes the actual C++ `ValidatePointers`.
+It obtains test-only data-member access through explicit template instantiation;
+class declarations, function access, layouts and vtables stay unchanged. Mutated
+links are restored before native context teardown. The comparison covers the
+first failed label/owner/message, selection-independent prefix, duplicate report
+handling and optional report arrays, not deep validation or native acceptance.
+
+```text
+cargo test --locked -p solidcore --lib topology::brep_validation
+cargo build --locked -p solidcore --example brep_validation_probe
+python scripts/build_brep_constructor_reference.py --source <cpp-checkout> --sdk <release-sdk> --toolchain-env <msvc-env.json> --output bin/validation-reference --probe validation
+python scripts/brep_validation_compare.py --cpp bin/validation-reference/brep-validation-reference.exe --rust bin/debug/examples/brep_validation_probe.exe --receipt bin/brep-required-links-validation.local.json
+```
 
 ## Reusable verification
 

@@ -1,0 +1,36 @@
+name: STEP source migration
+
+on:
+  push:
+    branches: [codex/step-import]
+    paths:
+      - 'crates/solidcore-step/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/step-source.yml'
+  pull_request:
+    paths:
+      - 'crates/solidcore-step/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/step-source.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain
+      - run: cargo fmt -p solidcore-step --check
+      - run: cargo clippy --locked -p solidcore-step --all-features --all-targets -- -D warnings
+      - run: cargo test --locked -p solidcore-step --all-features
+      - run: cargo check --locked -p solidcore-step --lib --target wasm32-unknown-unknown

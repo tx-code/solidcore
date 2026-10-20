@@ -15,6 +15,27 @@ code, not as branding.
 
 ## Upstream material used
 
+### STEP migration in this fork
+
+`crates/solidcore-step` additionally ports the independently developed native
+STEP reader from the usd-brep STEP fork, source snapshot
+`d8ed45ab85d52dba07660cafdceacafdca7217ed` (separate from the kernel pin above).
+References are `source/STEP_SOURCE/inc/StepSource.h`,
+`source/STEP_SOURCE/src/{StepSource,StepInspectJson,StepSourceReport}.cpp` and
+`source/STEP_SOURCE/app/step_inspect.cpp`, under Apache-2.0 with their NVIDIA
+copyright notices retained in the ported files.
+
+The three STEP inputs under `crates/solidcore-step/tests/fixtures` are public
+analytic design fixtures S203-P01, S203-P04 and S203-P05 from the STEP fork's
+`tools/step_import_validation/corpus/ap203e2-planar/v1/cases`; they contain no
+private/customer geometry. Other tests generate synthetic source text. This
+exception covers these explicit test inputs, not the upstream Python tools.
+No OCCT, Truck/ruststep or C++ reader is linked or invoked by the Rust product.
+The optional comparison script invokes an installed C++ source reader only as a
+test oracle. See the [migration contract](crates/solidcore-step/README.md).
+
+### Kernel port
+
 Only these upstream paths are read, ported or exercised:
 
 | Upstream path                  | Use                                                    |

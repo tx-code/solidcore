@@ -113,6 +113,10 @@ shape or suppress a required source record. Necessary style sizes, names, nomina
 type constraints and exact ranges are checked without applying a renderer.
 
 No `PreserveNonGeometric` exceptions or carrier/schema assumptions are enabled.
+The [source carrier API](CARRIER.md) can now retain opaque tokens and immutable
+legacy interpretation receipts. Strict typed/ownership checkpoints refuse legacy
+assumptions and retain unsupported diagnostics for unavailable DATA text; those
+source options cannot silently manufacture a checked product identity or role.
 Those require their later original nonphysical-exclusion and approval contracts.
 Unknown physical members and strict source errors remain fatal.
 

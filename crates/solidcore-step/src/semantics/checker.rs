@@ -577,6 +577,21 @@ impl<'a> Checker<'a> {
         path: &[usize],
     ) -> Checked<()> {
         let catalog = self.schema()?;
+        if kind == Kind::String && v.kind == ValueKind::OpaqueString {
+            return Err(self.failure(
+                Status::Unsupported,
+                "OpaqueDataTextUnestablished",
+                "D1",
+                "DATA text interpretation remains unestablished",
+                v.span,
+                Some(r),
+                c,
+                path,
+                f.declared_type,
+                "OpaqueString",
+                "project DATA carrier policy; not established source STRING semantics",
+            ));
+        }
         let valid = match kind {
             Kind::String => v.kind == ValueKind::String,
             Kind::Real => v.kind == ValueKind::Real,
@@ -689,6 +704,9 @@ impl<'a> Checker<'a> {
                     }
                     let child = v.children.first().ok_or_else(internal)?;
                     if v.text == "DESCRIPTIVE_MEASURE" && catalog.ap214() {
+                        if child.kind == ValueKind::OpaqueString {
+                            self.scalar(child, Kind::String, f, r, c, path)?;
+                        }
                         child.kind == ValueKind::String
                     } else {
                         child.kind == ValueKind::Real
@@ -1208,6 +1226,21 @@ pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> O
         limits,
         diagnostics: Vec::new(),
     };
+    // STEP_SEMANTICS::Check requires explicit general interoperability even for
+    // an enabled-but-unused legacy option. This strict checkpoint has no such
+    // approval phase. Consult the immutable owner, never resettable notices.
+    if source.options().carrier_interpretation != crate::CarrierInterpretation::DeclaredOnly
+        || source
+            .source
+            .as_ref()
+            .is_some_and(|s| s.carrier_assumption().is_some())
+    {
+        outcome.status = Status::InvalidRequest;
+        outcome.diagnostics.push(simple_failure(Status::InvalidRequest,
+            "UnverifiedCarrierRequiresInteroperability", "InvalidRequest",
+            "Unverified carrier interpretation requires explicit general interoperability, which is not migrated yet").diagnostic);
+        return outcome;
+    }
     let Some(raw) = source
         .source
         .as_ref()

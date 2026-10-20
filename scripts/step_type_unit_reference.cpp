@@ -97,6 +97,8 @@ int main(int argc, char** argv)
     {
         std::string input, context;
         auto sourceLimits = step_source::Limits::PlanarFixtures();
+        auto headerPolicy = step_source::HeaderNamePolicy::StrictAscii;
+        auto dataPolicy = step_source::DataStringPolicy::StrictAscii;
         Limits limits;
         auto scope = GeometryScope::ExplicitOuterBounds;
         bool explicitLimits = false;
@@ -110,6 +112,8 @@ int main(int argc, char** argv)
             else if (arg == "--geometry-dependencies") geometry = true;
             else if (arg == "--source-semantics") {geometry=true;ownership=true;}
             else if (arg == "--general-brep-source") scope = GeometryScope::GeneralBrep;
+            else if (arg == "--preserve-opaque-header-name") headerPolicy = step_source::HeaderNamePolicy::PreserveOpaqueBytes;
+            else if (arg == "--preserve-opaque-data-strings") dataPolicy = step_source::DataStringPolicy::PreserveOpaqueBytes;
             else if (arg == "--unit-context" && i + 1 < argc) context = argv[++i];
             else if (arg == "--dependency-visits" && i + 1 < argc) limits.dependencyVisits = std::stoull(argv[++i]);
             else if (arg == "--input-bytes" && i + 1 < argc) sourceLimits.inputBytes = std::stoull(argv[++i]);
@@ -118,7 +122,7 @@ int main(int argc, char** argv)
             else throw std::invalid_argument("test checkpoint arguments");
         }
         if (!explicitLimits || input.empty()) return 64;
-        auto source = step_source::InspectFile(input, sourceLimits);
+        auto source = step_source::InspectFile(input, sourceLimits, headerPolicy, dataPolicy);
         Outcome result;
         result.limits = limits;
         result.geometryScope = scope;

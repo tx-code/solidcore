@@ -67,11 +67,61 @@ fn invalid_requests_and_unmigrated_interpretation_flags_are_refused() {
         vec!["--fixture-limits", "--dependency-visits", "-1"],
         vec!["--fixture-limits", "--interop-nongeometric"],
         vec!["--fixture-limits", "--interpret-unregistered-ap214-2010"],
+        vec!["--fixture-limits", "--interpret-level1-as-corrected"],
+        vec!["--fixture-limits", "--interpret-level1-with-lowercase-hex"],
     ] {
         let output = invoke(&options).unwrap();
         assert_eq!(output.status.code(), Some(64));
         assert!(output.stdout.is_empty());
     }
+}
+
+#[test]
+fn opaque_capture_cannot_turn_unavailable_product_text_into_checked_ownership() {
+    let directory = std::env::temp_dir().join(format!(
+        "solidcore-opaque-semantic-cli-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("public.step");
+    let original = std::fs::read(fixture()).unwrap();
+    for (marker, expected) in [(b"FILE_NAME('".as_slice(), 0), (b"PRODUCT('".as_slice(), 2)] {
+        let position = original
+            .windows(marker.len())
+            .position(|w| w == marker)
+            .unwrap()
+            + marker.len();
+        let mut bytes = original.clone();
+        bytes.insert(position, 0xff);
+        std::fs::write(&path, &bytes).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_step-semantic-inspect"))
+            .args([
+                "--fixture-limits",
+                "--source-semantics",
+                "--preserve-opaque-header-name",
+                "--preserve-opaque-data-strings",
+            ])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(expected));
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["source"]["status"], "Inspected");
+        assert_eq!(json["native_build"], "NotRun");
+        assert_eq!(json["interoperability"], "NotRun");
+        if expected == 2 {
+            assert_eq!(
+                json["diagnostics"][0]["source"]["key"],
+                "OpaqueDataTextUnestablished"
+            );
+            assert!(json["snapshot"].is_null());
+            assert_eq!(json["part"], "NotRun");
+        } else {
+            assert_eq!(json["part"], "Passed");
+        }
+    }
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(directory).unwrap();
 }
 
 #[test]

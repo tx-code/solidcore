@@ -5,16 +5,20 @@
 //! Deviations: only selected migrated phases; no geometry/native claims or
 //! interoperability/legacy-carrier interpretation options.
 #![forbid(unsafe_code)]
-use solidcore_step::{inspect, report, semantics, Limits};
+use solidcore_step::{
+    inspect_with_options, report, semantics, DataStringPolicy, HeaderNamePolicy, InspectOptions,
+    Limits,
+};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE:&str="step-semantic-inspect --fixture-limits [--general-brep-source] [--source-semantics | --geometry-dependencies | --part-and-closure] [--unit-context ID] [--dependency-visits N] [--input-bytes N] [--report-bytes N] FILE\n--source-semantics runs the maintained strict source phases, including geometry prerequisites and source ownership. Continuous geometry/planar qualification and native build are NOT RUN.";
+const USAGE:&str="step-semantic-inspect --fixture-limits [--general-brep-source] [--source-semantics | --geometry-dependencies | --part-and-closure] [--preserve-opaque-header-name] [--preserve-opaque-data-strings] [--unit-context ID] [--dependency-visits N] [--input-bytes N] [--report-bytes N] FILE\n--source-semantics runs the maintained strict source phases, including geometry prerequisites and source ownership. Continuous geometry/planar qualification and native build are NOT RUN. Opaque source retention does not approve unavailable typed text.";
 struct Request {
     path: PathBuf,
     source_limits: Limits,
+    source_options: InspectOptions,
     limits: semantics::Limits,
     options: semantics::Options,
 }
@@ -29,6 +33,7 @@ fn arguments() -> Result<Option<Request>, ()> {
     let mut args = std::env::args_os().skip(1);
     let mut path = None;
     let mut source_limits = Limits::planar_fixtures();
+    let mut source_options = InspectOptions::default();
     let mut limits = semantics::Limits::fixtures();
     let mut options = semantics::Options::default();
     let mut explicit = false;
@@ -47,6 +52,14 @@ fn arguments() -> Result<Option<Request>, ()> {
         }
         if flags && arg == "--general-brep-source" {
             options.geometry_scope = semantics::GeometryScope::GeneralBrep;
+            continue;
+        }
+        if flags && arg == "--preserve-opaque-header-name" {
+            source_options.header_name_policy = HeaderNamePolicy::PreserveOpaqueBytes;
+            continue;
+        }
+        if flags && arg == "--preserve-opaque-data-strings" {
+            source_options.data_string_policy = DataStringPolicy::PreserveOpaqueBytes;
             continue;
         }
         if flags && arg == "--part-and-closure" {
@@ -91,6 +104,7 @@ fn arguments() -> Result<Option<Request>, ()> {
     Ok(Some(Request {
         path: path.ok_or(())?,
         source_limits,
+        source_options,
         limits,
         options,
     }))
@@ -119,7 +133,7 @@ fn run() -> u8 {
         eprintln!("InputReadFailure");
         return 4;
     }
-    let source = inspect(bytes, request.source_limits);
+    let source = inspect_with_options(bytes, request.source_limits, request.source_options);
     let outcome = semantics::check(&source, request.limits, &request.options);
     if outcome.status == semantics::Status::InvalidRequest {
         eprintln!("InvalidPhysicalContextSelection");

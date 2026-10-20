@@ -22,6 +22,11 @@ or through `--source-semantics`, which runs the maintained strict source phases 
 C++ order. This still leaves planar/global rules, interoperability approval,
 continuous geometry evidence and exact native construction to be migrated.
 
+[Explicit carrier policies](CARRIER.md) now preserve opaque HEADER/DATA bytes and
+legacy level-1 interpretation receipts. They grant no semantic acceptance; the
+strict semantic checkpoints refuse legacy assumptions until the separate general
+interoperability approval is migrated.
+
 ## Use
 
 ```sh
@@ -53,7 +58,7 @@ and assembly relationships remain references, not duplicated geometry.
 
 ## Current contract
 
-- Self-contained ASCII Part 21, corrected implementation declaration `2;1`;
+- By default, self-contained ASCII Part 21, corrected declaration `2;1`;
   exactly one unparameterized DATA section and the three required HEADER records.
   Complex external mapping keeps all constituents in source order.
 - Values: exact integer/real lexemes, strings, enumeration, references, `$`, `*`,
@@ -85,7 +90,9 @@ and assembly relationships remain references, not duplicated geometry.
 
 The JSON schema is `solidcore.step.source.v1`, intentionally distinct from C++
 `step-source.v1`. Source fields correspond, but JSON bytes are not promised equal.
-The complete original source is `raw`; spans address it directly. The inspector
+The complete original source is `raw`; spans address its original bytes. Explicit
+opaque input uses the reversible byte projection documented in [CARRIER.md](CARRIER.md).
+The inspector
 never infers units from names, promotes a closed surface to a material solid,
 heals source defects, or relaxes quality thresholds.
 
@@ -93,8 +100,7 @@ heals source defects, or relaxes quality thresholds.
 
 | Stage | Exit gate before claiming the capability |
 |---|---|
-| Explicit carrier options | Opaque HEADER/DATA and legacy level-1 interpretation retain source diagnostics/receipts; strict behavior remains unchanged |
-| Full semantic qualification | Strict type/unit and part/closure checkpoints are implemented; geometry prerequisites, planar/global rules and interoperability approval remain separate |
+| Full semantic qualification | Strict type/unit, geometry prerequisites and part/closure checkpoints are implemented; schema assumptions, planar/global rules and interoperability approval remain separate |
 | Planar qualification | Stable rule identities/order, budgets, oriented regions, shared edges, holes and source surface/solid roles pass the analytic fixtures |
 | Native adapter | Validate solidcore geometry/topology construction and failed-candidate cleanup; retain source-to-native correspondence and UV definitions |
 | General exact BRep | Analytic/NURBS, trims, pcurves, seams, degeneracies and assemblies meet their individual error and ownership contracts |

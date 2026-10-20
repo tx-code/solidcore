@@ -30,10 +30,14 @@ def normalize(value):
         return value
     result = {}
     for name, item in value.items():
+        if value.get("kind") == "OpaqueString" and name in {"interpretation", "notice"}:
+            assert value.get("interpretation") == "Unestablished"
+            assert value.get("text") is None
+            continue  # C++ prose is not interpreted text or a stable discriminator.
         if name in {"raw", "location", "record_occurrence", "message"}:
             continue  # Raw coverage is checked independently below, not discarded.
         name = "span" if name == "primary" else name
-        if name in {"span", "id_span"}:
+        if name in {"span", "id_span", "token_span", "first_strict_span"}:
             result[name] = span(item)
         elif name == "related":
             result[name] = [span(r.get("span", r)) for r in item]
@@ -49,7 +53,7 @@ def verify_raw(value, original):
     elif isinstance(value, dict):
         if "span" in value and "raw" in value:
             begin, end = span(value["span"])
-            assert original[begin:end].decode("ascii") == value["raw"]
+            assert original[begin:end].decode("latin1") == value["raw"]
         for child in value.values():
             verify_raw(child, original)
 
@@ -76,11 +80,25 @@ def compare(cpp, rust, path, cpp_options=(), rust_options=()):
                   max_string_bytes=cs["max_string_bytes"], max_record_bytes=cs["max_record_bytes"])
     assert mapped == r["statistics"], "resource accounting differs"
     assert normalize(c["diagnostics"]) == normalize(r["diagnostics"]), "diagnostic identity/position differs"
+    for field in ["header_name_policy", "data_string_policy"]:
+        assert c.get(field) == r.get(field), "explicit source policy differs"
+    cc, rc = c.get("carrier_interpretation"), r.get("carrier_interpretation")
+    assert (cc is None) == (rc is None), "carrier qualification missing"
+    if cc is not None:
+        cc = dict(cc)
+        evidence = []
+        for item in cc.get("string_hex_interpretations", []):
+            item = dict(item)
+            assert item.pop("strict_key") == "InvalidStringEncoding"
+            evidence.append(item)
+        if evidence:
+            cc["string_hex_interpretations"] = evidence
+        assert normalize(cc) == normalize(rc), "original carrier/token evidence differs"
     for field in ["header", "records", "references"]:
         assert normalize(c[field]) == normalize(r[field]), f"{field} graph differs"
     if r["status"] == "Inspected":
-        assert c["input"]["raw"].encode("ascii") == original
-        assert r["raw"].encode("ascii") == original
+        assert c["input"]["raw"].encode("latin1") == original
+        assert r["raw"].encode("latin1") == original
         verify_raw(c["header"], original)
         verify_raw(c["records"], original)
         assert all(r["scope"][s] == "NotRun" for s in ["schema_semantics", "units", "geometry", "native_build"])

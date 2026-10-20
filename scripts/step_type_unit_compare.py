@@ -81,7 +81,7 @@ def compare(cpp,rust,path,options=()):
     if r_source['sha256'] is not None:
         assert c_source['input']['sha256']==r_source['sha256']==hashlib.sha256(raw).hexdigest()
     if r_source['raw'] is not None:
-        assert c_source['input']['raw'].encode('ascii')==r_source['raw'].encode('ascii')==raw,'source rewritten'
+        assert c_source['input']['raw'].encode('latin1')==r_source['raw'].encode('latin1')==raw,'source rewritten'
     return r
 
 

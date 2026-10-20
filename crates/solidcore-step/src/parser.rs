@@ -10,13 +10,14 @@
 //! | `Parser::value` | `Parser::ParseValue` |
 //! | `Parser::resolve` | `Parser::Resolve` |
 //!
-//! Deviations: strict carrier only; errors return owned receipts instead of
+//! Deviations: errors return owned receipts instead of
 //! exceptions. Value descent and reference collection are bounded by the checked
 //! nesting limit (hard ceiling 128). No allocation is sized from an instance ID.
 
 use crate::{
-    Component, Diagnostic, Limits, Record, Reference, Snapshot, Span, Statistics, Status, Value,
-    ValueKind,
+    CarrierAssumption, CarrierInterpretation, Component, DataStringPolicy, Diagnostic,
+    HeaderNamePolicy, InspectOptions, Limits, Record, Reference, Snapshot, Span, Statistics,
+    Status, StringHexInterpretation, Value, ValueKind,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -33,6 +34,7 @@ enum Kind {
     Integer,
     Real,
     String,
+    OpaqueString,
     Enumeration,
     Reference,
     Left,
@@ -61,10 +63,19 @@ pub(super) struct Parser {
     record_id: String,
     component: String,
     path: Vec<usize>,
+    options: InspectOptions,
+    in_data: bool,
+    header_count: usize,
+    header_name_expected: bool,
+    opaque_header_name: Option<Span>,
+    opaque_data_strings: Vec<Span>,
+    carrier: Option<CarrierAssumption>,
+    active_hex: Option<usize>,
+    notices: Vec<Diagnostic>,
 }
 
 impl Parser {
-    pub(super) fn new(bytes: Arc<[u8]>, limits: Limits) -> Self {
+    pub(super) fn new(bytes: Arc<[u8]>, limits: Limits, options: InspectOptions) -> Self {
         Self {
             bytes,
             limits,
@@ -75,11 +86,36 @@ impl Parser {
             record_id: String::new(),
             component: String::new(),
             path: Vec::new(),
+            options,
+            in_data: false,
+            header_count: 0,
+            header_name_expected: false,
+            opaque_header_name: None,
+            opaque_data_strings: Vec::new(),
+            carrier: None,
+            active_hex: None,
+            notices: Vec::new(),
         }
     }
 
     pub(super) fn statistics(&self) -> Statistics {
         self.stats
+    }
+
+    pub(super) fn take_carrier_assumption(&mut self) -> Option<CarrierAssumption> {
+        // A propagated failure performs no more lexing. Preserve the consumed
+        // prefix at that exact position without publishing the partially built graph.
+        if let Some(evidence) = self.carrier.as_mut().and_then(|carrier| {
+            self.active_hex
+                .and_then(|i| carrier.string_hex_interpretations.get_mut(i))
+        }) {
+            evidence.token_span.end = self.pos;
+        }
+        self.carrier.take()
+    }
+
+    pub(super) fn take_notices(&mut self) -> Vec<Diagnostic> {
+        std::mem::take(&mut self.notices)
     }
 
     fn error(&self, key: &str, message: &str, span: Span, status: Status) -> Box<Failure> {
@@ -189,9 +225,17 @@ impl Parser {
         let mut value = 0;
         for _ in 0..digits {
             let c = self.string_char(start, directive)?;
+            let interpreted = c.is_ascii_lowercase()
+                && matches!(c, b'a'..=b'f')
+                && self.in_data
+                && self.carrier.as_ref().is_some_and(|carrier| {
+                    carrier.interpretation
+                        == CarrierInterpretation::Level1AsCorrectedEncodingWithLowercaseHex
+                });
             let digit = match c {
                 b'0'..=b'9' => u32::from(c - b'0'),
                 b'A'..=b'F' => u32::from(c - b'A' + 10),
+                b'a'..=b'f' if interpreted => u32::from(c - b'a' + 10),
                 _ => {
                     return Err(self.rejected(
                         "InvalidStringEncoding",
@@ -200,6 +244,39 @@ impl Parser {
                     ))
                 }
             };
+            if interpreted {
+                // Fixed STEP_SOURCE contract: only numeric hex payloads after
+                // an applied level-1 assumption; no directive recovery/rewrite.
+                let count = self
+                    .carrier
+                    .as_ref()
+                    .map_or(0, |c| c.string_hex_interpretations.len());
+                if self.active_hex.is_none() {
+                    self.bound(
+                        count + 1,
+                        self.limits.values,
+                        "ValueLimit",
+                        self.span(start),
+                    )?;
+                    let evidence = StringHexInterpretation {
+                        token_span: self.span(start),
+                        first_strict_span: self.span(directive),
+                        lowercase_digits: 0,
+                        complete: false,
+                    };
+                    if let Some(carrier) = self.carrier.as_mut() {
+                        carrier.string_hex_interpretations.push(evidence);
+                        self.active_hex = Some(count);
+                    }
+                }
+                if let Some(evidence) = self.carrier.as_mut().and_then(|carrier| {
+                    self.active_hex
+                        .and_then(|i| carrier.string_hex_interpretations.get_mut(i))
+                }) {
+                    evidence.lowercase_digits += 1;
+                    evidence.token_span.end = self.pos;
+                }
+            }
             value = value * 16 + digit;
         }
         Ok(value)
@@ -311,7 +388,65 @@ impl Parser {
         Ok(())
     }
 
+    fn opaque_string(&mut self, start: usize) -> Parsed<Option<Token>> {
+        let header = !self.in_data
+            && self.header_name_expected
+            && self.options.header_name_policy == HeaderNamePolicy::PreserveOpaqueBytes;
+        let data = self.in_data
+            && self.options.data_string_policy == DataStringPolicy::PreserveOpaqueBytes;
+        if !header && !data {
+            return Ok(None);
+        }
+        let saved = self.pos;
+        let mut high = false;
+        while self.pos < self.bytes.len() {
+            let position = self.string_position(self.pos);
+            if position == self.bytes.len()
+                || (position - start + 1 > self.limits.string_bytes && !high)
+            {
+                // An ASCII token must retain ordinary decoder failure precedence,
+                // including malformed escapes before a later budget boundary.
+                break;
+            }
+            let item = self.string_char(start, start)?;
+            high |= item >= 128;
+            if item == b'\'' {
+                let next = self.string_position(self.pos);
+                if self.byte(next) == Some(b'\'') {
+                    if next - start + 1 > self.limits.string_bytes && !high {
+                        break;
+                    }
+                    self.string_char(start, start)?;
+                } else {
+                    if high {
+                        // Do not infer escape semantics inside an unknown encoding:
+                        // a legacy multibyte trail can itself be a backslash.
+                        let span = self.span(start);
+                        if header {
+                            self.opaque_header_name = Some(span);
+                        } else {
+                            self.opaque_data_strings.push(span);
+                        }
+                        self.stats.max_string_bytes =
+                            self.stats.max_string_bytes.max(self.pos - start);
+                        return Ok(Some(Token {
+                            kind: Kind::OpaqueString,
+                            span,
+                            text: String::new(),
+                        }));
+                    }
+                    break;
+                }
+            }
+        }
+        self.pos = saved;
+        Ok(None)
+    }
+
     fn string(&mut self, start: usize) -> Parsed<Token> {
+        if let Some(token) = self.opaque_string(start)? {
+            return Ok(token);
+        }
         let mut text = String::new();
         while self.pos < self.bytes.len() {
             if self.string_position(self.pos) == self.bytes.len() {
@@ -333,6 +468,17 @@ impl Parser {
                     self.string_char(start, start)?;
                 } else {
                     self.stats.max_string_bytes = self.stats.max_string_bytes.max(self.pos - start);
+                    if let Some(evidence) = self.carrier.as_mut().and_then(|carrier| {
+                        self.active_hex
+                            .and_then(|i| carrier.string_hex_interpretations.get_mut(i))
+                    }) {
+                        evidence.token_span = Span {
+                            begin: start,
+                            end: self.pos,
+                        };
+                        evidence.complete = true;
+                    }
+                    self.active_hex = None;
                     return Ok(Token {
                         kind: Kind::String,
                         span: self.span(start),
@@ -479,6 +625,13 @@ impl Parser {
                     self.span(start),
                 ))
             }
+            c if c >= 128 => {
+                return Err(self.unsupported(
+                    "UnsupportedEncoding",
+                    "Non-ASCII byte outside a STRING token",
+                    self.span(start),
+                ))
+            }
             c if upper(c) => {
                 while self
                     .here()
@@ -589,6 +742,7 @@ impl Parser {
             loop {
                 self.path.push(values.len() + 1);
                 values.push(self.value(depth + 1)?);
+                self.header_name_expected = false;
                 self.path.pop();
                 if self.kind()? != Kind::Comma {
                     break;
@@ -617,6 +771,7 @@ impl Parser {
             Kind::Integer => ValueKind::Integer,
             Kind::Real => ValueKind::Real,
             Kind::String => ValueKind::String,
+            Kind::OpaqueString => ValueKind::OpaqueString,
             Kind::Enumeration => ValueKind::Enumeration,
             Kind::Unset => ValueKind::Unset,
             Kind::Derived => ValueKind::Derived,
@@ -665,6 +820,8 @@ impl Parser {
             return Err(self.rejected("SyntaxError", "Invalid entity keyword", token.span));
         }
         self.component.clone_from(&token.text);
+        self.header_name_expected =
+            self.record_id.is_empty() && self.header_count == 1 && token.text == "FILE_NAME";
         let parameters = self.parameters(0)?;
         Ok(Component {
             name: token.text,
@@ -676,7 +833,7 @@ impl Parser {
         })
     }
 
-    fn check_header(&self, component: &Component) -> Parsed<()> {
+    fn check_header(&mut self, component: &Component) -> Parsed<()> {
         let p = &component.parameters;
         let string_list = |v: &Value| {
             v.kind == ValueKind::Aggregate
@@ -691,11 +848,27 @@ impl Parser {
                     && p.get(1).is_some_and(string);
                 if valid {
                     if let Some(level) = p.get(1).filter(|level| level.text != "2;1") {
-                        return Err(self.unsupported(
+                        let strict = self.unsupported(
                             "UnsupportedImplementationLevel",
                             "Only FILE_DESCRIPTION implementation level 2;1 is supported",
                             level.span,
-                        ));
+                        );
+                        if level.text != "1"
+                            || self.options.carrier_interpretation
+                                == CarrierInterpretation::DeclaredOnly
+                        {
+                            return Err(strict);
+                        }
+                        // STEP_SOURCE contract, ISO 10303-21:1994/Cor1:1996
+                        // replacement 9.2.1: declaration 1 is not corrected 2;1.
+                        // This is an explicit unverified grammar assumption only.
+                        self.carrier = Some(CarrierAssumption {
+                            interpretation: self.options.carrier_interpretation,
+                            declared_level: level.text.clone(),
+                            declared_span: level.span,
+                            original_diagnostics: vec![strict.diagnostic],
+                            string_hex_interpretations: Vec::new(),
+                        });
                     }
                 }
                 valid
@@ -704,9 +877,11 @@ impl Parser {
                 p.len() == 7
                     && p.get(2).is_some_and(string_list)
                     && p.get(3).is_some_and(string_list)
-                    && [0, 1, 4, 5, 6]
-                        .iter()
-                        .all(|i| p.get(*i).is_some_and(string))
+                    && [0, 1, 4, 5, 6].iter().all(|i| {
+                        p.get(*i).is_some_and(|v| {
+                            string(v) || (*i == 0 && v.kind == ValueKind::OpaqueString)
+                        })
+                    })
             }
             "FILE_SCHEMA" => p.len() == 1 && p.first().is_some_and(string_list),
             _ => false,
@@ -856,7 +1031,12 @@ impl Parser {
             ));
         }
         for (i, byte) in self.bytes.iter().enumerate() {
-            if *byte >= 127 || (*byte < 32 && !matches!(*byte, b'\t' | b'\r' | b'\n')) {
+            if *byte == 127
+                || (*byte >= 128
+                    && self.options.header_name_policy == HeaderNamePolicy::StrictAscii
+                    && self.options.data_string_policy == DataStringPolicy::StrictAscii)
+                || (*byte < 32 && !matches!(*byte, b'\t' | b'\r' | b'\n'))
+            {
                 return Err(self.unsupported(
                     "UnsupportedEncoding",
                     "This reader slice accepts ASCII bytes only",
@@ -895,8 +1075,14 @@ impl Parser {
                 self.stats.max_record_bytes.max(end - component.span.begin);
             self.check_header(&component)?;
             header.push(component);
+            self.header_count = header.len();
         }
         self.component.clear();
+        if self.options.header_name_policy == HeaderNamePolicy::PreserveOpaqueBytes
+            && self.options.data_string_policy == DataStringPolicy::StrictAscii
+        {
+            self.check_opaque_carrier(false)?;
+        }
         if self.peek()?.text != "ENDSEC" {
             let span = self.peek()?.span;
             return Err(self.unsupported(
@@ -925,6 +1111,7 @@ impl Parser {
             ));
         }
         self.expect(Kind::Semicolon)?;
+        self.in_data = true;
         let mut records = Vec::new();
         let mut index = BTreeMap::new();
         while self.kind()? == Kind::Reference {
@@ -934,6 +1121,7 @@ impl Parser {
         }
         self.record_id.clear();
         self.component.clear();
+        self.in_data = false;
         self.word("ENDSEC")?;
         self.expect(Kind::Semicolon)?;
         if matches!(
@@ -957,6 +1145,9 @@ impl Parser {
                 span,
             ));
         }
+        if self.options.data_string_policy == DataStringPolicy::PreserveOpaqueBytes {
+            self.check_opaque_carrier(true)?;
+        }
         let mut lines = vec![0];
         let mut pos = 0;
         while let Some(c) = self.byte(pos) {
@@ -976,11 +1167,54 @@ impl Parser {
             index,
             incoming: BTreeMap::new(),
             lines,
+            options: self.options,
+            carrier_assumption: None,
         };
         self.resolve(&mut source)?;
+        // Freeze the receipt only after reference resolution. A failure keeps
+        // it in the parser for the rejection outcome; success transfers it once
+        // into the immutable source owner, with no duplicate per-token evidence.
+        source.carrier_assumption = self.carrier.take().map(Arc::new);
+        if let Some(first) = self.opaque_data_strings.first().copied() {
+            self.notices.push(crate::carrier::notice(
+                "OpaqueDataStringsRetained",
+                "Nonstandard DATA strings retained as original bytes; text and encoding are unestablished",
+                first, "", &[],
+            ));
+        }
         Ok(Snapshot {
             data: Arc::new(source),
         })
+    }
+
+    fn check_opaque_carrier(&self, include_data: bool) -> Parsed<()> {
+        // Completed token spans authorize byte retention, not decoding. Checking
+        // all skipped comments/identifiers/HEADER fields prevents the narrow
+        // exception from becoming a general carrier relaxation. Linear pass.
+        let mut opaque = self.opaque_data_strings.iter().peekable();
+        for (i, byte) in self.bytes.iter().enumerate() {
+            while opaque.peek().is_some_and(|span| span.end <= i) {
+                opaque.next();
+            }
+            let in_data = include_data
+                && opaque
+                    .peek()
+                    .is_some_and(|span| span.begin <= i && i < span.end);
+            let in_header = self
+                .opaque_header_name
+                .is_some_and(|span| span.begin <= i && i < span.end);
+            if *byte >= 128 && !in_data && !in_header {
+                return Err(self.unsupported(
+                    "UnsupportedEncoding",
+                    "Non-ASCII bytes are outside explicitly preserved STRING tokens",
+                    Span {
+                        begin: i,
+                        end: i + 1,
+                    },
+                ));
+            }
+        }
+        Ok(())
     }
 }
 

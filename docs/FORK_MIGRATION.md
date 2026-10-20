@@ -71,8 +71,9 @@ Lossless strict Part 21 inspection, five fixed type/unit catalogs, strict part
 identity/closure, owning views, source-bound reports and their opt-in CLIs exist.
 The fixed general source geometry dependencies are now implemented and can run
 with part/closure in the maintained strict C++ phase order. They still do not
-establish native import or complete AP/source validity. Carrier/schema
-interpretation options, interoperability approval, planar/local/global rules,
+establish native import or complete AP/source validity. Explicit opaque/legacy
+source carrier policies now retain immutable receipts and downstream refusal.
+Schema interpretation options, interoperability approval, planar/local/global rules,
 native STEP construction, bindings/tool backends, kernel/API gaps and the
 remaining fork changes are still required work. Consult the live source and
 component contracts rather than treating this paragraph as a frozen completion

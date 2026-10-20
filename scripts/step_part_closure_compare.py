@@ -97,7 +97,7 @@ def direct_source(cpp, rust, path, cpp_flags, rust_flags):
                 for name in rs['registered_types']}
     assert cs['type_populations'] == expected
     assert c['source']['input']['sha256'] == r['source']['sha256']
-    assert c['source']['input']['raw'] == r['source']['raw'] == path.read_bytes().decode('ascii')
+    assert c['source']['input']['raw'] == r['source']['raw'] == path.read_bytes().decode('latin1')
 
 
 def direct_p0(cpp,rust,path):

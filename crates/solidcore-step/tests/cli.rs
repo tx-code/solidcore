@@ -22,14 +22,16 @@ fn requires_explicit_limits_and_rejects_unsupported_options() {
         vec![],
         vec!["missing.step"],
         vec!["--fixture-limits"],
-        vec![
-            "--fixture-limits",
-            "--preserve-opaque-data-strings",
-            "file.step",
-        ],
+        vec!["--fixture-limits", "--guess-data-encoding", "file.step"],
         vec!["--fixture-limits", "--records", "-1", "file.step"],
         vec!["--fixture-limits", "--records", "+1", "file.step"],
         vec!["--fixture-limits", "one.step", "two.step"],
+        vec![
+            "--fixture-limits",
+            "--interpret-level1-as-corrected",
+            "--interpret-level1-with-lowercase-hex",
+            "file.step",
+        ],
     ] {
         let output = invoke(&args).unwrap();
         assert_eq!(output.status.code(), Some(64));
@@ -38,6 +40,29 @@ fn requires_explicit_limits_and_rejects_unsupported_options() {
     let help = invoke(&["--help"]).unwrap();
     assert!(help.status.success());
     assert!(String::from_utf8(help.stdout).unwrap().contains("NOT RUN"));
+}
+
+#[test]
+fn explicit_unused_carrier_options_are_reported_without_granting_qualification() {
+    let file = fixture();
+    let output = invoke(&[
+        "--fixture-limits",
+        "--preserve-opaque-header-name",
+        "--preserve-opaque-data-strings",
+        "--interpret-level1-as-corrected",
+        file.to_str().unwrap(),
+    ])
+    .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["header_name_policy"], "PreserveOpaqueBytes");
+    assert_eq!(json["data_string_policy"], "PreserveOpaqueBytes");
+    assert_eq!(json["carrier_interpretation"]["status"], "NotApplied");
+    assert_eq!(
+        json["carrier_interpretation"]["declaration_verified"],
+        false
+    );
+    assert_eq!(json["scope"]["native_build"], "NotRun");
 }
 
 #[test]

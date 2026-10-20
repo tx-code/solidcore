@@ -13,21 +13,27 @@
 
 #![forbid(unsafe_code)]
 
-use solidcore_step::{inspect, report, Limits, Status};
+use solidcore_step::{
+    inspect_with_options, report, CarrierInterpretation, DataStringPolicy, HeaderNamePolicy,
+    InspectOptions, Limits, Status,
+};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "step-inspect --fixture-limits [--input-bytes N] [--records N] [--values N] [--references N] [--nesting N] [--string-bytes N] [--record-bytes N] [--report-bytes N] [--id-digits N] [--] FILE\nSource inspection only. Schema semantics, units, geometry and native construction are NOT RUN.\nThe preset is for synthetic tests, not a production import or quality policy.";
+const USAGE: &str = "step-inspect --fixture-limits [--input-bytes N] [--records N] [--values N] [--references N] [--nesting N] [--string-bytes N] [--record-bytes N] [--report-bytes N] [--id-digits N] [--preserve-opaque-header-name] [--preserve-opaque-data-strings] [--interpret-level1-as-corrected | --interpret-level1-with-lowercase-hex] [--] FILE\nSource inspection only. Schema semantics, units, geometry and native construction are NOT RUN.\nLegacy/opaque options retain unverified interpretation, never semantic acceptance.\nThe preset is for synthetic tests, not a production import or quality policy.";
 
-fn arguments(args: impl Iterator<Item = OsString>) -> Result<Option<(PathBuf, Limits)>, ()> {
+fn arguments(
+    args: impl Iterator<Item = OsString>,
+) -> Result<Option<(PathBuf, Limits, InspectOptions)>, ()> {
     let mut args = args.peekable();
     let mut limits = Limits::planar_fixtures();
     let mut explicit = false;
     let mut path = None;
     let mut options = true;
+    let mut source_options = InspectOptions::default();
     while let Some(arg) = args.next() {
         if options && arg == "--help" {
             return Ok(None);
@@ -38,6 +44,30 @@ fn arguments(args: impl Iterator<Item = OsString>) -> Result<Option<(PathBuf, Li
         }
         if options && arg == "--" {
             options = false;
+            continue;
+        }
+        if options && arg == "--preserve-opaque-header-name" {
+            source_options.header_name_policy = HeaderNamePolicy::PreserveOpaqueBytes;
+            continue;
+        }
+        if options && arg == "--preserve-opaque-data-strings" {
+            source_options.data_string_policy = DataStringPolicy::PreserveOpaqueBytes;
+            continue;
+        }
+        let interpretation = if options && arg == "--interpret-level1-as-corrected" {
+            Some(CarrierInterpretation::Level1AsCorrectedEncoding)
+        } else if options && arg == "--interpret-level1-with-lowercase-hex" {
+            Some(CarrierInterpretation::Level1AsCorrectedEncodingWithLowercaseHex)
+        } else {
+            None
+        };
+        if let Some(interpretation) = interpretation {
+            if source_options.carrier_interpretation != CarrierInterpretation::DeclaredOnly
+                && source_options.carrier_interpretation != interpretation
+            {
+                return Err(());
+            }
+            source_options.carrier_interpretation = interpretation;
             continue;
         }
         if options && arg.to_str().is_some_and(|s| s.starts_with('-')) {
@@ -69,11 +99,11 @@ fn arguments(args: impl Iterator<Item = OsString>) -> Result<Option<(PathBuf, Li
     if !explicit {
         return Err(());
     }
-    Ok(Some((path.ok_or(())?, limits)))
+    Ok(Some((path.ok_or(())?, limits, source_options)))
 }
 
 fn run() -> u8 {
-    let (path, limits) = match arguments(std::env::args_os().skip(1)) {
+    let (path, limits, options) = match arguments(std::env::args_os().skip(1)) {
         Ok(Some(request)) => request,
         Ok(None) => {
             println!("{USAGE}");
@@ -97,7 +127,7 @@ fn run() -> u8 {
             return 4;
         }
     }
-    let outcome = inspect(bytes, limits);
+    let outcome = inspect_with_options(bytes, limits, options);
     let report = match report::compile(&outcome) {
         Ok(bytes) => bytes,
         Err(report::Error::ReportByteLimit) => {

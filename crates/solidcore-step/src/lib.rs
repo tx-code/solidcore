@@ -10,13 +10,13 @@
 //! | [`inspect`] | `step_source::InspectBytes` |
 //! | [`Snapshot`] | `step_source::SourceSnapshot` |
 //!
-//! Deviations: safe Rust ownership, checked spans, SHA-256 via sha2. This first
-//! migration supports the strict ASCII, corrected `2;1` carrier only. Explicit
-//! legacy/opaque interpretation options are not silently inherited. Input-driven
+//! Deviations: safe Rust ownership, checked spans, SHA-256 via sha2. Legacy/opaque
+//! interpretation requires explicit options and immutable source receipts. Input-driven
 //! recursion is bounded at 128 (including reference collection and serialization).
 
 #![forbid(unsafe_code)]
 
+mod carrier;
 mod parser;
 pub mod report;
 pub mod semantics;
@@ -25,6 +25,11 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+pub use carrier::{
+    CarrierAssumption, CarrierInterpretation, DataStringPolicy, HeaderNamePolicy, InspectOptions,
+    StringHexInterpretation,
+};
 
 /// Half-open byte range in the immutable input, zero based.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
@@ -106,6 +111,8 @@ pub enum ValueKind {
     Real,
     /// Decoded UTF-8 string with original source span retained.
     String,
+    /// Original STRING bytes retained without any established text or encoding.
+    OpaqueString,
     /// Enumeration without the full-stop delimiters.
     Enumeration,
     /// Canonical positive decimal instance ID.
@@ -121,16 +128,31 @@ pub enum ValueKind {
 }
 
 /// Source parameter, retaining its exact byte span and ordered children.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Value {
     /// Grammar kind.
     pub kind: ValueKind,
     /// Original span, including delimiters.
     pub span: Span,
     /// Decoded string, exact numeric lexeme, or canonical reference ID.
+    /// For `OpaqueString` storage is empty; use [`Self::interpreted_text`] rather
+    /// than treating this storage as an established empty name.
     pub text: String,
     /// Ordered aggregate or typed children.
     pub children: Vec<Value>,
+}
+
+impl Serialize for Value {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        carrier::serialize_value(self, serializer)
+    }
+}
+
+impl Value {
+    /// Text where established; opaque strings have only source bytes and a span.
+    pub fn interpreted_text(&self) -> Option<&str> {
+        (self.kind != ValueKind::OpaqueString).then_some(self.text.as_str())
+    }
 }
 
 /// Entity component, also used for the three required HEADER records.
@@ -244,9 +266,19 @@ struct SourceData {
     index: BTreeMap<String, usize>,
     incoming: BTreeMap<String, Vec<usize>>,
     lines: Vec<usize>,
+    options: InspectOptions,
+    carrier_assumption: Option<Arc<CarrierAssumption>>,
 }
 
 impl Snapshot {
+    /// Explicit policies of the original inspection, bound to this source owner.
+    pub fn options(&self) -> InspectOptions {
+        self.data.options
+    }
+    /// Immutable applied interpretation evidence, independent of outcome notices.
+    pub fn carrier_assumption(&self) -> Option<&CarrierAssumption> {
+        self.data.carrier_assumption.as_deref()
+    }
     /// Exact, immutable original bytes.
     pub fn bytes(&self) -> &[u8] {
         &self.data.bytes
@@ -303,6 +335,8 @@ pub struct Outcome {
     // Keep the Arc private: handing an owned Arc to callers would allow
     // Arc::get_mut/make_mut to change a capture independently of its receipt.
     captured: Option<Arc<[u8]>>,
+    options: InspectOptions,
+    carrier_assumption: Option<Arc<CarrierAssumption>>,
     /// SHA-256 of the complete capture, absent without a capture.
     pub sha256: Option<String>,
     /// Published complete source graph, present only for `Inspected`.
@@ -318,6 +352,17 @@ pub struct Outcome {
 }
 
 impl Outcome {
+    /// Policies requested at capture; they never select downstream acceptance.
+    pub fn options(&self) -> InspectOptions {
+        self.options
+    }
+    /// Applied receipt survives failure; completed sources own their own receipt.
+    pub fn carrier_assumption(&self) -> Option<&CarrierAssumption> {
+        self.source
+            .as_ref()
+            .and_then(Snapshot::carrier_assumption)
+            .or(self.carrier_assumption.as_deref())
+    }
     /// Exact complete capture, absent when capture limits were exceeded.
     ///
     /// Only a borrowed byte view is exposed, so even a rejected capture cannot
@@ -329,8 +374,18 @@ impl Outcome {
 
 /// Inspect owned bytes without filesystem, kernel calls, repairs or hidden defaults.
 pub fn inspect(bytes: Vec<u8>, limits: Limits) -> Outcome {
+    inspect_with_options(bytes, limits, InspectOptions::default())
+}
+
+/// Inspect with explicit opaque/legacy source policies, without semantic approval.
+///
+/// A retained opaque token has no interpreted text. An applied legacy grammar
+/// assumption does not authenticate the declaration or original SELECT encoding.
+pub fn inspect_with_options(bytes: Vec<u8>, limits: Limits, options: InspectOptions) -> Outcome {
     let mut outcome = Outcome {
         captured: None,
+        options,
+        carrier_assumption: None,
         sha256: None,
         source: None,
         status: Status::ResourceLimit,
@@ -362,9 +417,11 @@ pub fn inspect(bytes: Vec<u8>, limits: Limits) -> Outcome {
     outcome.sha256 = Some(format!("{:x}", Sha256::digest(&bytes)));
     let bytes: Arc<[u8]> = bytes.into();
     outcome.captured = Some(Arc::clone(&bytes));
-    let mut parser = parser::Parser::new(bytes, limits);
+    let mut parser = parser::Parser::new(bytes, limits, options);
     let result = parser.parse();
     outcome.statistics = parser.statistics();
+    outcome.carrier_assumption = parser.take_carrier_assumption().map(Arc::new);
+    outcome.diagnostics = parser.take_notices();
     match result {
         Ok(source) => {
             outcome.source = Some(source);
@@ -375,5 +432,6 @@ pub fn inspect(bytes: Vec<u8>, limits: Limits) -> Outcome {
             outcome.diagnostics.push(failure.diagnostic);
         }
     }
+    carrier::append_notices(&mut outcome);
     outcome
 }

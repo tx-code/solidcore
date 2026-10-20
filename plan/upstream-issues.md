@@ -3205,3 +3205,43 @@ meantime, whoever merges renumbers the new entry and every reference to it (here
   virtual plane override; the real getter and plain-cache factory establish the
   fallback protocol. These fault cases are not numerical geometry evidence.
   Further native crash localization and general projection migration remain open.
+
+
+#### Maintained fork assertion labels: missing OwningTopology entry 5
+
+- **Source/configuration:** maintained `d8ed45a`, `SmOwningTopology.cpp` label
+  table121--128 and `AssertValid`'s null-head branch. Windows Release/old-tolerance
+  SDK independently observed through `brep_validation_reference.cpp`.
+- **Trigger:** clear a faceuse's intrusive list head while retaining its nonzero
+  stored list count, then directly call `SmFaceuse::AssertValid` at a non-Given
+  level. OwningTopology emits test5, but its label table contains only0--4.
+- **Observed:** the SDK returned false and emitted test5 with an unrelated
+  `Bad Period`/curve-period label. That label is an out-of-bounds table read,
+  not stable diagnostic truth; its exact text is not a portable expectation.
+- **Comparison boundary:** typed Rust lists have intrinsic vector counts. Clearing
+  a vector represents head=NULL/count=0, which is a different native input from
+  clearing only the native head. The reusable `fu_empty_loops` fixture sets BOTH
+  native head and count to zero to match that representable Rust state. Existing
+  `fu_no_loops` remains a root-required-pointer fixture: the root stops at126
+  before this undefined label lookup. Neither standalone Faceuse success nor an
+  intrinsic count establishes full root/model validity. No native source fix or
+  emulation of the undefined label text is claimed by this migration.
+
+
+#### Maintained fork Face reference: zero-width UV domain classification access violation
+
+- **Source/configuration:** `SmFace.cpp::AssertValid`, maintained `d8ed45a`,
+  Windows Release/old-tolerance SDK, public synthetic triangle. No claim for a
+  precisely localized failing instruction or other build configurations.
+- **Trigger:** replace only the face UV domain with `[0,0] x [0,1]`, retain its
+  defining plane/edges/vertices, and run Given tests12/13 or4/12/13. The failed
+  width rule22 is not an early return before vertex classification.
+- **Confirmed:** both actual SDK requests (`face_domain_line given_face_vertices`
+  and `face_domain_line given_face_all`, mode `assert_face`) exited with Windows
+  status `0xC0000005` (3221225477). No crash is counted as a numerical result.
+- **Guard/evidence:** these exact combinations remain identified in the reusable
+  observer as `unsafe_native`, separately from pass/fail/deferred, without
+  replaying the SDK crash. Given calls that do not enter vertex classification
+  remain compared for original domain/degeneracy diagnostics. Rust-only tests
+  require safe rejection/error and preservation of the invalid domain; they do
+  not infer a numerical answer from the failed native execution.

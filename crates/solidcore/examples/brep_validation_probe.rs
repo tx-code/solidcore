@@ -110,7 +110,11 @@ fn run() -> Result<Value> {
     let cache_mode = mode.starts_with("cache_");
     let local_mode = mode == "local_bsp";
     let root_mode = mode == "assert_root" || mode == "assert_root_walk";
-    let topology_mode = mode.starts_with("assert_region") || mode.starts_with("assert_shell");
+    let topology_mode = mode.starts_with("assert_region")
+        || mode.starts_with("assert_shell")
+        || mode.starts_with("assert_face")
+        || mode.starts_with("assert_loop");
+    let side_mode = mode.starts_with("edge_side") || mode.starts_with("loop_side");
     let mut k = Kernel::default();
     let mut builder = BrepConstructor::new()?;
     let (outer, _) = builder.start_shell()?;
@@ -196,6 +200,60 @@ fn run() -> Result<Value> {
         edges.push(e);
     }
     builder.end_loop()?;
+    if mode.contains("_hole") {
+        let mut holes = if mode.contains("_outside") {
+            vec![vec![(0.8, 0.8), (0.8, 0.9), (0.9, 0.9), (0.9, 0.8)]]
+        } else if mode.contains("_cross") {
+            vec![vec![(0.2, 0.2), (0.2, 0.8), (0.8, 0.8), (0.8, 0.2)]]
+        } else if mode.contains("_shared") {
+            vec![vec![(0., 0.), (0.2, 0.3), (0.3, 0.2)]]
+        } else {
+            vec![vec![(0.2, 0.2), (0.2, 0.4), (0.4, 0.4), (0.4, 0.2)]]
+        };
+        if mode.contains("_nested") {
+            holes.push(vec![(0.25, 0.25), (0.25, 0.35), (0.35, 0.35), (0.35, 0.25)]);
+        }
+        for hp in holes {
+            builder.start_loop(OrientType::Opposite)?;
+            let mut hv = Vec::new();
+            for (i, (x, y)) in hp.iter().copied().enumerate() {
+                hv.push(if mode.contains("_shared") && i == 0 {
+                    *at(&vertices, 0)?
+                } else {
+                    builder.start_vertex_of_loop(Point3::new(x, y, 0.))?
+                });
+            }
+            for i in 0..hp.len() {
+                let j = (i + 1) % hp.len();
+                builder.start_edge(
+                    &k,
+                    OrientType::Same,
+                    None,
+                    Some(*at(&hv, i)?),
+                    Some(*at(&hv, j)?),
+                )?;
+                let (x0, y0) = *at(&hp, i)?;
+                let (x1, y1) = *at(&hp, j)?;
+                builder.set_edge_curve(
+                    &k,
+                    Curve::from(Line::from_points(
+                        Point3::new(x0, y0, 0.),
+                        Point3::new(x1, y1, 0.),
+                        3,
+                    )),
+                    false,
+                )?;
+                builder.set_limits(&k, VertexNode::Parameter(0.), VertexNode::Parameter(1.))?;
+                builder.end_edge()?;
+            }
+            builder.end_loop()?;
+        }
+    }
+    let vertex_loop = if mode.contains("vertexloop") {
+        Some(builder.single_vertex_loop(Point3::new(0.2, 0.2, 0.))?)
+    } else {
+        None
+    };
     builder.end_face()?;
     builder.end_shell(&mut k, false)?;
     let mut b = builder.finish()?;
@@ -222,7 +280,9 @@ fn run() -> Result<Value> {
     }
     let region = require(b.infinite_region())?;
     let mut target_shell = outer;
-    if topology_mode && (mode.contains("_vertex") || mode.contains("_wire")) {
+    if (mode.starts_with("assert_region") || mode.starts_with("assert_shell"))
+        && (mode.contains("_vertex") || mode.contains("_wire"))
+    {
         let (shell, vertex) =
             solidcore::topology::brep::p2::make_shell_vertex_topology(&mut b, None)?;
         target_shell = shell;
@@ -242,6 +302,9 @@ fn run() -> Result<Value> {
     let fu = require(b.face(face)?.faceuse)?;
     let mate_fu = require(b.faceuse(fu)?.mate)?;
     let lu = require(b.loop_(loop_id)?.loopuse)?;
+    let target_loop = vertex_loop.unwrap_or(loop_id);
+    let target_lu = require(b.loop_(target_loop)?.loopuse)?;
+    let target_mate_lu = require(b.loopuse(target_lu)?.mate)?;
     let LoopuseStart::Edgeuse(Some(first)) = b.loopuse(lu)?.start else {
         return Err("missing loop start".into());
     };
@@ -251,6 +314,14 @@ fn run() -> Result<Value> {
         .vertexuses
         .first()
         .ok_or("missing fixture vertex use")?;
+    if side_mode && mode.contains("_uv") {
+        for eu in solidcore::topology::edgeuse::p1::loopuse_edgeuses(&b, lu)? {
+            solidcore::topology::edgeuse::p3::get_or_create_uv_trim_curve(
+                &k, &mut b, eu, false, false, true,
+            )?
+            .status?;
+        }
+    }
     let mark_types = [
         solidcore::geom::context::MarkType::Mark,
         solidcore::geom::context::MarkType::Mark2,
@@ -263,6 +334,31 @@ fn run() -> Result<Value> {
         match name {
             "none" | "edge_no_uses" | "surface_offset" | "trim_failure" => {}
             name if name.starts_with("reverse_") || name.starts_with("bspline_") => {}
+            "face_domain_outside" => {
+                b.face_mut(face)?.uv_domain = Extent2d::from_bounds(-0.1, -0.1, 1.1, 1.1);
+            }
+            "face_domain_line" => {
+                b.face_mut(face)?.uv_domain = Extent2d::from_bounds(0., 0., 0., 1.);
+            }
+            "coincident_vertices" => {
+                let point = b.vertex(*at(&vertices, 0)?)?.point;
+                b.vertex_mut(*at(&vertices, 2)?)?.point = point;
+            }
+            "mate_rotate" => {
+                let mate = require(b.loopuse(lu)?.mate)?;
+                let LoopuseStart::Edgeuse(Some(start)) = b.loopuse(mate)?.start else {
+                    return Err("mate fixture head".into());
+                };
+                b.loopuse_mut(mate)?.start = LoopuseStart::Edgeuse(b.edgeuse(start)?.ccw);
+            }
+            "mate_reversed_order" => {
+                let mate = require(b.loopuse(lu)?.mate)?;
+                for eu in solidcore::topology::edgeuse::p1::loopuse_edgeuses(&b, mate)? {
+                    let use_ = b.edgeuse_mut(eu)?;
+                    std::mem::swap(&mut use_.ccw, &mut use_.cw);
+                }
+            }
+            "fu_empty_loops" | "fu_no_loops" => b.faceuse_mut(fu)?.loopuses.clear(),
             "empty_shell" => b.shell_mut(target_shell)?.members = ShellMembers::Empty,
             "region_mark3_ahead" | "shell_mark3_ahead" => {
                 let mut contexts = [solidcore::geom::context::Context::default()];
@@ -296,7 +392,6 @@ fn run() -> Result<Value> {
                 b.faceuse_mut(fu)?.sibling_links = Some(links);
                 b.faceuse_mut(fu)?.shell = None;
             }
-            "fu_no_loops" => b.faceuse_mut(fu)?.loopuses.clear(),
             "loop_no_primary" => b.loop_mut(loop_id)?.loopuse = None,
             "lu_no_loop" => b.loopuse_mut(lu)?.loop_ = None,
             "lu_no_mate" => b.loopuse_mut(lu)?.mate = None,
@@ -374,6 +469,12 @@ fn run() -> Result<Value> {
     let level = match selection {
         "given" if root_mode => CheckLevel::Given(&[8]),
         "given15" => CheckLevel::Given(&[15]),
+        "given_face_owner" => CheckLevel::Given(&[4]),
+        "given_face_vertices" => CheckLevel::Given(&[12, 13]),
+        "given_face_all" => CheckLevel::Given(&[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+        ]),
         "given" => CheckLevel::Given(&[0]),
         "two" => CheckLevel::Two,
         "heal" => CheckLevel::Heal,
@@ -387,6 +488,7 @@ fn run() -> Result<Value> {
     let mut cache_slot = None;
     let mut local_output = None;
     let mut root_output = None;
+    let mut side_output = None;
     let mut invoke = |reports: Option<&mut AssertArray>| {
         if raw {
             Ok(())
@@ -404,26 +506,107 @@ fn run() -> Result<Value> {
                 root_output = Some(valid);
             })
         } else if topology_mode {
-            let options = solidcore::topology::brep_validation::AssertValidOptions {
+            use solidcore::topology::brep_validation as validation;
+            let options = validation::AssertValidOptions {
                 level,
                 walk: mode.ends_with("_walk"),
             };
             let result = if mode.starts_with("assert_region") {
-                solidcore::topology::brep_validation::assert_region(
-                    &mut k, &mut b, region, options, reports,
-                )
-            } else {
-                solidcore::topology::brep_validation::assert_shell(
+                validation::assert_region(&mut k, &mut b, region, options, reports)
+            } else if mode.starts_with("assert_shell") {
+                validation::assert_shell(&mut k, &mut b, target_shell, options, reports)
+            } else if mode.starts_with("assert_faceuse") {
+                validation::assert_faceuse(
                     &mut k,
                     &mut b,
-                    target_shell,
+                    if mode.contains("_mate") { mate_fu } else { fu },
                     options,
                     reports,
                 )
+            } else if mode.starts_with("assert_face") {
+                validation::assert_face(&mut k, &mut b, face, options, reports)
+            } else if mode.starts_with("assert_loopuse") {
+                validation::assert_loopuse(
+                    &mut k,
+                    &mut b,
+                    if mode.contains("_mate") {
+                        target_mate_lu
+                    } else {
+                        target_lu
+                    },
+                    options,
+                    reports,
+                )
+            } else {
+                validation::assert_loop(&mut k, &mut b, target_loop, options, reports)
             };
-            result.map(|valid| {
-                root_output = Some(valid);
-            })
+            result.map(|valid| root_output = Some(valid))
+        } else if side_mode {
+            use solidcore::topology::edgeuse::side;
+            let periodic_u = if selection == "periodic_u" {
+                Some(true)
+            } else {
+                None
+            };
+            let periodic_v = if selection == "periodic_v" {
+                Some(true)
+            } else {
+                None
+            };
+            if mode.starts_with("loop_side") {
+                let result = side::loopuse_side(
+                    &k,
+                    &b,
+                    if mode.contains("_mate") {
+                        target_mate_lu
+                    } else {
+                        target_lu
+                    },
+                    periodic_u,
+                    periodic_v,
+                )?;
+                side_output = Some(json!([
+                    result.inside,
+                    result.on_boundary,
+                    result.edgeuse_index
+                ]));
+            } else {
+                let mut target = if mode.contains("_last") {
+                    *b.edge(
+                        *edges
+                            .get(2)
+                            .ok_or_else(|| SolidError::null_pointer("side edge fixture"))?,
+                    )?
+                    .edgeuses
+                    .first()
+                    .ok_or_else(|| SolidError::null_pointer("side fixture"))?
+                } else {
+                    first
+                };
+                if mode.contains("_mate") {
+                    target = solidcore::topology::edgeuse::p1::mate(&b, target)?
+                        .ok_or_else(|| SolidError::null_pointer("side fixture mate"))?;
+                }
+                let result = side::edgeuse_side(
+                    &k,
+                    &b,
+                    target,
+                    side::SideOptions {
+                        samples: selection
+                            .strip_prefix("samples_")
+                            .map(str::parse)
+                            .transpose()
+                            .map_err(|_| {
+                                SolidError::invalid_input("side samples", "invalid count")
+                            })?
+                            .unwrap_or(6),
+                        periodic_u,
+                        periodic_v,
+                    },
+                )?;
+                side_output = Some(json!([result.inside, result.on_boundary, 0]));
+            }
+            Ok(())
         } else if local_mode {
             let outside = defect == "bspline_outside";
             let boundary = defect == "bspline_boundary";
@@ -796,6 +979,9 @@ fn run() -> Result<Value> {
                 .map(|(mark, before)| k.context.current_mark(*mark) - before)
                 .collect::<Vec<_>>()),
         );
+    }
+    if let Some(side) = side_output {
+        output.insert("side".into(), side);
     }
     if let Some(local) = local_output {
         output.insert("local".into(), local);

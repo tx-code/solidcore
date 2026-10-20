@@ -28,7 +28,7 @@ fn required<T>(value: Option<T>) -> Result<T> {
     value.ok_or_else(|| SolidError::null_pointer("topology::brep_validation::local"))
 }
 
-fn ignore_native_status<T>(result: Result<T>) -> Result<Option<T>> {
+pub(super) fn ignore_native_status<T>(result: Result<T>) -> Result<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),
         // Native callers ignore SmStatus; Rust arena/representation failures
@@ -77,9 +77,13 @@ pub(super) fn walk_root(
     for shell in shells {
         valid &= assert_shell(k, b, shell, options, report.reports.as_deref_mut())?;
     }
+    for face in faces {
+        valid &= super::assert_face(k, b, face, options, report.reports.as_deref_mut())?;
+    }
+    for loop_ in loops {
+        valid &= super::assert_loop(k, b, loop_, options, report.reports.as_deref_mut())?;
+    }
     for (nonempty, symbol) in [
-        (!faces.is_empty(), "SmFace::AssertValid"),
-        (!loops.is_empty(), "SmLoop::AssertValid"),
         (!edges.is_empty(), "SmEdge::AssertValid"),
         (!vertices.is_empty(), "SmVertex::AssertValid"),
     ] {
@@ -91,7 +95,7 @@ pub(super) fn walk_root(
     Ok(valid)
 }
 
-fn non_root_walk() -> SolidError {
+pub(super) fn non_root_walk() -> SolidError {
     // UNPORTED(topology.topology_traverser): non-root GetSubTopology; do not
     // replace its source mark/order semantics with an arbitrary graph scan.
     SolidError::unported(
@@ -501,51 +505,36 @@ mod tests {
     }
 
     #[test]
-    fn root_walk_checks_region_metadata_before_the_missing_face_validator() {
-        let (mut b, _, _, _) = super::super::tests::fixture();
-        let region = b.infinite_region().unwrap();
-        let mut contexts = [crate::geom::context::Context::default()];
-        let mut lock = MarkLock::new(&mut contexts, 0, MarkType::Mark3.code()).unwrap();
-        b.notification_topology_mut(EntityRef::Region(region))
-            .unwrap()
-            .mark(contexts.first(), MarkType::Mark3);
-        lock.release(&mut contexts).unwrap();
-        let mut reports = AssertArray::new();
-        let mut k = Kernel::default();
-        let error = super::super::assert_valid(
-            &mut k,
-            &mut b,
-            AssertValidOptions::default(),
-            Some(&mut reports),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            SolidError::Unported {
-                upstream: "SmFace::AssertValid",
-                ..
-            }
-        ));
-        assert_eq!(
-            reports
+    fn root_walk_keeps_base_request_selection_while_reaching_real_face_checks() {
+        for level in [CheckLevel::Zero, CheckLevel::Given(&[8])] {
+            let (mut b, _, _, _) = super::super::tests::fixture();
+            let region = b.infinite_region().unwrap();
+            let mut contexts = [crate::geom::context::Context::default()];
+            let mut lock = MarkLock::new(&mut contexts, 0, MarkType::Mark3.code()).unwrap();
+            b.notification_topology_mut(EntityRef::Region(region))
+                .unwrap()
+                .mark(contexts.first(), MarkType::Mark3);
+            lock.release(&mut contexts).unwrap();
+            let mut reports = AssertArray::new();
+            let error = super::super::assert_valid(
+                &mut Kernel::default(),
+                &mut b,
+                AssertValidOptions { level, walk: true },
+                Some(&mut reports),
+            )
+            .unwrap_err();
+            assert!(matches!(error, SolidError::Unported { .. }));
+            let actual = reports
                 .reports()
                 .iter()
                 .map(|r| (r.reporting_type, r.test_index))
-                .collect::<Vec<_>>(),
-            vec![(16001, 4), (16001, 7)]
-        );
-        let mut reports = AssertArray::new();
-        super::super::assert_valid(
-            &mut k,
-            &mut b,
-            AssertValidOptions {
-                level: CheckLevel::Given(&[8]),
-                walk: true,
-            },
-            Some(&mut reports),
-        )
-        .unwrap_err();
-        assert!(reports.is_empty());
+                .collect::<Vec<_>>();
+            if matches!(level, CheckLevel::Zero) {
+                assert_eq!(actual, vec![(16001, 4), (16001, 7)]);
+            } else {
+                assert!(actual.is_empty());
+            }
+        }
     }
 
     #[test]

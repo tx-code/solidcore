@@ -49,6 +49,42 @@ fn wrong_handle() -> SolidError {
     SolidError::invalid_input(OP, "cache topology handle has the wrong type")
 }
 
+/// Resolve the native geometry-owner namespace in this exact model. Working
+/// tolerances are not import accuracy or repair allowances. Foreign owners need
+/// the future shared resolver; a default value would hide missing ownership.
+pub(crate) fn owning_face_tolerance(
+    b: &Brep,
+    owner: crate::geom::object::ObjectRef,
+) -> Result<f64> {
+    // arena_identity uses a raw u32 index in the geometry-owner namespace.
+    // Round-trip through that canonical encoder to reject metadata/custom keys;
+    // do not scan all faces for each point drop in a large model.
+    if let Ok(index) = u32::try_from(owner.key.0) {
+        let id = FaceId::from_index(index);
+        if crate::topology::brep_cache::arena_identity(
+            crate::topology::brep_cache::CacheObject::Face(id),
+        ) == owner
+        {
+            if let Some(face) = b.faces().get(id) {
+                return Ok(face.tolerance);
+            }
+        }
+    }
+    // UNPORTED(topology.face_p2): owner outside the supplied model.
+    Err(SolidError::unported(
+        "SmFace::GetTolerance outside owning model",
+        "topology.face_p2",
+    ))
+}
+
+/// Actual surface working tolerance, including the unowned base convention.
+pub(crate) fn working_surface_tolerance(k: &Kernel, b: &Brep, surface: &Surface) -> Result<f64> {
+    match surface.face()? {
+        Some(owner) => owning_face_tolerance(b, owner),
+        None => crate::surface::surface::p1::zone_tol_3d(k, surface),
+    }
+}
+
 impl CacheTopology<EntityRef> for BrepSurfaceContext<'_> {
     fn face(&mut self, surface: &Surface) -> Result<Option<EntityRef>> {
         let Some(owner) = surface.face()? else {

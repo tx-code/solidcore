@@ -21,17 +21,27 @@
 //! explicit errors. See `docs/BREP_VALIDATION.md` for qualification boundaries.
 
 mod assertions;
-pub use assertions::{assert_valid, AssertValidOptions};
+#[cfg(test)]
+mod face_loop_tests;
+mod face_tests;
+mod faces;
 mod geometry;
 mod local;
 mod local_base;
-pub use local::{assert_region, assert_shell};
+mod loops;
 mod pointers;
-mod tolerances;
-pub use tolerances::{validate_and_update_tolerances, ToleranceReport};
 mod presence;
 #[cfg(test)]
 mod tests;
+mod tolerances;
+mod uses;
+
+pub use assertions::{assert_valid, AssertValidOptions};
+pub use faces::assert_face;
+pub use local::{assert_region, assert_shell};
+pub use loops::assert_loop;
+pub use tolerances::{validate_and_update_tolerances, ToleranceReport};
+pub use uses::{assert_faceuse, assert_loopuse};
 
 use super::brep::p1 as bp;
 use super::{
@@ -210,21 +220,41 @@ impl Reporter<'_> {
         owner: Object,
         passed: bool,
     ) -> Result<bool> {
+        self.class_value(class, test, owner, passed, UNDEF_DOUBLE, UNDEF_DOUBLE)
+    }
+    fn class_value(
+        &mut self,
+        class: i64,
+        test: u64,
+        owner: Object,
+        passed: bool,
+        tol: f64,
+        value: f64,
+    ) -> Result<bool> {
+        self.class_record(
+            owner,
+            passed,
+            ReportSpec {
+                test_class: class,
+                test_index: test,
+                tol3d: tol,
+                value,
+                ..ReportSpec::default()
+            },
+        )
+    }
+    fn class_record(&mut self, owner: Object, passed: bool, mut spec: ReportSpec) -> Result<bool> {
         if let Some(reports) = self.reports.as_deref_mut() {
             if passed {
                 reports.set_last_add(false);
             } else {
                 let (_, _, name) = owner.identity();
-                reports.add_unique_delete_duplicate(AssertReport::new(ReportSpec {
-                    reporter: Some(owner.key()),
-                    test_class: class,
-                    test_index: test,
-                    owner: Some(owner.key()),
-                    owner_type: class,
-                    owner_type_string: Some(name),
-                    other_type_string: Some("NULL"),
-                    ..ReportSpec::default()
-                })?);
+                spec.reporter = Some(owner.key());
+                spec.owner = Some(owner.key());
+                spec.owner_type = spec.test_class;
+                spec.owner_type_string = Some(name);
+                spec.other_type_string = Some("NULL");
+                reports.add_unique_delete_duplicate(AssertReport::new(spec)?);
             }
         }
         Ok(passed)

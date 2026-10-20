@@ -43,58 +43,104 @@ fn attribute_base(b: &Brep, object: Object, report: &mut Reporter<'_>) -> Result
     Ok(valid)
 }
 
-// owner-present, on owner's list, has actual peer links, owner's list count,
-// actual peer-ring count. Membership must not be inferred from a backpointer.
-fn peer_state(b: &Brep, object: Object) -> Result<(bool, bool, bool, usize, usize)> {
-    match object {
-        Object::Region(id) => {
-            let own = b.region(id)?.in_brep;
-            let list = b.region_list();
-            let occurrences = list.iter().filter(|entry| **entry == id).count();
-            if occurrences > 1 {
-                return Err(invalid());
-            }
-            let linked = occurrences != 0;
-            Ok((
-                own,
-                own && linked,
-                linked,
-                list.len(),
-                if linked { list.len() } else { 1 },
-            ))
-        }
-        Object::Shell(id) => {
-            let owner = b.shell(id)?.region;
-            let owner_list = owner.map(|r| b.region(r)).transpose()?;
-            let on_owner = owner_list.is_some_and(|r| r.shells.contains(&id));
-            let mut actual_count = None;
-            for (_, region) in b.regions().iter() {
-                let occurrences = region.shells.iter().filter(|entry| **entry == id).count();
-                if occurrences > 1 || (occurrences == 1 && actual_count.is_some()) {
-                    return Err(invalid());
-                }
-                if occurrences == 1 {
-                    actual_count = Some(region.shells.len());
-                }
-            }
-            Ok((
-                owner.is_some(),
-                on_owner,
-                actual_count.is_some(),
-                owner_list.map_or(0, |r| r.shells.len()),
-                actual_count.unwrap_or(1),
-            ))
-        }
-        _ => Err(invalid()),
-    }
+struct PeerState {
+    owner: bool,
+    on_owner_list: bool,
+    owner_count: usize,
 }
 
-fn topology_base(k: &Kernel, b: &Brep, object: Object, report: &mut Reporter<'_>) -> Result<bool> {
+fn owner_state(b: &Brep, object: Object) -> Result<PeerState> {
+    let (owner, on_owner_list, owner_count) = match object {
+        Object::Region(id) => {
+            let owner = b.region(id)?.in_brep;
+            (
+                owner,
+                owner && b.region_list().contains(&id),
+                b.region_list().len(),
+            )
+        }
+        Object::Shell(id) => {
+            let owner = b.shell(id)?.region.map(|r| b.region(r)).transpose()?;
+            (
+                owner.is_some(),
+                owner.is_some_and(|r| r.shells.contains(&id)),
+                owner.map_or(0, |r| r.shells.len()),
+            )
+        }
+        Object::Face(id) => {
+            b.face(id)?;
+            let linked = b.face_list().contains(&id);
+            // The model's face-list sentinel is intrinsic, distinct from Face.shell.
+            (linked, linked, b.face_list().len())
+        }
+        Object::Loop(id) => {
+            b.loop_(id)?;
+            // SmLoop has no intrusive owner/list: its paired loopuses own their
+            // separate links; Loop.face is only a convenience cache.
+            (false, false, 0)
+        }
+        Object::Faceuse(id) => {
+            let owner = b.faceuse(id)?.shell;
+            let on_list = owner.map(|s| -> Result<bool> {
+                Ok(matches!(&b.shell(s)?.members, ShellMembers::Faceuses(list) if list.contains(&id)))
+            }).transpose()?.unwrap_or(false);
+            (
+                owner.is_some(),
+                on_list,
+                owner
+                    .map(|s| crate::topology::shell::shell_list_size(b, s))
+                    .transpose()?
+                    .unwrap_or(0),
+            )
+        }
+        Object::Loopuse(id) => {
+            let owner = b.loopuse(id)?.faceuse.map(|fu| b.faceuse(fu)).transpose()?;
+            (
+                owner.is_some(),
+                owner.is_some_and(|fu| fu.loopuses.contains(&id)),
+                owner.map_or(0, |fu| fu.loopuses.len()),
+            )
+        }
+        _ => return Err(invalid()),
+    };
+    Ok(PeerState {
+        owner,
+        on_owner_list,
+        owner_count,
+    })
+}
+
+fn containing_list<'a, T: Copy + PartialEq + 'a>(
+    lists: impl Iterator<Item = &'a [T]>,
+    id: T,
+) -> Result<&'a [T]> {
+    let mut found = None;
+    for list in lists {
+        let count = list.iter().filter(|entry| **entry == id).count();
+        if count > 1 || (count == 1 && found.is_some()) {
+            return Err(invalid());
+        }
+        if count == 1 {
+            found = Some(list);
+        }
+    }
+    Ok(found.unwrap_or_default())
+}
+
+/// Common topology base. Literal FU links remain observable; ordinary vector
+/// reciprocal/count invariants are intrinsic. Marks come from real owned state.
+pub(super) fn topology_base(
+    k: &Kernel,
+    b: &Brep,
+    object: Object,
+    report: &mut Reporter<'_>,
+) -> Result<bool> {
     let mut valid = attribute_base(b, object, report)?;
-    let (owner, on_list, linked, owner_count, actual_count) = peer_state(b, object)?;
-    let mut last_predicate;
-    if owner {
-        valid &= report.class_predicate(labels::TOPOLOGY_TYPE, 0, object, on_list)?;
+    let state = owner_state(b, object)?;
+    let (next, last) = child_links(b, object)?;
+    let mut ring_ok;
+    if state.owner {
+        valid &= report.class_predicate(labels::TOPOLOGY_TYPE, 0, object, state.on_owner_list)?;
         valid &= report.class_predicate(labels::TOPOLOGY_TYPE, 1, object, true)?;
         let metadata = b
             .notifications()
@@ -102,28 +148,56 @@ fn topology_base(k: &Kernel, b: &Brep, object: Object, report: &mut Reporter<'_>
             .get(&crate::geom::attribute::ObjectKey(object.key().0))
             .copied()
             .unwrap_or_default();
-        last_predicate = true;
+        ring_ok = true;
         for (test, mark) in [
             (2, MarkType::Mark),
             (3, MarkType::Mark2),
             (4, MarkType::Mark3),
         ] {
-            last_predicate = metadata.get_mark(mark) <= k.context.current_mark(mark);
-            valid &= report.class_predicate(labels::TOPOLOGY_TYPE, test, object, last_predicate)?;
+            ring_ok = metadata.get_mark(mark) <= k.context.current_mark(mark);
+            valid &= report.class_predicate(labels::TOPOLOGY_TYPE, test, object, ring_ok)?;
         }
     } else {
-        last_predicate = !linked;
-        valid &= report.class_predicate(labels::TOPOLOGY_TYPE, 5, object, last_predicate)?;
-        valid &= report.class_predicate(labels::TOPOLOGY_TYPE, 6, object, last_predicate)?;
+        valid &= report.class_predicate(labels::TOPOLOGY_TYPE, 5, object, next.is_none())?;
+        ring_ok = last.is_none();
+        valid &= report.class_predicate(labels::TOPOLOGY_TYPE, 6, object, ring_ok)?;
     }
-    // Source bOk deliberately carries the previous mark3/last-pointer predicate
-    // into the ring check. Preserve its cascading test7 instead of resetting it.
-    valid &= report.class_predicate(labels::TOPOLOGY_TYPE, 7, object, last_predicate)?;
+    // SmTopology.cpp's exact two-speed ring walk. bOk carries the last mark3/
+    // last-pointer result. Do not reset it or silently ignore literal FU damage.
+    let mut current = next;
+    let mut slow = current;
+    let mut move_slow = false;
+    let mut count = 1;
+    while let Some(node) = current {
+        if node.key() == object.key() {
+            break;
+        }
+        count += 1;
+        let (next, last) = child_links(b, node)?;
+        let (Some(next), Some(last)) = (next, last) else {
+            return Err(invalid());
+        };
+        ring_ok &= child_links(b, next)?.1.map(Object::key) == Some(node.key());
+        ring_ok &= child_links(b, last)?.0.map(Object::key) == Some(node.key());
+        current = Some(next);
+        if move_slow {
+            slow = slow
+                .map(|node| child_links(b, node))
+                .transpose()?
+                .and_then(|links| links.0);
+        }
+        move_slow = !move_slow;
+        if slow.map(Object::key) == current.map(Object::key) {
+            ring_ok = false;
+            break;
+        }
+    }
+    valid &= report.class_predicate(labels::TOPOLOGY_TYPE, 7, object, ring_ok)?;
     valid &= report.class_predicate(
         labels::TOPOLOGY_TYPE,
         8,
         object,
-        !owner || owner_count == actual_count,
+        !state.owner || state.owner_count == count,
     )?;
     Ok(valid)
 }
@@ -133,6 +207,10 @@ fn child_head(b: &Brep, object: Object) -> Result<(Option<Object>, usize, bool)>
         Object::Region(id) => {
             let list = &b.region(id)?.shells;
             (list.first().copied().map(Object::Shell), list.len(), true)
+        }
+        Object::Faceuse(id) => {
+            let list = &b.faceuse(id)?.loopuses;
+            (list.first().copied().map(Object::Loopuse), list.len(), true)
         }
         Object::Shell(id) => {
             let shell = b.shell(id)?;
@@ -173,22 +251,49 @@ fn neighbors<T: Copy + PartialEq>(list: &[T], id: T) -> Result<(Option<T>, Optio
 
 fn child_links(b: &Brep, object: Object) -> Result<(Option<Object>, Option<Object>)> {
     Ok(match object {
+        Object::Region(id) => {
+            b.region(id)?;
+            let (next, last) = neighbors(b.region_list(), id)?;
+            (next.map(Object::Region), last.map(Object::Region))
+        }
         Object::Shell(id) => {
-            let mut list = None;
-            for (_, region) in b.regions().iter() {
-                if region.shells.contains(&id) {
-                    if list.is_some() {
-                        return Err(invalid());
-                    }
-                    list = Some(region.shells.as_slice());
-                }
-            }
-            let (next, last) = neighbors(list.unwrap_or_default(), id)?;
+            b.shell(id)?;
+            let list = containing_list(b.regions().iter().map(|(_, r)| r.shells.as_slice()), id)?;
+            let (next, last) = neighbors(list, id)?;
             (next.map(Object::Shell), last.map(Object::Shell))
         }
+        Object::Face(id) => {
+            b.face(id)?;
+            let (next, last) = neighbors(b.face_list(), id)?;
+            (next.map(Object::Face), last.map(Object::Face))
+        }
+        Object::Loop(id) => {
+            b.loop_(id)?;
+            (None, None)
+        }
         Object::Faceuse(id) => {
-            let (next, last) = crate::topology::shell::faceuse_sibling_links(b, id)?;
-            (next.map(Object::Faceuse), last.map(Object::Faceuse))
+            if let Some(links) = b.faceuse(id)?.sibling_links {
+                (links.0.map(Object::Faceuse), links.1.map(Object::Faceuse))
+            } else {
+                let list = containing_list(
+                    b.shells().iter().filter_map(|(_, s)| match &s.members {
+                        ShellMembers::Faceuses(ids) => Some(ids.as_slice()),
+                        _ => None,
+                    }),
+                    id,
+                )?;
+                let (next, last) = neighbors(list, id)?;
+                (next.map(Object::Faceuse), last.map(Object::Faceuse))
+            }
+        }
+        Object::Loopuse(id) => {
+            b.loopuse(id)?;
+            let list = containing_list(
+                b.faceuses().iter().map(|(_, fu)| fu.loopuses.as_slice()),
+                id,
+            )?;
+            let (next, last) = neighbors(list, id)?;
+            (next.map(Object::Loopuse), last.map(Object::Loopuse))
         }
         Object::Edgeuse(id) => {
             let owner = b.edgeuse(id)?.edge.ok_or_else(invalid)?;
@@ -243,6 +348,7 @@ pub(super) fn owning(
             let same_owner = match (object, child) {
                 (Object::Region(r), Object::Shell(s)) => b.shell(s)?.region == Some(r),
                 (Object::Shell(s), Object::Faceuse(fu)) => b.faceuse(fu)?.shell == Some(s),
+                (Object::Faceuse(fu), Object::Loopuse(lu)) => b.loopuse(lu)?.faceuse == Some(fu),
                 _ => return Err(invalid()),
             };
             valid &= report.class_predicate(labels::OWNING_TOPOLOGY_TYPE, 2, object, same_owner)?;

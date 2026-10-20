@@ -74,6 +74,7 @@ FIELD(VuOwner, SmVertexuse, m_pSorLUorEU, SmTopology *)
 FIELD(FuOrientation, SmFaceuse, m_eOrientation, SmOrientType)
 FIELD(LuOrientation, SmLoopuse, m_eOrientation, SmOrientType)
 FIELD(FaceTol, SmFace, m_sZoneTol3d, SmZoneTol3d)
+FIELD(FaceDomain,SmFace,m_vUVDomain,SmExtent2d)
 FIELD(EdgeTol, SmEdge, m_sZoneTol3d, SmZoneTol3d)
 FIELD(VertexTol, SmVertex, m_sZoneTol3d, SmZoneTol3d)
 FIELD(RootTol, SmBrep, m_sThisZoneTol3d, SmZoneTol3d)
@@ -166,7 +167,8 @@ int main(int argc, char **argv) {
         const bool cache_mode=mode.starts_with("cache_");
         const bool local_mode=mode=="local_bsp";
         const bool root_mode=mode=="assert_root"||mode=="assert_root_walk";
-        const bool topology_mode=mode.starts_with("assert_region")||mode.starts_with("assert_shell");
+        const bool topology_mode=mode.starts_with("assert_region")||mode.starts_with("assert_shell")||mode.starts_with("assert_face")||mode.starts_with("assert_loop");
+        const bool side_mode=mode.starts_with("edge_side")||mode.starts_with("loop_side");
         SmContext context;
         SmBrepConstructor builder;
         auto b = builder.StartBrep(context);
@@ -230,11 +232,30 @@ int main(int argc, char **argv) {
             require(builder.EndEdge());
         }
         require(builder.EndLoop());
+        if(mode.find("_hole")!=std::string::npos){
+            auto add_hole=[&](std::vector<SmPoint3d> hp,bool shared){
+                if(!builder.StartLoop(SM_OT_OPPOSITE))throw std::runtime_error("hole loop");
+                std::vector<SmVertex*> hv;
+                for(size_t i=0;i<hp.size();++i)hv.push_back(shared&&i==0?vertices[0]:builder.StartVertexOfLoop(hp[i]));
+                for(size_t i=0;i<hp.size();++i){size_t j=(i+1)%hp.size();
+                    if(!builder.StartEdge(SM_OT_SAME,nullptr,hv[i],hv[j]))throw std::runtime_error("hole edge");
+                    require(builder.SetEdgeCurve(new (&context) SmLine(hp[i],hp[j],3,&context),FALSE));
+                    require(builder.SetLimits(SmVertexNode(0.),SmVertexNode(1.)));require(builder.EndEdge());}
+                require(builder.EndLoop());
+            };
+            if(mode.find("_outside")!=std::string::npos)add_hole({{.8,.8,0},{.8,.9,0},{.9,.9,0},{.9,.8,0}},false);
+            else if(mode.find("_cross")!=std::string::npos)add_hole({{.2,.2,0},{.2,.8,0},{.8,.8,0},{.8,.2,0}},false);
+            else if(mode.find("_shared")!=std::string::npos)add_hole({{0,0,0},{.2,.3,0},{.3,.2,0}},true);
+            else {add_hole({{.2,.2,0},{.2,.4,0},{.4,.4,0},{.4,.2,0}},false);
+                if(mode.find("_nested")!=std::string::npos)add_hole({{.25,.25,0},{.25,.35,0},{.35,.35,0},{.35,.25,0}},false);}
+        }
+        SmLoop *vertex_loop=nullptr;
+        if(mode.find("vertexloop")!=std::string::npos)vertex_loop=builder.StartAndEndSingleVertexLoop(SmPoint3d(.2,.2,0));
         require(builder.EndFace());
         require(builder.EndShell(FALSE));
         require(builder.EndBrep());
         SmShell *target_shell=outer;
-        if(topology_mode && (mode.find("_vertex")!=std::string::npos || mode.find("_wire")!=std::string::npos)) {
+        if((mode.starts_with("assert_region")||mode.starts_with("assert_shell")) && (mode.find("_vertex")!=std::string::npos || mode.find("_wire")!=std::string::npos)) {
             SmVertex *vertex=nullptr;require(b->MakeShellVertexTopology(nullptr,target_shell,vertex));
             if(mode.find("_wire")!=std::string::npos) {
                 SmEdge *wire=nullptr;SmVertex *end=nullptr;require(b->MakeEdgeVertexTopology(nullptr,vertex,wire,end));
@@ -253,7 +274,11 @@ int main(int argc, char **argv) {
             orphan->SetCurve(new (&context) SmLine(points[0], points[1], 3, &context));
         }
         auto fu = f->GetUpwardFaceuse();
+        auto mate_fu=fu->GetMate();
         auto lu = loop->GetLoopuse();
+        auto target_loop=vertex_loop?vertex_loop:loop;
+        auto target_lu=target_loop->GetLoopuse();
+        auto target_mate_lu=target_lu->GetOtherLoopuse();
         auto first = static_cast<SmEdgeuse *>(lu->GetEUorVU());
         SmTArray<SmEdge *> edges;
         b->GetEdges(edges);
@@ -273,6 +298,9 @@ int main(int argc, char **argv) {
         keys[f->GetSurface()] = (1ULL << 63);
         record(keys, lu, 0);
         record(keys, lu->GetOtherLoopuse(), 1);
+        if(mode.find("_hole")!=std::string::npos){SmTArray<SmLoop*> all;f->GetLoops(all);
+            for(ULONG i=1;i<all.GetSize();++i){record(keys,all[i],i);auto use=all[i]->GetLoopuse();record(keys,use,2*i);record(keys,use->GetOtherLoopuse(),2*i+1);}}
+        if(vertex_loop){record(keys,vertex_loop,1);record(keys,target_lu,2);record(keys,target_mate_lu,3);}
         unsigned use_index = 0, vertexuse_index = 0;
         for (ULONG i = 0; i < edges.GetSize(); ++i) {
             record(keys, edges[i], i);
@@ -283,8 +311,13 @@ int main(int argc, char **argv) {
                 record(keys, uses[j]->GetVertexuse(), vertexuse_index++);
             }
         }
-        for (ULONG i = 0; i < vs.GetSize(); ++i)
+        for (ULONG i = 0; i < vs.GetSize(); ++i){
             record(keys, vs[i], i);
+            SmTArray<SmVertexuse*> uses;vs[i]->GetVertexuses(uses);
+            for(ULONG j=0;j<uses.GetSize();++j)if(!keys.contains(uses[j]))record(keys,uses[j],vertexuse_index++);
+        }
+        if(side_mode && mode.find("_uv")!=std::string::npos){SmTArray<SmEdgeuse*> uses;lu->GetEdgeuses(uses);
+            for(ULONG i=0;i<uses.GetSize();++i){SmBSplineCurve *curve=nullptr;require(uses[i]->GetOrCreateUVTrimCurve(curve));}}
         const SmMarkType mark_types[]={SM_MT_MARK,SM_MT_MARK2,SM_MT_MARK3,SM_MT_MARKIO,SM_MT_MARKASSERT};
         std::array<ULONG,5> before_marks{};
         for(size_t i=0;i<5;++i)before_marks[i]=context.GetCurrentMark(mark_types[i]);
@@ -292,7 +325,25 @@ int main(int argc, char **argv) {
         auto apply = [&](const std::string &name) {
             if (name == "none" || name == "surface_offset" || name == "trim_failure" || name == "edge_no_uses" || name.starts_with("reverse_") || name.starts_with("bspline_"))
                 return;
-            if(name=="empty_shell") {
+            if(name=="face_domain_outside"||name=="face_domain_line") {
+                auto saved=field<FaceDomain>(f);restore.actions.emplace_back([f,saved]{field<FaceDomain>(f)=saved;});
+                field<FaceDomain>(f)=name=="face_domain_line"?SmExtent2d(0,0,0,1):SmExtent2d(-.1,-.1,1.1,1.1);
+            }
+            else if(name=="coincident_vertices")vs[2]->SetPoint(vs[0]->GetPoint());
+            else if(name=="mate_rotate") {
+                auto mate=lu->GetOtherLoopuse();auto eu=static_cast<SmEdgeuse*>(mate->GetEUorVU());
+                restore.assign(field<LoopStart>(mate),static_cast<SmTopology*>(eu->GetCCWEdgeuse()));
+            }
+            else if(name=="mate_reversed_order") {
+                SmTArray<SmEdgeuse*> uses;lu->GetOtherLoopuse()->GetEdgeuses(uses);
+                for(ULONG i=0;i<uses.GetSize();++i){auto next=field<Ccw>(uses[i]),last=field<Cw>(uses[i]);
+                    restore.assign(field<Ccw>(uses[i]),last);restore.assign(field<Cw>(uses[i]),next);}
+            }
+            else if(name=="fu_empty_loops") {
+                restore.clear(field<List>(fu));auto saved=field<ListSize>(fu);
+                restore.actions.emplace_back([fu,saved]{field<ListSize>(fu)=saved;});field<ListSize>(fu)=0;
+            }
+            else if(name=="empty_shell") {
                 restore.clear(field<List>(target_shell));
                 auto saved=field<ListSize>(target_shell);restore.actions.emplace_back([target_shell,saved]{field<ListSize>(target_shell)=saved;});field<ListSize>(target_shell)=0;
             }
@@ -395,11 +446,14 @@ int main(int argc, char **argv) {
         SmAssertArray reports;
         SmTArray<ULONG> requested;
         requested.Add(0);
-        auto level = (selection == "given"||selection == "given_empty") ? SM_LEVEL_GIVEN
+        auto level = selection.starts_with("given") ? SM_LEVEL_GIVEN
                      : selection == "one" ? SM_LEVEL_1
                      : selection == "two" ? SM_LEVEL_2
                      : selection == "heal" ? SM_LEVEL_HEAL
                                           : SM_LEVEL_0;
+        if(selection=="given_face_owner"){requested.ReSet();requested.Add(4);}
+        if(selection=="given_face_vertices"){requested.ReSet();requested.Add(12);requested.Add(13);}
+        if(selection=="given_face_all"){requested.ReSet();for(ULONG i=0;i<40;++i)requested.Add(i);}
         auto target = selection == "no_reports" ? nullptr : &reports;
         int reversal = -1;
         SmBoolean violated=FALSE;
@@ -410,7 +464,7 @@ int main(int argc, char **argv) {
         SmStatus query_status=SM_SUCCESS;
         auto run_tolerance=[&]{return b->ValidateAndUpdateTolerances(mode=="tolerance_check",violated,ef_trim,ve,vf,target,level,selection=="given"?&requested:nullptr,&ef_trim_obj,&ve_obj,&vf_obj,&ef_obj,&vf_trim_obj,&ef,&vf_trim);};
         auto status =
-            (raw||tolerance||box_mode||cache_mode||local_mode||root_mode||topology_mode) ? SM_SUCCESS
+            (raw||tolerance||box_mode||cache_mode||local_mode||root_mode||topology_mode||side_mode) ? SM_SUCCESS
                 : b->ValidatePointers(target, level, selection == "given" ? &requested : nullptr,
                                       SM_NO_WALK);
         if (raw)
@@ -424,7 +478,7 @@ int main(int argc, char **argv) {
             status=query_status;
         }
         if(tolerance&&selection=="repeat")status=run_tolerance();
-        if (!raw && !tolerance && !box_mode && !cache_mode && !local_mode && !root_mode && !topology_mode && selection == "repeat")
+        if (!raw && !tolerance && !box_mode && !cache_mode && !local_mode && !root_mode && !topology_mode && !side_mode && selection == "repeat")
             status = b->ValidatePointers(target, level, nullptr, SM_NO_WALK);
         bool root_valid=false;
         if(root_mode){
@@ -435,10 +489,24 @@ int main(int argc, char **argv) {
             root_valid=call();if(selection=="repeat")root_valid=call();
         }
         if(topology_mode){
-            const auto call=[&]{return mode.starts_with("assert_region")
-                ? b->GetInfiniteRegion()->AssertValid(target,level,mode.ends_with("_walk")?SM_WALK:SM_NO_WALK,selection=="given"?&requested:nullptr)
-                : target_shell->AssertValid(target,level,mode.ends_with("_walk")?SM_WALK:SM_NO_WALK,selection=="given"?&requested:nullptr);};
+            const auto call=[&]{auto walk=mode.ends_with("_walk")?SM_WALK:SM_NO_WALK;auto req=selection.starts_with("given")&&selection!="given_empty"?&requested:nullptr;
+                if(mode.starts_with("assert_region"))return b->GetInfiniteRegion()->AssertValid(target,level,walk,req);
+                if(mode.starts_with("assert_shell"))return target_shell->AssertValid(target,level,walk,req);
+                if(mode.starts_with("assert_faceuse"))return (mode.find("_mate")!=std::string::npos?mate_fu:fu)->AssertValid(target,level,walk,req);
+                if(mode.starts_with("assert_face"))return f->AssertValid(target,level,walk,req);
+                if(mode.starts_with("assert_loopuse"))return (mode.find("_mate")!=std::string::npos?target_mate_lu:target_lu)->AssertValid(target,level,walk,req);
+                return target_loop->AssertValid(target,level,walk,req);};
             root_valid=call();if(selection=="repeat")root_valid=call();
+        }
+        SmBoolean side_inside=FALSE,side_boundary=FALSE;ULONG side_index=0;
+        if(side_mode){
+            SmBoolean periodic=TRUE;SmBoolean* known_u=selection=="periodic_u"?&periodic:nullptr;
+            SmBoolean* known_v=selection=="periodic_v"?&periodic:nullptr;
+            if(mode.starts_with("loop_side"))side_inside=(mode.find("_mate")!=std::string::npos?target_mate_lu:target_lu)->IsLoopuseSideInSurface(known_u,known_v,&side_boundary,&side_index);
+            else {auto use=mode.find("_last")!=std::string::npos?edges[2]->GetPrimaryEdgeuse():first;
+                if(mode.find("_mate")!=std::string::npos)use=use->GetMate();
+                ULONG samples=selection.starts_with("samples_")?std::strtoul(selection.c_str()+8,nullptr,10):6;
+                side_inside=use->IsEdgeuseSideInSurface(samples,known_u,known_v,&side_boundary);}
         }
         SmBoolean local_found=FALSE;SmSolution local_solution;
         if(local_mode){
@@ -518,7 +586,7 @@ int main(int argc, char **argv) {
             std::cout<<",\"local_valid\":"<<(root_valid?"true":"false")<<",\"mark_advances\":[";
             for(size_t i=0;i<5;++i){if(i)std::cout<<',';std::cout<<context.GetCurrentMark(mark_types[i])-before_marks[i];}std::cout<<']';
             std::cout<<",\"current_marks\":[";
-            std::vector<const SmTopology*> observed={b->GetInfiniteRegion(),target_shell,fu,fu->GetMate()};
+            std::vector<const SmTopology*> observed={b->GetInfiniteRegion(),target_shell,fu,mate_fu};
             for(ULONG j=0;j<vs.GetSize();++j)observed.push_back(vs[j]);
             for(ULONG j=0;j<edges.GetSize();++j)observed.push_back(edges[j]);
             for(ULONG j=0;j<vs.GetSize();++j){SmTArray<SmVertexuse*> uses;vs[j]->GetVertexuses(uses);for(ULONG n=0;n<uses.GetSize();++n)observed.push_back(uses[n]);}
@@ -526,6 +594,7 @@ int main(int argc, char **argv) {
                 for(size_t i=0;i<5;++i){if(i)std::cout<<',';std::cout<<(observed[j]->GetMark(mark_types[i])==context.GetCurrentMark(mark_types[i])?"true":"false");}
                 std::cout<<']';}std::cout<<']';
         }
+        if(side_mode)std::cout<<",\"side\":["<<(side_inside?"true":"false")<<','<<(side_boundary?"true":"false")<<','<<side_index<<']';
         if(root_mode)std::cout<<",\"root_valid\":"<<(root_valid?"true":"false");
         if(local_mode)std::cout<<",\"local\":["<<(local_found?"true":"false")<<','<<local_solution.m_vStart[0]<<','<<local_solution.m_vStart[1]<<','<<local_solution.m_vStart.m_dSolutionValue<<']';
         if(cache_mode){

@@ -53,9 +53,10 @@ The ordered root implementation still reaches missing operations:
   branch executes before any ray/bounding-box work.
 - Ray-based `IsInnerShellOf` and complete coincidence detection.
 - The root `AssertSubTopology` branch now collects the actual stored lists and
-  face-derived loops, then runs Region and Shell local checks in native order.
-  Face/Loop/Edge/Vertex local validators and the non-root `GetSubTopology` branch
-  remain explicit missing operations.
+  face-derived loops, then runs Region, Shell, Face and Loop checks in native
+  order. Edge/Vertex local validators and the non-root `GetSubTopology` branch
+  remain explicit missing operations. Face execution still requires dynamic
+  surface assertions and, on periodic surfaces, full seam classification.
 - Underlying geometric paths such as a repeated gap check constructing a
   `CrvOnSurf` over an analytic plane, where concrete surface dispatch is missing.
 
@@ -128,3 +129,69 @@ absolute constructor counter parity. Run with:
 ```text
 python scripts/brep_local_validation_compare.py --cpp bin/local-validation-reference/brep-validation-reference.exe --rust bin/debug/examples/brep_validation_probe.exe --receipt bin/brep-local-validation.local.json
 ```
+
+
+## Face, Loop and use checks
+
+`assert_faceuse` and `assert_loopuse` now execute their actual local bodies.
+Their native walk argument is ignored; it does not request descendant traversal.
+Loopuse 3D closure is checked only on the logical loop's primary use, preserving
+its existing native over-tolerance bug. A returned boolean is not a closure or
+import-acceptance certificate. Typed list counts are intrinsic; raw native head
+corruption with an independently stale count has no equivalent vector mutation.
+The native label-table defect and equivalent-fixture boundary are recorded in
+[upstream issues](../plan/upstream-issues.md).
+
+`assert_loop` runs the actual natural-boundary inside-side query, CheckLoop,
+paired-use counts/edge membership/reversed order alignment, and both use checks.
+Rotating the mate's starting edge is legal. Reversing its traversal order is
+reported. CheckLoop's ordinary status is ignored exactly where native ignores
+it, while reports and checked Rust access failures remain observable.
+
+The new edgeuse/loopuse side module preserves the six-sample default, optional
+known periodicities, existing/missing UV conventions, boundary priority, and
+zero/one sample behavior. It evaluates an existing UV curve at the EDGE
+parameter, without silently normalizing it. Only previous sample state is
+retained; the native sample arrays have no other non-debug consumer. This is
+an equivalent implementation of the native sampled predicate, not a continuous
+orientation proof. Failed native point-drop out-parameters unavailable from the
+current fallible solver interface remain explicitly unported.
+
+`assert_face` now follows the original domain, owner/pole, vertex classification,
+faceuse, degeneracy, coincidence, loop nesting/intersection/shared-vertex, and
+seam sequence. Explicit `SM_ASSERT_TEST_NEED` guards differ from Release macros:
+Given does not suppress ordinary macro predicates, and Heal does not enter the
+explicit request guards. Faceuses run outside the vertex-classification guard.
+Vertexuse tolerance is the inherited fixed old-tolerance base value from
+`SmTopology.h`/`SmMath.h`, not the vertex's stored tolerance. Actual owner working
+tolerances use the canonical geometry identity and a checked constant-time
+arena lookup; notification identities are not accepted as geometry owners.
+
+Loop tests37/38/39 use the original sampled containment, pairwise UV intersections
+and shared logical vertices. Inconclusive numerical source paths retain their
+original result; unavailable algorithms remain errors. These predicates add no new fitting or interval-normalization policy; actual
+native callees retain their documented UV/tolerance/trim side effects. Exact
+UV references are reacquired after mutable curve generation so physical aliasing
+still selects the native self-intersection path.
+
+Face remains partial: dynamic Surface/BSplineSurface assertions and periodic
+FaceProps seam classification are explicit dependencies, as are unavailable
+coincidence failure outputs. Given-selected planar calls can finish, but do not
+include the skipped base/surface validation. Root walk reaches these actual
+dependencies, or Edge/Vertex after completed selected Face/Loop checks, rather
+than stopping at an unexecuted blanket Face placeholder. Non-root walk remains
+unported. Complete migration and native import acceptance remain unestablished.
+
+```text
+python scripts/brep_face_loop_validation_compare.py --cpp bin/face-loop-validation-reference/brep-validation-reference.exe --rust bin/debug/examples/brep_validation_probe.exe --receipt bin/brep-face-loop-validation.local.json
+```
+
+The synthetic comparison includes normal, outside, crossing, nested and
+vertex-sharing holes. These are native operation requests, not private-library
+model counts. The cases demonstrate why sampled test37 and a low-level boolean
+cannot replace pairwise intersection and independent quality evidence.
+
+Known native invalid-domain classification crashes are listed separately as
+`unsafe_native`, and never counted as matches or deferred numerical evidence.
+Rust safety checks require rejection/error and preserve the original invalid
+input; the SDK crash is not used as an approximation oracle.

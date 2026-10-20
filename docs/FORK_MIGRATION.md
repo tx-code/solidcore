@@ -134,8 +134,16 @@ validation rather than inferred from the notification records.
 
 
 Region and Shell local validators now execute their actual base/structural and
-connectivity checks; the root descendant sequence invokes them before the
-remaining Face/Loop/Edge/Vertex barriers. Native marks persist in owning state
+connectivity checks; the root descendant sequence invokes them before Face/Loop
+and the remaining Edge/Vertex barriers. Native marks persist in owning state
 through shared traversal adapters. This is operation-level migration progress,
 not complete local/geometric validation or import acceptance; see
 [the validation contract](BREP_VALIDATION.md).
+
+
+Face and Loop ordered assertions and their faceuse/loopuse bodies now execute
+real geometry/classification/closure/coincidence/loop checks. Shared natural-side
+queries and checked owner tolerance resolution are reusable native operations.
+Dynamic surface assertions, periodic seam classification, Edge/Vertex validators
+and non-root traversal still gate complete validation. Selected Given calls do
+not qualify skipped base/surface checks; see [validation scope](BREP_VALIDATION.md).

@@ -101,3 +101,10 @@ for these implementations.
 Native box and gap/tolerance operations now have their own
 [contract and remaining dependencies](BREP_TOLERANCES.md). Their operation-level
 evidence does not complete native import or the full SDK migration.
+
+Scoped surface-cache owner access now connects actual face working tolerances,
+editing guards, UV generation, typed trim/vertex handles and face classification.
+The planar virtual curve drop is wired; comparisons include direct cache state
+and check-mode UV/tolerance side effects. Full cache-manager notification/reuse,
+owned base-cache fallback, remaining B-spline/seam context and general projection
+remain required work; see `BREP_TOLERANCES.md`.

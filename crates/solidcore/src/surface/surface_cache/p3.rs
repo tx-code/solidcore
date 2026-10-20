@@ -216,9 +216,36 @@ impl<O: Copy + PartialEq> SurfaceCache<O> {
         uv_domain: &Extent2d,
         check_for_poles: bool,
     ) -> Result<Vec<NodeId>> {
-        // locals
-        self.get_tree(k)?;
-        self.find_uv_nodes_built(k, uv_domain, check_for_poles)
+        self.find_uv_nodes_with_topology(
+            k,
+            uv_domain,
+            check_for_poles,
+            &mut crate::surface::cache_topology::UnresolvedTopology,
+        )
+    }
+
+    /// Native UV-node search with scoped owner access for building and pole tests.
+    pub fn find_uv_nodes_with_topology(
+        &mut self,
+        k: &Kernel,
+        uv_domain: &Extent2d,
+        check_for_poles: bool,
+        topology: &mut impl crate::surface::cache_topology::CacheTopology<O>,
+    ) -> Result<Vec<NodeId>> {
+        let face_owned = self
+            .surface()
+            .owner()
+            .is_some_and(|o| o.type_code == FACE_TYPE);
+        if self.tree().is_none()
+            || (!self.have_t_surface_cache
+                && face_owned
+                && self.face_containment_done != FaceContainment::UnderConstruction)
+        {
+            self.build_tree_with(k, false, &mut |cache, k, node| {
+                cache.test_against_tolerances_with_topology(k, node, topology)
+            })?;
+        }
+        self.find_uv_nodes_built_with_topology(k, uv_domain, check_for_poles, topology)
     }
 
     /// [`SurfaceCache::find_uv_nodes`] once `GetTree` has run: searches the stored
@@ -234,6 +261,22 @@ impl<O: Copy + PartialEq> SurfaceCache<O> {
         k: &Kernel,
         uv_domain: &Extent2d,
         check_for_poles: bool,
+    ) -> Result<Vec<NodeId>> {
+        self.find_uv_nodes_built_with_topology(
+            k,
+            uv_domain,
+            check_for_poles,
+            &mut crate::surface::cache_topology::UnresolvedTopology,
+        )
+    }
+
+    /// The same search of an already built tree with the actual owner's tolerance.
+    pub fn find_uv_nodes_built_with_topology(
+        &self,
+        k: &Kernel,
+        uv_domain: &Extent2d,
+        check_for_poles: bool,
+        topology: &mut impl crate::surface::cache_topology::CacheTopology<O>,
     ) -> Result<Vec<NodeId>> {
         // init output
         let mut nodes = Vec::new();
@@ -266,7 +309,7 @@ impl<O: Copy + PartialEq> SurfaceCache<O> {
 
             // eliminate boundaries which are not poles
             if poles != 0 {
-                poles &= self.surface().get_singularities(k, false, false)?.singular;
+                poles &= topology.singularities(k, self.surface())?;
             }
         }
 

@@ -8,7 +8,7 @@
 //! | [`validate_and_update_tolerances`] | `SmBrep::ValidateAndUpdateTolerances` |
 //! | [`ToleranceReport`] | scalar and optional object out-parameters |
 //!
-//! Deviations: outputs are owned values; read-only mode restores the original
+//! Deviations: outputs are owned values; check mode restores the original
 //! model flag on every result path. Native unused maxima remain zero/None; the
 //! shadowed edge/face-maximum comparison is preserved, not silently corrected.
 use super::{Brep, CheckLevel, Object, Reporter};
@@ -238,18 +238,64 @@ mod tests {
         assert!(b.validate_only());
     }
     #[test]
-    fn unavailable_callee_restores_the_validate_only_flag() {
-        let (mut b, _) = shifted(0.01);
-        assert!(!b.validate_only());
-        assert!(validate_and_update_tolerances(
+    fn check_mode_preserves_native_uv_creation_tolerance_side_effects() {
+        let (mut b, vertex) = shifted(0.01);
+        let root_tol = b.tolerance();
+        let result = validate_and_update_tolerances(
             &mut Kernel::default(),
             &mut b,
             true,
             CheckLevel::Zero,
-            None
+            None,
         )
-        .unwrap_err()
-        .is_unported());
+        .unwrap();
+        // Native CreateUVTrimCurves(TRUE) raises the working vertex tolerance
+        // before the root comparison. Check mode does not undo that side effect.
+        assert!(!result.violated_or_updated);
+        assert_eq!(result.max_vertex_edge_gap, 0.01);
+        assert_eq!(result.max_vertex_face_gap, 0.01);
+        assert_eq!(b.vertex(vertex).unwrap().tolerance, 0.02);
+        assert_eq!(b.tolerance(), root_tol);
         assert!(!b.validate_only());
+        assert!(!b.editing_enabled());
+    }
+
+    #[test]
+    fn unavailable_owned_bspline_callee_restores_both_model_flags_and_owner() {
+        use crate::surface::surface::{Surface, SurfaceKind};
+        let (mut b, _) = shifted(0.01);
+        let face = b.face_list()[0];
+        let original = b.face(face).unwrap().surface.as_ref().unwrap();
+        let owner = original.owner();
+        let SurfaceKind::Plane(plane) = original.kind() else {
+            panic!("fixture plane")
+        };
+        let mut surface = Surface::from(plane.base_with_nurb().unwrap().clone_exact());
+        surface.set_owner(owner);
+        b.face_mut(face).unwrap().surface = Some(surface);
+        let error = validate_and_update_tolerances(
+            &mut Kernel::default(),
+            &mut b,
+            true,
+            CheckLevel::Zero,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SolidError::Unported {
+                    upstream: "SmFace::GetTolerance",
+                    unit: "topology.face_p2"
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(!b.validate_only());
+        assert!(!b.editing_enabled());
+        assert_eq!(
+            b.face(face).unwrap().surface.as_ref().unwrap().owner(),
+            owner
+        );
     }
 }

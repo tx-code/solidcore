@@ -150,12 +150,11 @@ fn get_or_create_uv_trim_curve(
 }
 
 /// `GetUpwardLoopuses(sLoopuses)` (default arguments).
-fn upward_loopuses(_b: &Brep, _f: FaceId) -> Result<Vec<LoopuseId>> {
-    // UNPORTED(topology.face_p4): SmFace::GetUpwardLoopuses
-    Err(SolidError::unported(
-        "SmFace::GetUpwardLoopuses",
-        "topology.face_p4",
-    ))
+fn upward_loopuses(b: &Brep, f: FaceId) -> Result<Vec<LoopuseId>> {
+    let Some(fu) = b.face(f)?.faceuse else {
+        return Ok(Vec::new());
+    };
+    eu1::faceuse_loopuses(b, fu, false, None)
 }
 
 /// `GetUpwardEdgeuses(sEdgeuses)` (default arguments).

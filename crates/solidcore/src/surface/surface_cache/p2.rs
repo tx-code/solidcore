@@ -433,8 +433,23 @@ impl<O: Copy + PartialEq> SurfaceCache<O> {
     /// `InvalidInput` where upstream reads through null or mistyped data;
     /// [`SolidError::Unported`] from `SmTol::GetZoneTol3d` of an owned surface and the
     /// surface calls.
-    #[allow(clippy::too_many_lines)] // one upstream routine
     pub fn test_against_tolerances(&mut self, k: &Kernel, node: NodeId) -> Result<ToleranceTest> {
+        self.test_against_tolerances_with_topology(
+            k,
+            node,
+            &mut crate::surface::cache_topology::UnresolvedTopology,
+        )
+    }
+
+    /// The same native node tests with live access to the owning face tolerance.
+    /// No tolerance snapshot is retained when the scoped model borrow ends.
+    #[allow(clippy::too_many_lines)]
+    pub fn test_against_tolerances_with_topology(
+        &mut self,
+        k: &Kernel,
+        node: NodeId,
+        topology: &mut impl crate::surface::cache_topology::CacheTopology<O>,
+    ) -> Result<ToleranceTest> {
         // init output
         let mut out = ToleranceTest {
             needs_subdivision: false,
@@ -468,14 +483,10 @@ impl<O: Copy + PartialEq> SurfaceCache<O> {
         let ang_tol_deg = opts.ang_tol_rad * 180.0 / PI;
         // SmTol::GetZoneTol3d(m_cpSurface): GetFace() ? its tolerance : the system's
         let zone_tol = if self.surface().face()?.is_some() {
-            // UNPORTED(geom.tol): SmTol::GetZoneTol3d(const SmObject*) on an opaque handle. Every
-            // arm it dispatches to is ported (topology::{vertex, edge, face::p2, edgeuse::p1}::tolerance,
-            // Brep::tolerance) but each takes `&Brep` and none is in scope here; wire once this code
-            // receives the owning B-rep
-            return Err(SolidError::unported(
-                "SmTol::GetZoneTol3d(const SmObject*)",
-                "geom.tol",
-            ));
+            let face = topology
+                .face(self.surface())?
+                .ok_or_else(|| invalid(OP_TEST, "owned surface has no resolved face"))?;
+            topology.face_tolerance(face)?
         } else {
             zone_tol_3d(k, SmallTopoType::NormalSize)
         };

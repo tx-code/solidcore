@@ -163,7 +163,7 @@ pub fn face_vertices(
 /// A copy of `surface` with out-of-bounds evaluation enabled, when it is an
 /// `SmBSplineSurface` (B-spline, plane, surface of revolution) without it; `None`
 /// when nothing changes (`SmTemporaryChangeValue` on `GetOutOfBoundsEnabled()`).
-fn with_out_of_bounds_enabled(surface: &Surface) -> Option<Surface> {
+fn with_out_of_bounds_enabled(surface: &Surface) -> Result<Option<Surface>> {
     let enabled = match surface.kind() {
         SurfaceKind::BSpline(s) => s.is_out_of_bounds_enabled(),
         SurfaceKind::Plane(p) => p.base().is_out_of_bounds_enabled(),
@@ -172,13 +172,14 @@ fn with_out_of_bounds_enabled(surface: &Surface) -> Option<Surface> {
         | SurfaceKind::CurveBounded(_)
         | SurfaceKind::Step(_)
         | SurfaceKind::SrfInVolume(_) => {
-            return None;
+            return Ok(None);
         }
     };
     if enabled {
-        return None;
+        return Ok(None);
     }
-    let mut copy = surface.clone();
+    // Native temporary flags borrow this definition, without copy-constructor knot fixup.
+    let mut copy = surface.clone_for_evaluation()?;
     match copy.kind_mut() {
         SurfaceKind::BSpline(s) => *s.out_of_bounds_enabled_mut() = true,
         SurfaceKind::Plane(p) => *p.out_of_bounds_enabled_mut() = true,
@@ -190,7 +191,7 @@ fn with_out_of_bounds_enabled(surface: &Surface) -> Option<Surface> {
     }
     // the copy constructor resets the owner; the temporary change keeps it
     copy.set_owner(surface.owner());
-    Some(copy)
+    Ok(Some(copy))
 }
 
 // ---- SmFace::PointClassify --------------------------------------------------------------
@@ -351,13 +352,10 @@ pub fn point_classify(
     // domain will be classified on a boundary.
     let surface = surface.ok_or(SolidError::null_pointer(OP_CLASSIFY))?;
     // (an owned surface: the loop classification edits the B-rep while it walks)
-    let surface: Surface = if let Some(copy) = with_out_of_bounds_enabled(surface) {
+    let surface: Surface = if let Some(copy) = with_out_of_bounds_enabled(surface)? {
         copy
     } else {
-        // (the copy constructor resets the owner, which the face's surface keeps)
-        let mut copy = surface.clone();
-        copy.set_owner(surface.owner());
-        copy
+        surface.clone_for_evaluation()?
     };
     let surface = &surface;
 

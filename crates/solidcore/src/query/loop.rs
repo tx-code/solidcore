@@ -122,8 +122,15 @@ fn edge_of(b: &Brep, eu: EdgeuseId) -> Result<EdgeId> {
 }
 
 /// `SmSurface::GetSingularities`: the sides of the natural domain that are poles.
-fn surface_singularities(k: &Kernel, surface: &Surface) -> Result<u32> {
-    Ok(surface.get_singularities(k, false, false)?.singular)
+fn surface_singularities(k: &Kernel, surface: &Surface, face_tolerance: f64) -> Result<u32> {
+    // ContainsUVPoint already has the actual face's working tolerance. Preserve
+    // the native owner lookup for pole tests instead of losing that context.
+    let poles = if surface.face()?.is_some() {
+        surface.get_singularities_of_face(k, face_tolerance, false, false)?
+    } else {
+        surface.get_singularities(k, false, false)?
+    };
+    Ok(poles.singular)
 }
 
 /// `DropPoint` of the test point onto an edge curve (`SM_SO_INTERSECT`, no snapping
@@ -253,11 +260,9 @@ pub fn contains_uv_point(
         Some(s) => s,
         None => match face_rec.surface.as_ref() {
             Some(s) => {
-                // (a copy: the B-rep is edited while the walk uses the surface; the
-                // copy constructor resets the owner, which the face's surface keeps)
-                let mut copy = s.clone();
-                copy.set_owner(s.owner());
-                own_surface = copy;
+                // Native code borrows this surface. Exact evaluation storage must
+                // not run copy-constructor knot fixup while the BRep is walked.
+                own_surface = s.clone_for_evaluation()?;
                 &own_surface
             }
             None => return Ok(UvContainment::of(PointContainment::Unknown)),
@@ -292,7 +297,7 @@ pub fn contains_uv_point(
 
     // When point and loop touch the surface UVBoundaries - does surface have poles
     let poles = if uv_boundaries & loop_boundaries != 0 {
-        surface_singularities(k, surface)?
+        surface_singularities(k, surface, zone_tol)?
     } else {
         0
     };

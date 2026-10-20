@@ -17,6 +17,7 @@
 #include "SmPlane.h"
 #include "SmRegion.h"
 #include "SmShell.h"
+#include "SmSurfaceCache.h"
 #include "SmVertex.h"
 #include "SmVertexuse.h"
 #include <algorithm>
@@ -142,6 +143,7 @@ int main(int argc, char **argv) {
         const bool raw = mode == "raw_fix" || mode == "raw_check";
         const bool tolerance=mode=="tolerance_check"||mode=="tolerance_update";
         const bool box_mode=mode.starts_with("bbox_");
+        const bool cache_mode=mode=="cache_build"||mode=="cache_editing";
         SmContext context;
         SmBrepConstructor builder;
         auto b = builder.StartBrep(context);
@@ -350,7 +352,7 @@ int main(int argc, char **argv) {
         SmStatus query_status=SM_SUCCESS;
         auto run_tolerance=[&]{return b->ValidateAndUpdateTolerances(mode=="tolerance_check",violated,ef_trim,ve,vf,target,level,selection=="given"?&requested:nullptr,&ef_trim_obj,&ve_obj,&vf_obj,&ef_obj,&vf_trim_obj,&ef,&vf_trim);};
         auto status =
-            (raw||tolerance||box_mode) ? SM_SUCCESS
+            (raw||tolerance||box_mode||cache_mode) ? SM_SUCCESS
                 : b->ValidatePointers(target, level, selection == "given" ? &requested : nullptr,
                                       SM_NO_WALK);
         if (raw)
@@ -364,8 +366,14 @@ int main(int argc, char **argv) {
             status=query_status;
         }
         if(tolerance&&selection=="repeat")status=run_tolerance();
-        if (!raw && !tolerance && !box_mode && selection == "repeat")
+        if (!raw && !tolerance && !box_mode && !cache_mode && selection == "repeat")
             status = b->ValidatePointers(target, level, nullptr, SM_NO_WALK);
+        SmSurfaceCache *cache=nullptr;
+        if(cache_mode){
+            b->m_bEditingEnabled=mode=="cache_editing";
+            cache=smsurf_GetSurfaceCache(f->GetSurface());
+            if(!cache)throw std::runtime_error("native surface cache not built");
+        }
         std::cout << "{\"status\":" << status
                   << ",\"last_add\":" << (reports.GetLastAdd() ? "true" : "false")
                   << ",\"reports\":[";
@@ -408,12 +416,40 @@ int main(int argc, char **argv) {
             std::cout<<",\"tolerance\":["<<(violated?"true":"false")<<','<<ef_trim<<','<<ve<<','<<vf<<','<<ef<<','<<vf_trim<<',';
             witness(ve_obj);std::cout<<',';witness(vf_obj);std::cout<<',';witness(ef_trim_obj);std::cout<<',';witness(ef_obj);std::cout<<',';witness(vf_trim_obj);std::cout<<"]";
         }
-        if(tolerance||box_mode){
+        if(tolerance||box_mode||cache_mode){
             std::cout<<",\"validate_only\":"<<(field<ValidateOnly>(b)?"true":"false")<<",\"working_tolerances\":["<<b->GetTolerance()<<','<<f->GetTolerance();
             for(ULONG i=0;i<edges.GetSize();++i)std::cout<<','<<edges[i]->GetTolerance();
             for(ULONG i=0;i<vs.GetSize();++i)std::cout<<','<<vs[i]->GetTolerance();std::cout<<']';
         }
         if(box_mode){auto a=bounds.GetMin(),z=bounds.GetMax();std::cout<<",\"box\":["<<a.x<<','<<a.y<<','<<a.z<<','<<z.x<<','<<z.y<<','<<z.z<<']';}
+        if(cache_mode){
+            auto a=cache->GetUVDomain().GetMin(),z=cache->GetUVDomain().GetMax();
+            std::cout<<",\"cache\":["<<a.x<<','<<a.y<<','<<z.x<<','<<z.y<<','
+                <<(cache->m_bHaveTSurfaceCache?"true":"false")<<','
+                <<(cache->m_bProcessBoundaryCurves?"true":"false")<<','
+                <<(cache->m_bPointTestEnabled?"true":"false")<<','<<cache->m_bFaceContainmentDone<<','
+                <<(b->m_bEditingEnabled?"true":"false")<<','<<(f->GetSurface()->GetFace()==f?"true":"false")<<']';
+            const SmPoint2d points[]={SmPoint2d(.2,.2),SmPoint2d(.8,.8),SmPoint2d(0,0),SmPoint2d(.5,0)};
+            std::cout<<",\"point_tests\":[";
+            for(int n=0;n<4;++n){
+                if(n)std::cout<<',';
+                SmBoolean good=FALSE;SmObject *object=nullptr;
+                const auto result=cache->PointTest(points[n],good,nullptr,&object);
+                std::cout<<'['<<result<<','<<(good?"true":"false")<<',';witness(object);std::cout<<']';
+            }
+            std::cout<<']';
+            std::cout<<",\"uv_trims\":[";
+            for(ULONG i=0;i<edges.GetSize();++i){
+                if(i)std::cout<<',';
+                auto c=edges[i]->GetPrimaryEdgeuse()->GetUVTrimCurve();
+                if(!c){std::cout<<"null";continue;}
+                auto ivl=c->GetNaturalInterval();
+                std::cout<<'['<<c->GetType()<<','<<ivl.GetMin()<<','<<ivl.GetMax()<<",[";
+                for(int n=0;n<3;++n){if(n)std::cout<<',';SmPoint3d p;require(c->EvaluatePoint(ivl.GetMin()+(ivl.GetMax()-ivl.GetMin())*n/2.0,p));std::cout<<'['<<p.x<<','<<p.y<<','<<p.z<<']';}
+                std::cout<<"]]";
+            }
+            std::cout<<']';
+        }
         std::cout << "}\n";
         return 0;
     } catch (const std::exception &e) {

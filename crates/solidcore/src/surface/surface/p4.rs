@@ -1300,6 +1300,39 @@ impl Surface {
         requested: SolutionRequested,
         solutions: &mut SolutionArray<O>,
     ) -> Result<()> {
+        self.global_point_solve_into_with_cache(
+            k,
+            surface,
+            uv_domain,
+            op,
+            test_point,
+            src_zone_tol_3d,
+            opt_target_distance,
+            requested,
+            solutions,
+            None,
+            &mut crate::surface::cache_topology::UnresolvedTopology,
+        )
+    }
+
+    /// The same solve using the actual scoped face cache. Temporary flags set by
+    /// `ComputeUVPoint` are honored before the native fast-solution classifications.
+    /// The caller retains ownership of the cache and restores those flags.
+    #[allow(clippy::too_many_arguments)]
+    pub fn global_point_solve_into_with_cache<O: SolutionObject>(
+        &self,
+        k: &Kernel,
+        surface: Option<O>,
+        uv_domain: &Extent2d,
+        op: SolverOperation,
+        test_point: Point3,
+        src_zone_tol_3d: f64,
+        opt_target_distance: Option<f64>,
+        requested: SolutionRequested,
+        solutions: &mut SolutionArray<O>,
+        cache: Option<&crate::surface::trim_srf_cache::TrimSrfCache<O>>,
+        topology: &mut impl crate::surface::cache_topology::CacheTopology<O>,
+    ) -> Result<()> {
         // init output
         *solutions = SolutionArray::new();
 
@@ -1343,23 +1376,42 @@ impl Surface {
                 // values are within the trim boundaries of the face, unless flags in its
                 // surface cache indicate otherwise.
                 if self.owner().is_some_and(|o| o.type_code == FACE_TYPE) {
-                    get_surface_cache(k, self, None::<NoObject>)?;
-                    // UNPORTED(query.face_p2): SmFace::PointClassify
-                    // NOTE for the face_p2 porter: upstream callers disable the surface
-                    // cache's point test (`m_bPointTestEnabled`, SmTemporaryChangeValue)
-                    // around GlobalPointSolve so every solution is kept unclassified:
-                    // SmCurveClass.cpp:1040, SmTopologySolver.cpp:1665,
-                    // SmVertexUse.cpp:471-480, SmBrep.cpp:11098, SmFilletGeom.cpp:149-150,
-                    // 446-447 and SmFace.cpp:12801 (Rust: `intersect::curve_class::p1`,
-                    // `intersect::topology_solver::p2`, `topology::vertexuse`,
-                    // `topology::brep::p1::find_sector_of_face`, `blend::fillet_geom::p1`,
-                    // `query::face::p1::point_3d_classify`).
-                    // The Rust cache has no such switch yet; add it when this stub is
-                    // wired.
-                    return Err(SolidError::unported(
-                        "SmFace::PointClassify",
-                        "query.face_p2",
-                    ));
+                    if let Some(cache) = cache {
+                        if cache.base().point_test_enabled && !cache.base().face_was_modified {
+                            let face = topology.face(self)?.ok_or_else(|| {
+                                SolidError::null_pointer("surface::global_point_solve")
+                            })?;
+                            let mut i = 0;
+                            while i < solutions.len() {
+                                let solution = solutions.get_at(i)?;
+                                let uv =
+                                    Point2::new(solution.start.param(0)?, solution.start.param(1)?);
+                                // SmSurface.cpp GlobalPointSolve: ordinary classification
+                                // failures reject that solution; missing ported callees do
+                                // not become an accepted point.
+                                let good = ignored(topology.point_classify(
+                                    k,
+                                    face,
+                                    uv,
+                                    src_zone_tol_3d,
+                                    (true, false),
+                                ))?
+                                .is_some_and(|(c, _)| matches!(c, 102..=104));
+                                if good {
+                                    i += 1;
+                                } else {
+                                    solutions.remove_at(i, 1);
+                                }
+                            }
+                        }
+                    } else {
+                        get_surface_cache(k, self, None::<NoObject>)?;
+                        // UNPORTED(query.face_p2): owned solve without a live cache resolver.
+                        return Err(SolidError::unported(
+                            "SmFace::PointClassify",
+                            "query.face_p2",
+                        ));
+                    }
                 }
 
                 if !solutions.is_empty() {

@@ -2387,6 +2387,29 @@ impl<O: Copy + PartialEq> SurfaceCache<O> {
     /// `GetTree` (a tree build needs `SmSurface::CalculateContinuities`) and
     /// `SmTol::GetZoneTol3d` of a face.
     pub fn mark_face_containment(&mut self, k: &Kernel) -> Result<()> {
+        self.mark_face_containment_with(k, &mut |cache, k, pt, face| {
+            let tolerance = match face {
+                None => zone_tol_3d(k, SmallTopoType::NormalSize),
+                // UNPORTED(geom.tol): standalone cache has no owning-model resolver.
+                Some(_) => {
+                    return Err(SolidError::unported(
+                        "SmTol::GetZoneTol3d(const SmObject*)",
+                        "geom.tol",
+                    ))
+                }
+            };
+            cache.point_classify(pt, tolerance)
+        })
+    }
+
+    /// Native containment traversal with the derived cache's virtual classifier.
+    /// The callback receives the current node's optional face, as the source
+    /// uses that face's zone tolerance before invoking `PointClassify`.
+    pub fn mark_face_containment_with(
+        &mut self,
+        k: &Kernel,
+        classifier: &mut impl FnMut(&Self, &Kernel, Point2, Option<O>) -> Result<(i32, Option<O>)>,
+    ) -> Result<()> {
         self.get_tree(k)?;
         let top = self
             .tree_ref(OP_MARK)?
@@ -2418,22 +2441,9 @@ impl<O: Copy + PartialEq> SurfaceCache<O> {
 
             // when no classified neighbor was found - cast a ray
             if found_class == NodeClass::Unknown {
-                let src_zone_tol_3d = if curr_fields.face.is_some() {
-                    // UNPORTED(geom.tol): SmTol::GetZoneTol3d(const SmObject*) on an opaque handle. Every
-                    // arm it dispatches to is ported (topology::{vertex, edge, face::p2, edgeuse::p1}::tolerance,
-                    // Brep::tolerance) but each takes `&Brep` and none is in scope here; wire once this code
-                    // receives the owning B-rep
-                    return Err(SolidError::unported(
-                        "SmTol::GetZoneTol3d(const SmObject*)",
-                        "geom.tol",
-                    ));
-                } else {
-                    zone_tol_3d(k, SmallTopoType::NormalSize)
-                };
-
                 let test_pt = self.aux(curr_node)?.uv_domain.evaluate(0.5, 0.5);
                 let (classification, object_in_or_on) =
-                    self.point_classify(test_pt, src_zone_tol_3d)?;
+                    classifier(self, k, test_pt, curr_fields.face)?;
 
                 // remember the Node is in or out of the Face (SM_PC_FACE)
                 if classification == POINT_CLASS_FACE {

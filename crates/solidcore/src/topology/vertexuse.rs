@@ -785,27 +785,53 @@ fn local_point_solve(
 /// (all restored afterwards); `NER` of a missing surface cache.
 fn global_point_solve(
     k: &Kernel,
-    surface: &Surface,
+    b: &mut Brep,
+    face: FaceId,
     domain: &Extent2d,
     op: SolverOperation,
     point: Point3,
     tol: f64,
     request: SolutionRequested,
-    _point_test: bool,
+    point_test: bool,
 ) -> Result<Vec<PointDrop>> {
-    // The Rust surface solver builds no surface cache, so the cache flags upstream
-    // switches around the call (point testing, boundary curves, `m_bHaveTSurfaceCache`)
-    // have nothing to act on; a face-owned surface is Unported (query.face_p2) inside.
-    let solutions = surface.global_point_solve::<crate::surface::surface::p4::NoObject>(
+    use crate::geom::solution_array::SolutionArray;
+    use crate::topology::surface_cache::{make_face_cache, BrepSurfaceContext};
+    // Native ComputeUVPoint checks out the real owner cache BEFORE changing its
+    // flags. Exact evaluation storage avoids copy-constructor knot normalization.
+    let mut cache = make_face_cache(k, b, face)?;
+    let surface = face_surface(b, face)?.clone_for_evaluation()?;
+    let base = cache.base_mut();
+    let saved = (
+        base.have_t_surface_cache,
+        base.process_boundary_curves,
+        base.point_test_enabled,
+    );
+    base.have_t_surface_cache = false;
+    base.process_boundary_curves = true;
+    if !point_test {
+        base.point_test_enabled = false;
+    }
+    let mut solutions = SolutionArray::<EntityRef>::new();
+    let result = surface.global_point_solve_into_with_cache(
         k,
-        Some(crate::surface::surface::p4::NoObject),
+        None,
         domain,
         op,
         point,
         tol,
         None,
         request,
-    )?;
+        &mut solutions,
+        Some(&cache),
+        &mut BrepSurfaceContext { brep: b, face },
+    );
+    let base = cache.base_mut();
+    (
+        base.have_t_surface_cache,
+        base.process_boundary_curves,
+        base.point_test_enabled,
+    ) = saved;
+    result?;
     solutions
         .as_slice()
         .iter()
@@ -1047,7 +1073,8 @@ pub fn compute_uv_point(
             let face_tol = face_tolerance(b, f)?;
             let sols = global_point_solve(
                 k,
-                face_surface(b, f)?,
+                b,
+                f,
                 &uv_domain,
                 SolverOperation::Minimize,
                 vertex_pnt,
@@ -1080,10 +1107,10 @@ pub fn compute_uv_point(
     } else if is_loop_vertexuse(b, vu)? {
         // project point down to face's surface
         let face_tol = face_tolerance(b, f)?;
-        let surface = face_surface(b, f)?;
         let mut sols = global_point_solve(
             k,
-            surface,
+            b,
+            f,
             &uv_domain,
             SolverOperation::Intersect,
             vertex_pnt,
@@ -1095,7 +1122,8 @@ pub fn compute_uv_point(
         if sols.is_empty() {
             sols = global_point_solve(
                 k,
-                surface,
+                b,
+                f,
                 &uv_domain,
                 SolverOperation::Minimize,
                 vertex_pnt,

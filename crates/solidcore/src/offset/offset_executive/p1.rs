@@ -2259,7 +2259,7 @@ mod tests {
     }
 
     #[test]
-    fn face_prefix_preserves_unported_uv_evaluation_before_domain_boolean() {
+    fn face_prefix_rejects_incomplete_vertexuses_before_domain_boolean() {
         let kernel = Kernel::default();
         let mut executive = executive();
         let (mut original, _, face, _) = excess_face_fixture();
@@ -2267,13 +2267,20 @@ mod tests {
         original.face_mut(face).unwrap().uv_domain = Extent2d::from_bounds(-1.0, -1.0, 2.0, 2.0);
         executive.set_offset_brep(Brep::new());
         let mut offset = Some(plane(1.0));
-        // Since topology.edgeuse_p3 (#117) builds the UV trim curve, the face prefix
-        // reaches the plane's DropCurve before the domain boolean.
-        assert_dependency(
-            executive.build_offset_of_faceuse(&kernel, &mut original, faceuse, &mut offset),
-            "SmSurface::DropCurve",
-            "intersect.surface_drop_lib_p3",
-        );
+        // This synthetic prefix fixture deliberately lacks vertex uses. With
+        // actual planar projection wired, SetUVTrimCurve rejects that malformed
+        // graph before any offset-domain Boolean can run.
+        let error = executive
+            .build_offset_of_faceuse(&kernel, &mut original, faceuse, &mut offset)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            SolidError::InvalidInput {
+                operation: "topology::edgeuse::p1",
+                reason: "SetUVTrimCurve: edge use without vertex use"
+            }
+        ));
+        assert!(offset.is_some());
     }
 
     #[test]

@@ -43,6 +43,7 @@ fn run() -> Result<Value> {
     let raw = mode == "raw_fix" || mode == "raw_check";
     let tolerance = mode == "tolerance_check" || mode == "tolerance_update";
     let box_mode = mode.starts_with("bbox_");
+    let cache_mode = mode == "cache_build" || mode == "cache_editing";
     let mut k = Kernel::default();
     let mut builder = BrepConstructor::new()?;
     let (outer, _) = builder.start_shell()?;
@@ -251,6 +252,7 @@ fn run() -> Result<Value> {
     };
     let mut tolerance_output = None;
     let mut box_output = None;
+    let mut cache_output = None;
     let mut invoke = |reports: Option<&mut AssertArray>| {
         if raw {
             Ok(())
@@ -265,6 +267,101 @@ fn run() -> Result<Value> {
             .map(|r| {
                 tolerance_output = Some(r);
             })
+        } else if cache_mode {
+            use solidcore::surface::surface_cache::p1::FaceContainment;
+            b.set_editing_enabled(mode == "cache_editing");
+            let cache = solidcore::topology::surface_cache::make_face_cache(&k, &mut b, face)?;
+            let base = cache.base();
+            let a = base.uv_domain().min();
+            let z = base.uv_domain().max();
+            let done = match base.face_containment_done {
+                FaceContainment::NotDone => 0,
+                FaceContainment::Done => 1,
+                FaceContainment::UnderConstruction => 2,
+            };
+            let mut trims = Vec::new();
+            for edge in &edges {
+                let eu = solidcore::topology::edgeuse::p1::primary_edgeuse(&b, *edge)?
+                    .ok_or_else(|| SolidError::null_pointer("cache probe"))?;
+                let curve = solidcore::topology::edgeuse::p1::uv_trim_curve(&b, eu)?.0;
+                trims.push(if let Some(c) = curve {
+                    let ivl = c.natural_interval();
+                    let mut samples = Vec::new();
+                    for n in 0..3 {
+                        let p = c.evaluate_point(
+                            ivl.min() + (ivl.max() - ivl.min()) * f64::from(n) / 2.,
+                        )?;
+                        samples.push([p.x, p.y, p.z]);
+                    }
+                    json!([c.type_code(), ivl.min(), ivl.max(), samples])
+                } else {
+                    Value::Null
+                });
+            }
+            let identity = |object| -> solidcore::Result<u64> {
+                let r = arena_identity(object);
+                let t = u64::try_from(r.type_code)
+                    .map_err(|_| SolidError::invalid_input("cache probe", "negative type code"))?;
+                Ok((t << 32) | r.key.0)
+            };
+            let mut point_tests = Vec::new();
+            for uv in [
+                Vec2::new(0.2, 0.2),
+                Vec2::new(0.8, 0.8),
+                Vec2::new(0., 0.),
+                Vec2::new(0.5, 0.),
+            ] {
+                let (good, object) = cache.point_test_with_topology(
+                    &k,
+                    uv,
+                    None,
+                    &mut solidcore::topology::surface_cache::BrepSurfaceContext {
+                        brep: &mut b,
+                        face,
+                    },
+                )?;
+                let key = match object {
+                    Some(solidcore::error::EntityRef::Face(id)) => {
+                        Some(identity(CacheObject::Face(id))?)
+                    }
+                    Some(solidcore::error::EntityRef::Edge(id)) => {
+                        Some(identity(CacheObject::Edge(id))?)
+                    }
+                    Some(solidcore::error::EntityRef::Vertex(id)) => {
+                        Some(identity(CacheObject::Vertex(id))?)
+                    }
+                    None => None,
+                    _ => {
+                        return Err(SolidError::invalid_input(
+                            "cache probe",
+                            "unexpected point-test object",
+                        ))
+                    }
+                };
+                point_tests.push(json!([1000, good, key]));
+            }
+            cache_output = Some((
+                json!([
+                    a.x,
+                    a.y,
+                    z.x,
+                    z.y,
+                    base.have_t_surface_cache,
+                    base.process_boundary_curves,
+                    base.point_test_enabled,
+                    done,
+                    b.editing_enabled(),
+                    b.face(face)?
+                        .surface
+                        .as_ref()
+                        .and_then(|s| s.face().ok())
+                        .flatten()
+                        .is_some()
+                ]),
+                json!(trims),
+                json!(point_tests),
+            ));
+            Ok(())
         } else if box_mode {
             let result = if mode == "bbox_tight" {
                 calculate_tight_bounding_box(&k, &b)
@@ -382,7 +479,7 @@ fn run() -> Result<Value> {
             ]),
         );
     }
-    if tolerance || box_mode {
+    if tolerance || box_mode || cache_mode {
         let mut working = vec![b.tolerance(), b.face(face)?.tolerance];
         for id in &edges {
             working.push(b.edge(*id)?.tolerance);
@@ -392,6 +489,11 @@ fn run() -> Result<Value> {
         }
         output.insert("working_tolerances".into(), json!(working));
         output.insert("validate_only".into(), json!(b.validate_only()));
+    }
+    if let Some((cache, trims, points)) = cache_output {
+        output.insert("cache".into(), cache);
+        output.insert("uv_trims".into(), trims);
+        output.insert("point_tests".into(), points);
     }
     if let Some(bounds) = box_output {
         let a = bounds.min();

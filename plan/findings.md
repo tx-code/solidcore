@@ -2800,18 +2800,15 @@ records, invalid counts and non-finite coordinates before entering C++.
   finiteness; difftest is 620 cases, 462 bit-identical, 0 failed, 158 deferred
   (surface.surface_cache_p3 100, surface.surface_p1 32, surface.surface_p3 26);
   `--perturb` detects 462/462.
-- **MarkFaceContainment dispatch gap (no UNPORTED marker possible).**
-  `TrimSrfCache::build_tree` calls `SurfaceCache::mark_face_containment`, which uses
-  the base `SurfaceCache::point_classify` (always `SM_ERR`). Upstream
-  (`SmTrimSrfCache.cpp:343`) reaches the virtual override `SmTrimSrfCache::PointClassify`
-  (`:1048`). That override belongs to surface.trim_srf_cache itself
-  (`harness/callgraph/units.json`) and is already ported as
-  `TrimSrfCache::point_classify`, so an `UNPORTED(<unit>)` marker would point at the
-  wrong porter. The call site carries a `DISPATCH GAP` comment instead. It is
-  unreachable today (the face path returns `Unported` earlier, at
-  `CreateUVTrimCurves`), but whoever wires topology.face_p3 / topology.face_p4 here
-  must make `mark_face_containment` dispatch to the trimmed override (e.g. take a
-  classifier argument) before any face-backed case can pass.
+- **MarkFaceContainment dispatch (resolved for scoped owner access).**
+  `TrimSrfCache::build_tree_with_topology` now calls the shared base containment
+  traversal with the real trimmed-cache face classifier. The concrete
+  `topology::surface_cache::BrepSurfaceContext` resolves live model state;
+  standalone callers without a model retain explicit missing-owner errors.
+  The owner-cache regression compares actual native cache flags/domains,
+  UV curves and point tests; full native cache-manager integration and general
+  nonplanar projection remain required. Historical base-unit deferred counts
+  above have not been requalified by these fork operation comparisons.
 
 ## surface.plane_p1 (`SmPlane`, part 1)
 

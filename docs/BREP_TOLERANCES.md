@@ -51,8 +51,35 @@ now resolve actual face working tolerances explicitly for point drops, local
 point solves and gap sampling. Geometry owners remain attached; existing solver
 algorithms, convergence rules and failure paths are reused. Unresolved lookups
 remain errors. Supplied owner information does not choose or enlarge import
-acceptance budgets. Remaining owned-surface cache context is still an explicit
-dependency on paths that reach it.
+acceptance budgets.
+
+Scoped surface-cache topology access now resolves face tolerance, pole tests,
+editing state, upward loops, stored trims, vertex uses and face classification.
+The shared trim-cache algorithm retains native guard restoration and virtual
+containment classification. Planar UV construction dispatches to the actual
+`SmPlane::DropCurve` port and retains its line/B-spline kinds and intervals.
+
+`topology::surface_cache::make_face_cache` builds an owning temporary cache with
+live typed model handles. `ComputeUVPoint` builds it before temporarily changing
+its point/boundary flags, then restores those flags on every return. The context
+cannot outlive its model borrow; cache reuse/invalidation across edits and the
+full native cache manager remain separate required work. Generic callers without
+an owning-model resolver still report missing dependencies. Nonplanar projection
+and remaining geometric dispatch are not implied by the planar comparisons.
+
+The current `ComputeUVPoint` integration qualifies successful trim-cache builds.
+The native owned `smsurf_GetSurfaceCache` fallback to a plain surface cache after
+an ordinary trim-cache build failure still needs to be wired; this caller
+currently returns the build error. Its remaining owned B-spline local-solver
+paths can also reach unresolved face tolerance/seam context. These cases do not
+establish full method parity or native import acceptance.
+
+Native check mode can still update working tolerances indirectly when it creates
+UV curves inside this cache path: `CreateUVTrimCurves(TRUE, ...)` invokes the native
+vertex setter. This source behavior is deliberately compared, not hidden by a
+copy or an early cache shortcut. A future strict import transaction must detect
+and qualify such side effects under its source/target and repair contracts;
+calling this low-level checker alone is not permission to change source quality.
 
 ## Evidence and remaining scope
 
@@ -60,7 +87,9 @@ The C++ observer invokes the actual SDK operations on public synthetic geometry.
 The matrix varies gap thresholds, check/update mode, report selection, repeated
 calls, prior validation flags, box flags and locks. It compares diagnostics and
 values, maxima and witnesses, resulting working tolerances, restored flags and
-boxes. Deferred cache/solver paths are reported separately, never passed.
+boxes. Cache cases also compare flag/domain state, UV curve kinds and parameters,
+point classifications and actual topology identities. Deferred cache/solver paths
+are reported separately, never passed.
 
 ```text
 cargo build --locked -p solidcore --example brep_validation_probe

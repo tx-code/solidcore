@@ -22,6 +22,10 @@ def cases():
                                          [*[f'bbox_{n}' for n in range(8)],'bbox_tight']):
         yield [defect,'zero','none',mode]
 
+    for defect,selection,prior,mode in itertools.product(gaps,['zero','repeat'],
+                                                        ['none','initial_validate_only'],['cache_build','cache_editing']):
+        yield [defect,selection,prior,mode]
+
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)

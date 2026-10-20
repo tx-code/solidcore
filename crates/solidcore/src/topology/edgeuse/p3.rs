@@ -142,7 +142,7 @@ struct DropCurveOut {
     /// `rdMaxApproxDev`.
     max_approx_dev: f64,
     /// `rUVCurves`.
-    uv_curves: Vec<BSplineCurve>,
+    uv_curves: Vec<Curve>,
 }
 
 /// `SmSurface::DropCurve(ctx, domain, curve, interval, tol, rdMaxDropToSurf,
@@ -157,18 +157,28 @@ fn surface_drop_curve(
     interval: &Extent1d,
     approx_tol_3d: f64,
     keep_all_drop_curves: bool,
-    record: Option<&mut DropCurveFail<ObjectHandle>>,
+    _record: Option<&mut DropCurveFail<ObjectHandle>>,
 ) -> Result<DropCurveOut> {
-    let _ = (
-        k,
-        surface,
-        domain,
-        curve,
-        interval,
-        approx_tol_3d,
-        keep_all_drop_curves,
-        record,
-    );
+    if let SurfaceKind::Plane(plane) = surface.kind() {
+        // SmSurface virtual dispatch selects SmPlane::DropCurve. Preserve its
+        // actual curve kinds (not a B-spline stand-in) and native default
+        // bCreatingUVTrimCurve=TRUE, SmSurface.h::DropCurve.
+        let dropped = plane.drop_curve(
+            k,
+            domain,
+            curve,
+            interval,
+            approx_tol_3d,
+            keep_all_drop_curves,
+            true,
+        )?;
+        return Ok(DropCurveOut {
+            max_dist_to_surf: dropped.max_drop_to_surf,
+            max_approx_dev: dropped.max_approx_dev,
+            uv_curves: dropped.uv_curves,
+        });
+    }
+    // The plane override does not write the optional failure record.
     // UNPORTED(intersect.surface_drop_lib_p3): SmSurface::DropCurve
     Err(SolidError::unported(
         "SmSurface::DropCurve",
@@ -556,7 +566,7 @@ pub fn create_uv_trim_curve(
                 if let Some(out) = r {
                     max_dist_to_surf = out.max_dist_to_surf;
                     max_drop_approx_dev = out.max_approx_dev;
-                    uv_curves = out.uv_curves.into_iter().map(Curve::from).collect();
+                    uv_curves = out.uv_curves;
                 }
             } else {
                 // (ii==1 || ii==3) - Try DropAndTrimCurve branch
@@ -610,7 +620,7 @@ pub fn create_uv_trim_curve(
                 if let Some(out) = r {
                     max_dist_to_surf = out.max_dist_to_surf;
                     max_drop_approx_dev = out.max_approx_dev;
-                    uv_curves = out.uv_curves.into_iter().map(Curve::from).collect();
+                    uv_curves = out.uv_curves;
                 }
 
                 // when reverse curve dropping works
@@ -1174,7 +1184,7 @@ fn two_singular_end_points(
                     // restore parameterization of 1stHalf drop curve
                     if let Some(c) = first_out.uv_curves.first_mut() {
                         let old = new_interval;
-                        c.reverse_parameterization(&old)?;
+                        c.reverse_parameterization(k, &old)?;
                     }
 
                     // stitch the two halves together
@@ -1183,10 +1193,12 @@ fn two_singular_end_points(
                         .pop()
                         .ok_or_else(|| null("two singular end points: no second curve"))?;
                     first_out.uv_curves.push(second_curve_out);
-                    let joined = status(BSplineCurve::create_by_joining(
-                        &mut first_out.uv_curves,
-                        None,
-                    ))?;
+                    let mut segments = first_out
+                        .uv_curves
+                        .iter()
+                        .map(crate::topology::surface_cache::uv_bspline_copy)
+                        .collect::<Result<Vec<_>>>()?;
+                    let joined = status(BSplineCurve::create_by_joining(&mut segments, None))?;
 
                     // when stitching worked (the joined curve is dropped with the
                     // second half's array: upstream defect WR-158, module docs)

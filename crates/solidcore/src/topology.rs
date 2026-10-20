@@ -49,6 +49,7 @@ pub mod face;
 pub mod loopuse;
 pub mod proto_topology;
 pub mod shell;
+pub mod surface_cache;
 #[allow(clippy::module_inception)]
 pub mod topology;
 pub mod topology_traverser;

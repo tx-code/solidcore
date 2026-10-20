@@ -270,13 +270,17 @@ fn radial_dependency_error_removes_the_temporary_edge_before_propagating() {
             Some(vertices[0]),
         )
         .unwrap_err();
-    assert!(matches!(
-        error,
-        SolidError::Unported {
-            upstream: "SmSurface::DropCurve",
-            unit: "intersect.surface_drop_lib_p3"
-        }
-    ));
+    // The planar virtual drop now runs; the radial fallback reaches real DoTrace.
+    assert!(
+        matches!(
+            error,
+            SolidError::Unported {
+                upstream: "SmSurfaceDropCurve::DoTrace",
+                unit: "intersect.surface_drop_curve"
+            }
+        ),
+        "{error:?}"
+    );
     assert_eq!(b.brep().edges().len(), before);
     assert_eq!(b.brep.edge_list.len(), before);
     assert_eq!(b.brep().edge(shared).unwrap().edgeuses.len(), 4);

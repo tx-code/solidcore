@@ -90,7 +90,7 @@ impl BrepConstructor {
             let lifted = surface.lift_curve(k, &domain, uv_curve, &interval, tolerance, true);
             surface.set_owner(owner);
             self.brep.face_mut(face)?.surface = Some(surface);
-            let mut lifted = Curve::from(lifted?.curve);
+            let mut lifted = lifted?.curve;
             lifted.set_owner(
                 Some(arena_identity(CacheObject::Edge(edge))),
                 Some(arena_identity(CacheObject::Brep)),

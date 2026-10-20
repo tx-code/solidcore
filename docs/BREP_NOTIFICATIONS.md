@@ -4,9 +4,12 @@ The maintained reference is `SmBrep.cpp` at `d8ed45a`: `Notify`,
 `sm_AddToSpatialTree` and `sm_RmFromSpatialTree`, followed by the existing
 `SmSAGObject`, `SmTopology`, `SmAObject` and context callback layers.
 
-`topology::brep::p2` now executes that root chain on the actual model. The
-model owns its notification marks/flags/user fields, bidirectional attribute
+`topology::brep::p2::notify_owned` now executes that root chain on the actual model. The
+owning adapter supplies the shared upstream dispatcher with its notification
+marks/flags/user fields, bidirectional attribute
 store and optional real BRep spatial cache. These values persist between calls.
+Geometry-owner key lookup and region lookup remain explicit services, so
+notification/attribute keys do not overwrite existing geometry owner identities.
 The arena graph remains authoritative for ownership/list links; the notification
 field records are not an alternative graph or input to a topology validator.
 
@@ -24,7 +27,9 @@ The value-snapshot `Clone` retains metadata/attributes and drops its spatial
 cache. This preserves independent cache ownership but does not implement the
 complete native `SmBrep::Copy` protocol. Direct geometry edits must still notify
 the owning model. Existing element operations using external `NotifyEnv` stores
-have not all been bridged to this owning state yet.
+have not all been bridged to this owning state yet. The generic dispatcher
+refuses to discard configured owning state through an arena-only adapter; it
+reports the missing producer bridge explicitly.
 
 ## Execution order
 
@@ -72,3 +77,19 @@ already-connected constructor fixtures reach native comparisons beyond the old
 root placeholder. That does not establish general healing, full root/local
 `AssertValid`, strict native STEP import or the
 [complete SDK migration](FORK_MIGRATION.md). Receipts and private models remain local.
+
+
+## Integration with upstream
+
+The owning adapter delegates the upstream `p2` notification algorithm through
+`NotifyServices`. Metadata identities are resolved from validated registrations;
+geometry-owner keys and live regions are supplied independently. The original
+arena-only interfaces remain available, with an explicit refusal when they would
+discard configured owning state.
+
+The upstream iso-curve lift now retains its analytic curve kind. The maintained
+lazy analytic NURB view remains at the input boundary. Native radial constructor
+comparisons also exposed a missing owner assignment in `SetUVTrimCurve`; the
+setter now binds the actual SAME-oriented holder without changing the curve's
+parameters or definition. Full constructor graphs and UV ownership are compared
+separately from pointer and notification checks.

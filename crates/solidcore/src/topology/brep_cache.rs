@@ -121,18 +121,7 @@ impl<O> BrepCache<O> {
     pub const fn vertex_tree(&self) -> Option<&Tree<O>> {
         self.vertices.as_ref()
     }
-    /// Mutable native vertex spatial tree for notification insertion/removal.
-    pub(crate) fn vertex_tree_mut(&mut self) -> Option<&mut Tree<O>> {
-        self.vertices.as_mut()
-    }
-    /// Mutable native curve spatial tree for notification insertion/removal.
-    pub(crate) fn curve_tree_mut(&mut self) -> Option<&mut Tree<O>> {
-        self.curves.as_mut()
-    }
-    /// Mutable native surface spatial tree for notification insertion/removal.
-    pub(crate) fn surface_tree_mut(&mut self) -> Option<&mut Tree<O>> {
-        self.surfaces.as_mut()
-    }
+
     /// `GetCurveTree`: absent until `BuildTrees` succeeds.
     pub const fn curve_tree(&self) -> Option<&Tree<O>> {
         self.curves.as_ref()
@@ -140,6 +129,18 @@ impl<O> BrepCache<O> {
     /// `GetSurfaceTree`: absent until `BuildTrees` succeeds.
     pub const fn surface_tree(&self) -> Option<&Tree<O>> {
         self.surfaces.as_ref()
+    }
+    /// Mutable `GetVertexTree` (the tree a B-rep notification edits).
+    pub fn vertex_tree_mut(&mut self) -> Option<&mut Tree<O>> {
+        self.vertices.as_mut()
+    }
+    /// Mutable `GetCurveTree` (the tree a B-rep notification edits).
+    pub fn curve_tree_mut(&mut self) -> Option<&mut Tree<O>> {
+        self.curves.as_mut()
+    }
+    /// Mutable `GetSurfaceTree` (the tree a B-rep notification edits).
+    pub fn surface_tree_mut(&mut self) -> Option<&mut Tree<O>> {
+        self.surfaces.as_mut()
     }
 }
 

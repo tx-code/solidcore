@@ -58,11 +58,12 @@
 //! - `SmBrep::GlueVertices`, `RemoveFaces` (with the B-rep's own editing flag) and
 //!   `StitchAndOrient` call `topology.brep_p5`, which defers at its own barriers.
 //! - The calls into `GlueEdgesGeneral` (`topology.brep_p7`), `SqueezeEdge`
-//!   (`topology.brep_p3`), `Notify`
-//!   (`topology.brep_p2`), `CalculateBoundingBox` (`query.brep`), `SmFace::GetBrep`,
+//!   (`topology.brep_p3`), `CalculateBoundingBox` (`query.brep`), `SmFace::GetBrep`,
 //!   `GetVertices`, `GetEdges` (`topology.face_p4`) and `SmMerge::MergeAddedFace`
 //!   (`boolean.merge_p2`) return [`SolidError::Unported`]. The API entry points call
 //!   `DoStitching`, `StitchIntoSolid` and `StitchIntoShell` in [`super::p2`].
+//!   `SmBrep::Notify(SM_NO_PRE_EDIT)` is `topology::brep::p2::notify` on an empty notify
+//!   state (no B-rep cache, no attribute state on the heal path).
 
 use std::collections::BTreeMap;
 
@@ -2083,7 +2084,7 @@ fn local_identity(type_code: i64, index: u32) -> ObjectRef {
 /// `SmBrep::Notify(SM_NO_PRE_EDIT, this, NULL, NULL)` (unit `topology.brep_p2`).
 pub(crate) fn brep_notify_pre_edit(k: &mut Kernel, b: &mut Brep) -> Result<()> {
     let this = crate::topology::brep::p2::root_ref(b);
-    crate::topology::brep::p2::notify(
+    crate::topology::brep::p2::notify_owned(
         k,
         b,
         crate::geom::object::NotifyOperation::PreEdit,

@@ -794,6 +794,17 @@ pub fn set_uv_trim_curve(
             // a UVTrimCurve is being temporarily placed onto a standalone Edgeuse
             None => eu,
         };
+        // SmEdgeuse.cpp::SetUVTrimCurve transfers the curve to the SAME-oriented
+        // holder (or this standalone use) and binds that actual owner. Preserve
+        // the definition/interval; attaching the value alone loses native ownership.
+        let mut c = c;
+        c.set_owner(
+            Some(crate::geom::object::ObjectRef {
+                type_code: TYPE,
+                key: crate::geom::attribute::ObjectKey(u64::from(holder.index())),
+            }),
+            None,
+        );
         let r = b.edgeuse_mut(holder)?;
         r.uv_trim_curve = Some(c);
         r.drop_curve_fail = copy;
@@ -1866,6 +1877,13 @@ mod tests {
         let (c, owner) = uv_trim_curve(&b, b0).unwrap();
         assert!(c.is_some());
         assert_eq!(owner, Some(a0));
+        assert_eq!(
+            c.unwrap().owner(),
+            Some(crate::geom::object::ObjectRef {
+                type_code: TYPE,
+                key: crate::geom::attribute::ObjectKey(u64::from(a0.index())),
+            })
+        );
         assert_eq!(
             drop_curve_fail(&b, b0).unwrap().0.map(|f| f.fail_status),
             Some(7)

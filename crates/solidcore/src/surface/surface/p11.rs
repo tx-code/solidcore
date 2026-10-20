@@ -1759,7 +1759,7 @@ fn extract_iso_curve(
     uv_curve: &Curve,
     interval: &Extent1d,
     approx_tol_3d: f64,
-) -> Result<Option<(BSplineCurve, f64)>> {
+) -> Result<Option<(Curve, f64)>> {
     // C++ keeps the concrete vtable through its SmBSplineCurve reference. Degree
     // and knot access can lazily call an analytic MakeNurb. Borrowing only the
     // empty Rust base would instead call BSplineCurve::MakeNurb and fail. Build
@@ -1774,11 +1774,16 @@ fn extract_iso_curve(
     else {
         return Ok(None);
     };
-    // rp3dCurve is an SmBSplineCurve
-    let bspline = analytic_bspline_view(k, &iso)?
-        .ok_or(SolidError::sm_err(OP_LIFT))?
-        .into_owned();
-    Ok(Some((bspline, 0.0)))
+    // rp3dCurve is an SmBSplineCurve: the iso curve keeps its own kind (an SmLine or
+    // conic is one; the caller's virtual calls dispatch on it)
+    match iso.kind() {
+        CurveKind::BSpline(_)
+        | CurveKind::Line(_)
+        | CurveKind::Ellipse(_)
+        | CurveKind::Hyperbola(_)
+        | CurveKind::Parabola(_) => Ok(Some((iso, 0.0))),
+        _ => Err(SolidError::sm_err(OP_LIFT)),
+    }
 }
 
 /// Preserve virtual lazy NURB creation when a derived curve crosses the concrete
@@ -1826,8 +1831,9 @@ fn analytic_bspline_view<'a>(
 /// The lifted curve of [`Surface::lift_curve`].
 #[derive(Debug, Clone)]
 pub struct LiftedCurve {
-    /// `rp3dCurve`: the 3D curve `surface(uv_curve(interval))`.
-    pub curve: BSplineCurve,
+    /// `rp3dCurve`: the 3D curve `surface(uv_curve(interval))`, an `SmBSplineCurve`:
+    /// a B-spline, or the analytic iso curve (line or conic) `sm_ExtractIsoCurve` made.
+    pub curve: Curve,
     /// `rdMaxApproxDev`: the largest distance from the curve to the surface.
     pub max_approx_dev: f64,
 }
@@ -2055,7 +2061,7 @@ impl Surface {
         };
 
         Ok(LiftedCurve {
-            curve,
+            curve: Curve::from(curve),
             max_approx_dev,
         })
     }

@@ -12,7 +12,7 @@ use solidcore::kernel::Kernel;
 use solidcore::math::{Point3, Vec2, Vec3};
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::surface::{plane::Plane, surface::Surface};
-use solidcore::topology::brep::p2::{notify, object_ref, root_ref};
+use solidcore::topology::brep::p2::{notify_owned as notify, object_ref, root_ref};
 use solidcore::topology::brep_cache::{BrepCache, CacheObject};
 use solidcore::topology::brep_constructor::{BrepConstructor, VertexNode};
 use solidcore::topology::{Brep, BrepId, FaceId, VertexId};
@@ -232,7 +232,7 @@ fn run() -> Result<Value> {
     }
     let events = rows.lock().map_err(|_| "sink poisoned")?.clone();
     Ok(
-        json!({"events":events,"metadata":metadata,"trees":trees(b.notifications().spatial_cache.as_deref())?}),
+        json!({"events":events,"metadata":metadata,"trees":trees(b.notifications().spatial_cache.as_ref())?}),
     )
 }
 fn main() -> Result<()> {

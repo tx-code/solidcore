@@ -35,6 +35,14 @@ five fixed catalogs. No EXPRESS artifact, C++ product reader or schema generator
 is needed to build or run Rust. The generated file records the exact descriptor
 payload fingerprint; it is a porting identity, not an independent schema witness.
 
+The optional ownership checkpoint also ports the strict `Product`, `Closure`,
+`Reach` and associated property/presentation/administrative predicates in
+`StepSemantics.cpp`, plus source inverse/use queries. Public synthetic tests
+under `tools/step_semantic_validation/tests` may be exercised by the local input
+capture adapter; their original C++ observations/assertions are not changed or
+used as Rust expected values. Their Python product/evidence implementation is
+not a Rust runtime dependency or a Python translator port. Captures remain local.
+
 The three STEP inputs under `crates/solidcore-step/tests/fixtures` are public
 analytic design fixtures S203-P01, S203-P04 and S203-P05 from the STEP fork's
 `tools/step_import_validation/corpus/ap203e2-planar/v1/cases`; they contain no

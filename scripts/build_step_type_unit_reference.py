@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Build a LOCAL C++ types/units checkpoint without modifying the reference checkout.
+"""Build a LOCAL selected source checkpoint without modifying the reference checkout.
 
 The copied Checker changes only its private/public access label. Original phase
 bodies and catalogs are used verbatim; the appended test entrypoint selects only
@@ -57,7 +57,8 @@ def main():
         'source_sha256':hashlib.sha256(raw).hexdigest(),
         'access_change':'private -> public, one Checker access label only',
         'entrypoint_sha256':hashlib.sha256(shim.encode()).hexdigest(),
-        'scope':'Binding/Types/UnitDependencies/explicit UnitContext; Part and GeometryDependencies NotRun'
+        'supported_scopes':['TypesAndUnitsCheckpoint','PartAndClosureCheckpoint'],
+        'unrun':['GeometryDependencies','native construction','interoperability approval']
     },indent=2)+'\n',encoding='utf-8')
 
 

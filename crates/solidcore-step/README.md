@@ -12,6 +12,11 @@ fixed source catalogs and checks exact unit dependencies. The opt-in
 context. Source inspection remains unchanged; checkpoint success does not
 establish part ownership, complete AP validity, geometry or a native model.
 
+The opt-in [part/closure checkpoint](PART_CLOSURE.md) now proves strict source
+identities, selected roles and dependency ownership before checking the actual
+part context. Geometry dependencies, planar qualification, interoperability
+approval and native construction remain separate unrun stages.
+
 ## Use
 
 ```sh
@@ -84,7 +89,7 @@ heals source defects, or relaxes quality thresholds.
 | Stage | Exit gate before claiming the capability |
 |---|---|
 | Explicit carrier options | Opaque HEADER/DATA and legacy level-1 interpretation retain source diagnostics/receipts; strict behavior remains unchanged |
-| Full semantic qualification | Strict type/unit checkpoint is implemented; selected-part ownership, representation-use constraints and interoperability proofs remain separate |
+| Full semantic qualification | Strict type/unit and part/closure checkpoints are implemented; geometry prerequisites, planar/global rules and interoperability approval remain separate |
 | Planar qualification | Stable rule identities/order, budgets, oriented regions, shared edges, holes and source surface/solid roles pass the analytic fixtures |
 | Native adapter | Validate solidcore geometry/topology construction and failed-candidate cleanup; retain source-to-native correspondence and UV definitions |
 | General exact BRep | Analytic/NURBS, trims, pcurves, seams, degeneracies and assemblies meet their individual error and ownership contracts |

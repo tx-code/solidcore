@@ -3,8 +3,8 @@
 //! Strict typed source mapping and physical-context prerequisites.
 //! Upstream: `source/STEP_SEMANTICS/src/StepSemantics.cpp` (Binding/Mapping/Fields/UnitContext).
 //! Rust Checker corresponds to the C++ Checker; no part/geometry/interop phases run.
-//! Deviations: checked indexing, owning immutable source sharing, explicit context
-//! selection; nested aggregate recursion is bounded by the source depth ceiling.
+//! Deviations: checked indexing, owning immutable source sharing and explicit
+//! checkpoint selection; nested aggregates keep the source depth ceiling.
 
 use super::catalog::{Catalog, Field, Kind, Membership, Unique};
 use super::{
@@ -64,6 +64,8 @@ pub(super) struct Checker<'a> {
     pub populations: Vec<Vec<usize>>,
     pub attributes: Vec<Vec<Attribute>>,
     pub units: Units,
+    pub part: Option<super::Part>,
+    pub representation_use: Option<Vec<bool>>,
     pub outcome: Outcome,
 }
 impl<'a> Checker<'a> {
@@ -1127,7 +1129,37 @@ impl<'a> Checker<'a> {
             self.outcome.unit_dependencies = progress(&result);
             result?;
         }
-        if let Some(context) = &options.physical_context {
+        let mut selected_context = None;
+        if options.check_part_and_closure {
+            let result = super::ownership::check(self, options.geometry_scope);
+            self.outcome.part = progress(&result);
+            selected_context = Some(result?);
+            if self
+                .part
+                .as_ref()
+                .is_some_and(|p| !p.deferred_region_faces.is_empty())
+            {
+                self.outcome.part = "Deferred";
+            }
+        }
+        if let Some(context) = selected_context.as_ref() {
+            if options
+                .physical_context
+                .as_ref()
+                .is_some_and(|requested| requested != context)
+            {
+                return Err(simple_failure(
+                    Status::InvalidRequest,
+                    "PhysicalContextSelectionMismatch",
+                    "InvalidRequest",
+                    "Explicit context differs from the proved selected-part context",
+                ));
+            }
+        }
+        if let Some(context) = selected_context
+            .as_ref()
+            .or(options.physical_context.as_ref())
+        {
             let result = self.context(context);
             self.outcome.si_units = progress(&result);
             result?;
@@ -1153,6 +1185,7 @@ fn progress<T>(result: &Checked<T>) -> &'static str {
 pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> Outcome {
     let mut outcome = Outcome {
         source_capture: source.captured.clone(),
+        check_part_and_closure: options.check_part_and_closure,
         status: Status::SourceFailure,
         snapshot: None,
         schema_selection: None,
@@ -1160,6 +1193,8 @@ pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> O
         types: "NotRun",
         unit_dependencies: "NotRun",
         si_units: "NotRun",
+        part: "NotRun",
+        property_attachment_checks: 0,
         dependency_visits: 0,
         unit_dependency_checks: UnitChecks::default(),
         limits,
@@ -1205,12 +1240,16 @@ pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> O
         populations: Vec::new(),
         attributes: Vec::new(),
         units: Units::default(),
+        part: None,
+        representation_use: None,
         outcome,
     };
     match checker.run(options) {
         Ok(()) => {
-            checker.outcome.status = if options.physical_context.is_some()
+            checker.outcome.status = if (options.physical_context.is_some()
+                || options.check_part_and_closure)
                 && checker.units.length_power10_mm.is_none()
+                || checker.outcome.part == "Deferred"
             {
                 Status::Deferred
             } else {
@@ -1226,6 +1265,8 @@ pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> O
                         populations: checker.populations,
                         attributes: checker.attributes,
                         units: checker.units,
+                        part: checker.part,
+                        representation_use: checker.representation_use,
                     }),
                 });
             } else {

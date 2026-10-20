@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Borrowed, bounded types/unit checkpoint reports with immutable source binding.
+//! Borrowed, bounded source checkpoint reports with immutable source binding.
 //! Upstream: `source/STEP_SEMANTICS/src/StepSemanticJson.cpp` (typed observations).
-//! Deviations: independent checkpoint scope; no part/geometry claims. Reuses the
+//! Deviations: explicit checkpoint scope; no geometry/native claims. Reuses the
 //! source writer budget and traverses records without a second report object graph.
 use super::{
     Attribute, Diagnostic, Limits, Outcome, ReportError, SchemaSelection, Snapshot, Status,
@@ -28,6 +28,8 @@ struct RecordView<'a> {
     id: &'a str,
     types: Option<Vec<&'static str>>,
     attributes: Option<&'a [Attribute]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    used_by_representation: Option<bool>,
 }
 struct Records<'a>(&'a Snapshot);
 impl Serialize for Records<'_> {
@@ -38,6 +40,7 @@ impl Serialize for Records<'_> {
                 id: &record.id,
                 types: self.0.types_of(r),
                 attributes: self.0.attributes(r),
+                used_by_representation: self.0.used_by_representation(r),
             })?;
         }
         seq.end()
@@ -48,6 +51,8 @@ struct SnapshotView<'a> {
     registered_types: Names<'a>,
     records: Records<'a>,
     units: &'a Units,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    part_definition: Option<&'a super::Part>,
 }
 #[derive(Serialize)]
 struct Report<'a> {
@@ -65,6 +70,8 @@ struct Report<'a> {
     interoperability: &'static str,
     repair: &'static str,
     dependency_visits: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    property_attachment_checks: Option<usize>,
     unit_dependency_checks: UnitChecks,
     limits: Limits,
     diagnostics: &'a [Diagnostic],
@@ -81,20 +88,31 @@ pub(super) fn compile(source: &RawOutcome, outcome: &Outcome) -> Result<Vec<u8>,
         return Err(ReportError::SourceMismatch);
     }
     let report = Report {
-        schema: "solidcore.step.types-units.v1",
-        scope: "TypesAndUnitsCheckpoint",
+        schema: if outcome.check_part_and_closure {
+            "solidcore.step.part-closure.v1"
+        } else {
+            "solidcore.step.types-units.v1"
+        },
+        scope: if outcome.check_part_and_closure {
+            "PartAndClosureCheckpoint"
+        } else {
+            "TypesAndUnitsCheckpoint"
+        },
         status: outcome.status,
         schema_selection: &outcome.schema_selection,
         binding: outcome.binding,
         types: outcome.types,
         unit_dependencies: outcome.unit_dependencies,
         si_units: outcome.si_units,
-        part: "NotRun",
+        part: outcome.part,
         geometry_dependencies: "NotRun",
         native_build: "NotRun",
         interoperability: "NotRun",
         repair: "None",
         dependency_visits: outcome.dependency_visits,
+        property_attachment_checks: outcome
+            .check_part_and_closure
+            .then_some(outcome.property_attachment_checks),
         unit_dependency_checks: outcome.unit_dependency_checks,
         limits: outcome.limits,
         diagnostics: &outcome.diagnostics,
@@ -102,6 +120,7 @@ pub(super) fn compile(source: &RawOutcome, outcome: &Outcome) -> Result<Vec<u8>,
             registered_types: Names(s),
             records: Records(s),
             units: s.units(),
+            part_definition: s.part_definition(),
         }),
         source: crate::report::view(source),
     };

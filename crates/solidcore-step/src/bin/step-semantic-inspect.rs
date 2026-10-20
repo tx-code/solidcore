@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Opt-in strict types/units checkpoint CLI; filesystem stays outside the library.
+//! Opt-in strict source checkpoint CLI; filesystem stays outside the library.
 //! Upstream: `source/STEP_SEMANTICS/app/step_semantics.cpp` (source capture and checks).
-//! Deviations: only migrated phases; explicit --unit-context, no selected-part or
-//! geometry claims, no interoperability/legacy-carrier interpretation options.
+//! Deviations: only selected migrated phases; no geometry/native claims or
+//! interoperability/legacy-carrier interpretation options.
 #![forbid(unsafe_code)]
 use solidcore_step::{inspect, report, semantics, Limits};
 use std::fs::File;
@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE:&str="step-semantic-inspect --fixture-limits [--general-brep-source] [--unit-context ID] [--dependency-visits N] [--input-bytes N] [--report-bytes N] FILE\nStrict types/units checkpoint only; part ownership, geometry and native build are NOT RUN.";
+const USAGE:&str="step-semantic-inspect --fixture-limits [--general-brep-source] [--part-and-closure] [--unit-context ID] [--dependency-visits N] [--input-bytes N] [--report-bytes N] FILE\nStrict source checkpoint; --part-and-closure proves selected source identities and derives their unit context. Geometry and native build are NOT RUN.";
 struct Request {
     path: PathBuf,
     source_limits: Limits,
@@ -47,6 +47,10 @@ fn arguments() -> Result<Option<Request>, ()> {
         }
         if flags && arg == "--general-brep-source" {
             options.geometry_scope = semantics::GeometryScope::GeneralBrep;
+            continue;
+        }
+        if flags && arg == "--part-and-closure" {
+            options.check_part_and_closure = true;
             continue;
         }
         if flags && arg == "--unit-context" {
@@ -127,7 +131,22 @@ fn run() -> u8 {
         return 6;
     }
     match outcome.status {
-        semantics::Status::Checked | semantics::Status::Deferred => 0,
+        semantics::Status::Checked => 0,
+        semantics::Status::Deferred => {
+            if request.options.check_part_and_closure {
+                7
+            } else {
+                0
+            }
+        }
+        semantics::Status::SourceFailure if request.options.check_part_and_closure => {
+            match source.status {
+                solidcore_step::Status::Rejected => 1,
+                solidcore_step::Status::Unsupported => 2,
+                solidcore_step::Status::ResourceLimit => 3,
+                solidcore_step::Status::Inspected => 6,
+            }
+        }
         semantics::Status::Rejected | semantics::Status::SourceFailure => 1,
         semantics::Status::Unsupported => 2,
         semantics::Status::ResourceLimit => 3,

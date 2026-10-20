@@ -82,6 +82,7 @@ fn converted_length_stays_deferred_and_retains_raw_factor() {
             &semantics::Options {
                 geometry_scope: scope,
                 physical_context: Some("12".into()),
+                ..semantics::Options::default()
             },
         );
         assert_eq!(result.status, semantics::Status::Deferred);
@@ -320,6 +321,7 @@ fn schema_identity_and_implementation_are_separate_and_ordered() {
             &semantics::Options {
                 geometry_scope: scope,
                 physical_context: None,
+                ..semantics::Options::default()
             },
         );
         assert_eq!(result.status, status, "{schema}");

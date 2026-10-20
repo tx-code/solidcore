@@ -1,11 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Typed source binding and exact unit prerequisites, without part/geometry acceptance.
+//! Typed source binding, exact units and opt-in strict source ownership.
 //! Upstream: `source/STEP_SEMANTICS/inc/StepSemantics.h`, `src/StepSemantics.cpp`.
 //! Rust check/Snapshot/FieldView map to Check/Snapshot/FieldView in the C++ source layer.
-//! Deviations: independently callable types/units checkpoint; physical context is
-//! explicitly selected by source ID. Part ownership, geometry rules and interop
-//! exceptions are not run. All original values remain in an owning source snapshot.
+//! Deviations: explicitly selected checkpoints. The expanded checkpoint proves
+//! selected-part identities and closure before checking their unit context.
+//! Geometry dependency qualification, interop exceptions and native construction
+//! remain unrun. All original values stay in an owning source snapshot.
 
 mod catalog;
 mod checker;
@@ -13,6 +14,7 @@ mod checker;
 #[rustfmt::skip]
 mod generated;
 mod number;
+mod ownership;
 mod report;
 mod schema;
 mod units;
@@ -54,8 +56,59 @@ pub struct Options {
     /// Select the same source catalog policy as C++.
     pub geometry_scope: GeometryScope,
     /// Canonical source ID of the physical context to check, if requested.
-    /// This does not establish that context's selected-part ownership.
+    /// Without ownership mode this does not prove selected-part ownership; with
+    /// ownership mode it must agree with the context selected by the proved chain.
     pub physical_context: Option<String>,
+    /// Run the strict selected-part and dependency-closure checkpoint. Its unit
+    /// context comes from the proved source chain; geometry/native remain unrun.
+    pub check_part_and_closure: bool,
+}
+
+/// A named role in the proved source part, addressed by a snapshot-local index.
+#[derive(Clone, Debug, Serialize)]
+pub struct Role {
+    /// Stable source-role name.
+    pub name: String,
+    /// Original source record index, not a copied entity or portable ID.
+    pub record_index: usize,
+}
+
+/// One original property attachment; property contexts never replace body units.
+#[derive(Clone, Debug, Serialize)]
+pub struct PropertyAttachment {
+    /// Property-definition representation link.
+    pub link: usize,
+    /// Attached property definition.
+    pub property_definition: usize,
+    /// Actual characterized PD/PDS source target.
+    pub characterized_definition: usize,
+    /// Proved selected product definition.
+    pub product_definition: usize,
+    /// Original property representation.
+    pub representation: usize,
+    /// Original property context.
+    pub context: usize,
+}
+
+/// Checked source ownership facts, never a geometric validity or material proof.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Part {
+    /// Source roles in the same deterministic order as the C++ checker.
+    pub roles: Vec<Role>,
+    /// All proven source property links, including shared representations/items.
+    pub property_attachments: Vec<PropertyAttachment>,
+    /// General-scope faces whose ordinary bounds require later region evidence.
+    pub deferred_region_faces: Vec<usize>,
+    /// MaterialSolid/OpenSurfaceModel/ClosedSurfaceModel: original source claim.
+    pub shape_role: String,
+    /// Original APD status STRING.
+    pub apd_status: String,
+    /// Original APD schema claim, never used to infer the HEADER edition.
+    pub apd_schema_claim: String,
+    /// Exact APD INTEGER lexeme.
+    pub apd_year: String,
+    /// A real source APD exists; strict mode never fabricates one.
+    pub application_protocol_present: bool,
 }
 
 /// Source-check status; no variant grants native model acceptance.
@@ -222,7 +275,7 @@ pub struct UnitDimension {
     pub dimensions: [DimensionExponent; 7],
 }
 
-/// Requested context observations; no implied selected-part ownership.
+/// Context observations; ownership qualification depends on the selected checkpoint.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Units {
     /// Explicitly selected context source index, absent when not requested.
@@ -259,6 +312,8 @@ struct Data {
     populations: Vec<Vec<usize>>,
     attributes: Vec<Vec<Attribute>>,
     units: Units,
+    part: Option<Part>,
+    representation_use: Option<Vec<bool>>,
 }
 
 /// Owning immutable typed source snapshot. It never owns a native model.
@@ -267,6 +322,60 @@ pub struct Snapshot {
     data: Arc<Data>,
 }
 impl Snapshot {
+    /// Proved source part facts, absent when the ownership checkpoint was unrun.
+    pub fn part_definition(&self) -> Option<&Part> {
+        self.data.part.as_ref()
+    }
+    /// RI-filtered representation-use closure, distinct from broad ownership.
+    /// Returns `None` for an unrun checkpoint or out-of-range source record.
+    pub fn used_by_representation(&self, record: usize) -> Option<bool> {
+        let used = *self.data.representation_use.as_ref()?.get(record)?;
+        Some(self.is_a(record, "REPRESENTATION_ITEM")? && used)
+    }
+    /// Registered inverse role as indices into the original source references.
+    /// Repeated LIST/BAG uses remain separate occurrences in source order.
+    /// Unknown target/type/role returns `None`, rather than a proved empty use set.
+    pub fn used_in(&self, target_id: &str, owner_type: &str, field: &str) -> Option<Vec<usize>> {
+        let catalog = self.data.catalog;
+        let type_id = catalog.find(owner_type)?;
+        let declared =
+            catalog
+                .declarations
+                .get(type_id)?
+                .flattened
+                .iter()
+                .any(|(origin, local)| {
+                    catalog
+                        .declarations
+                        .get(*origin)
+                        .and_then(|d| d.fields.get(*local))
+                        .is_some_and(|f| f.name == field)
+                });
+        if !declared {
+            return None;
+        }
+        self.data.source.find(target_id)?;
+        let mut uses = Vec::new();
+        for index in self.data.source.incoming(target_id) {
+            let reference = self.data.source.references().get(*index)?;
+            let parameter = reference.parameter_path.first()?.checked_sub(1)?;
+            if self.is_a(reference.record_index, owner_type)?
+                && self
+                    .data
+                    .attributes
+                    .get(reference.record_index)?
+                    .iter()
+                    .any(|a| {
+                        a.component == reference.component_index
+                            && a.parameter == parameter
+                            && a.name == field
+                    })
+            {
+                uses.push(*index);
+            }
+        }
+        Some(uses)
+    }
     /// Original complete immutable source graph, retained without copying values.
     pub fn source(&self) -> &SourceSnapshot {
         &self.data.source
@@ -368,6 +477,7 @@ pub struct Outcome {
     // Bind even failed checkpoints to their exact immutable source capture;
     // compiling a report against another request is an infrastructure error.
     source_capture: Option<Arc<[u8]>>,
+    check_part_and_closure: bool,
     /// Final checkpoint status, not full AP/native acceptance.
     pub status: Status,
     /// Completed owning typed source, absent on any requested-check failure.
@@ -382,6 +492,10 @@ pub struct Outcome {
     pub unit_dependencies: &'static str,
     /// Requested physical context progress; `NotRun` without an explicit context.
     pub si_units: &'static str,
+    /// Selected-part/closure progress, including general source-region deferral.
+    pub part: &'static str,
+    /// Actual property links attempted before any failure.
+    pub property_attachment_checks: usize,
     /// Actual traversal visits, including a visit that exceeded its budget.
     pub dependency_visits: usize,
     /// Actual unit prerequisite counters.
@@ -392,11 +506,11 @@ pub struct Outcome {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Check fixed source types and unit prerequisites, with strict source behavior.
+/// Check the explicitly selected source checkpoint with strict source behavior.
 ///
-/// An explicit context runs the unchanged C++ physical-unit contract on that
-/// context. It does not select a part, infer ownership, run geometry dependencies,
-/// enable interoperability exceptions, or qualify native `BRep` construction.
+/// Types/units mode checks only the requested context. Part/closure mode first
+/// proves the source chain and closure, then checks its actual context. Neither
+/// mode runs geometry dependencies, interoperability or native construction.
 pub fn check(source: &SourceOutcome, limits: Limits, options: &Options) -> Outcome {
     checker::check(source, limits, options)
 }
@@ -415,9 +529,9 @@ pub enum ReportError {
     Output(crate::report::Error),
 }
 
-/// Compile a source-bound types/units checkpoint report within the source report budget.
-/// Part, geometry and native stages remain explicitly `NotRun`. Private source
-/// data is included; the report inherits the input's confidentiality policy.
+/// Compile the source-bound selected-checkpoint report within the source budget.
+/// Every unrun stage remains explicit. Private source data is included; the
+/// report inherits the input's confidentiality policy.
 pub fn compile_report(source: &SourceOutcome, outcome: &Outcome) -> Result<Vec<u8>, ReportError> {
     report::compile(source, outcome)
 }

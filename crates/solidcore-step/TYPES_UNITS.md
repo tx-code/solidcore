@@ -1,5 +1,9 @@
 # Strict source types and units
 
+This document describes the unchanged default checkpoint. The new opt-in
+[part/closure checkpoint](PART_CLOSURE.md) extends it; it does not silently
+run ownership or infer a part when this earlier checkpoint is requested.
+
 This checkpoint migrates the C++ `STEP_SEMANTICS` Binding, Mapping,
 CheckForeignDeclarations, Fields, UnitDependencies and optional UnitContext
 contracts. It preserves their diagnostic identities, classifications, spans,

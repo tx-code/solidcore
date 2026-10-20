@@ -13,10 +13,11 @@ curves and surfaces. solidcore's first consumer is **SolidCraft**.
 ## Scope
 
 This fork also develops a native Rust STEP reader in
-[`solidcore-step`](crates/solidcore-step/README.md). Its first migrated stage is
-lossless Part 21 source inspection and a `step-inspect` CLI. It does **not yet
-convert STEP into a solidcore BRep**; schema semantics, units and construction
-remain separate migration stages. The kernel-port status below describes the
+[`solidcore-step`](crates/solidcore-step/README.md). It provides lossless Part 21
+inspection and a separate strict types/units checkpoint for five fixed source
+catalogs. It does **not yet convert STEP into a solidcore BRep**; part ownership,
+geometry qualification and native construction remain separate migration stages.
+The kernel-port status below describes the
 upstream project, not STEP import qualification.
 
 In scope: the `SMLib` kernel and the `SM_API` operation layer of upstream — NURBS

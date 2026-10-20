@@ -790,7 +790,7 @@ impl Parser {
         c: usize,
         path: &mut Vec<usize>,
         depth: usize,
-        source: &mut Snapshot,
+        source: &mut crate::SourceData,
     ) -> Parsed<()> {
         self.bound(depth, self.limits.nesting, "NestingLimit", value.span)?;
         if value.kind == ValueKind::Reference {
@@ -829,7 +829,7 @@ impl Parser {
         Ok(())
     }
 
-    fn resolve(&self, source: &mut Snapshot) -> Parsed<()> {
+    fn resolve(&self, source: &mut crate::SourceData) -> Parsed<()> {
         // Move the immutable records out temporarily to avoid cloning source
         // values or exposing any graph before every target has been resolved.
         let records = std::mem::take(&mut source.records);
@@ -968,7 +968,7 @@ impl Parser {
                 lines.push(pos);
             }
         }
-        let mut source = Snapshot {
+        let mut source = crate::SourceData {
             bytes: Arc::clone(&self.bytes),
             header,
             records,
@@ -978,7 +978,9 @@ impl Parser {
             lines,
         };
         self.resolve(&mut source)?;
-        Ok(source)
+        Ok(Snapshot {
+            data: Arc::new(source),
+        })
     }
 }
 

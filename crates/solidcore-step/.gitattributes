@@ -1,0 +1,2 @@
+# Public frozen source inputs retain the same bytes on every checkout.
+tests/fixtures/*.step -text

@@ -1,0 +1,24 @@
+[package]
+name = "solidcore-step"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Lossless, bounded STEP Part 21 source inspection for solidcore"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "step-inspect"
+path = "src/bin/step-inspect.rs"
+required-features = ["cli"]
+
+[features]
+default = []
+cli = []

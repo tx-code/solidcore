@@ -65,6 +65,12 @@ the newly authorized complete migration. Continue through later construction
 when its prerequisites are ready. User policy remains no new PRs, local-only
 private models/inventories/derived material, and source-preserving bounded checks.
 
+Merge `upstream/main` regularly during migration and check for updates before
+each deliverable increment. Preserve fork commits and published history; use
+merge commits for upstream integration, then rerun validation for the affected
+contracts. Fast-forward local `main` only to verified commits. Do not push remote
+`main` or create/update PRs under the current delivery policy.
+
 ## Current partial state
 
 Lossless strict Part 21 inspection, five fixed type/unit catalogs, strict part

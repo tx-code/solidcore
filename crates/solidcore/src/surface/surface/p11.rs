@@ -88,6 +88,7 @@ use crate::nurbs::b_spline_surface::SurfParamType;
 use crate::nurbs::knots::Side;
 use crate::surface::plane::Plane;
 use crate::surface::surface_cache::p1::{BezierPatch, SurfaceCache};
+use std::borrow::Cow;
 
 use super::p1::{
     get_surface_cache, is_node_valid, is_point_valid, surface_to_evaluate, CsGlobalSolver,
@@ -1759,33 +1760,67 @@ fn extract_iso_curve(
     interval: &Extent1d,
     approx_tol_3d: f64,
 ) -> Result<Option<(BSplineCurve, f64)>> {
-    // `sm_ExtractIsoCurve` takes an `SmBSplineCurve`: every `Curve` kind derived from it
-    // has one as base. Other kinds cannot reach upstream's signature, so they are not
-    // iso curves here.
-    let uv_bspline = match uv_curve.kind() {
-        CurveKind::BSpline(b) => b,
-        CurveKind::Line(l) => l.base(),
-        CurveKind::Ellipse(e) => e.base(),
-        CurveKind::Hyperbola(h) => h.base(),
-        CurveKind::Parabola(p) => p.base(),
-        _ => return Ok(None),
+    // C++ keeps the concrete vtable through its SmBSplineCurve reference. Degree
+    // and knot access can lazily call an analytic MakeNurb. Borrowing only the
+    // empty Rust base would instead call BSplineCurve::MakeNurb and fail. Build
+    // the exact concrete NURB on a copy before crossing this base-only interface;
+    // this changes cache state only, not the source curve or its parameterization.
+    let Some(uv_bspline) = analytic_bspline_view(k, uv_curve)? else {
+        return Ok(None);
     };
     // (sm_ExtractIsoCurve, surface.surface_p8; rdMaxApproxDev is always 0.0 there)
     let Some(iso) =
-        super::p8::extract_iso_curve(k, surface, uv_domain, uv_bspline, interval, approx_tol_3d)?
+        super::p8::extract_iso_curve(k, surface, uv_domain, &uv_bspline, interval, approx_tol_3d)?
     else {
         return Ok(None);
     };
     // rp3dCurve is an SmBSplineCurve
-    let bspline = match iso.into_kind() {
-        CurveKind::BSpline(b) => b,
-        CurveKind::Line(l) => l.base().clone(),
-        CurveKind::Ellipse(e) => e.base().clone(),
-        CurveKind::Hyperbola(h) => h.base().clone(),
-        CurveKind::Parabola(p) => p.base().clone(),
-        _ => return Err(SolidError::sm_err(OP_LIFT)),
-    };
+    let bspline = analytic_bspline_view(k, &iso)?
+        .ok_or(SolidError::sm_err(OP_LIFT))?
+        .into_owned();
     Ok(Some((bspline, 0.0)))
+}
+
+/// Preserve virtual lazy NURB creation when a derived curve crosses the concrete
+/// `BSplineCurve` result boundary of `LiftCurve`. No fitting or parameter conversion.
+fn analytic_bspline_view<'a>(
+    k: &Kernel,
+    curve: &'a Curve,
+) -> Result<Option<Cow<'a, BSplineCurve>>> {
+    let result = match curve.kind() {
+        // Ordinary B-spline UV input needs no request-sized duplicate buffer.
+        CurveKind::BSpline(base) => return Ok(Some(Cow::Borrowed(base))),
+        CurveKind::Line(line) => {
+            let mut copy = line.clone();
+            if copy.base().gw_nurb().is_none() {
+                copy.make_nurb_owned(curve.owner())?;
+            }
+            copy.base().clone()
+        }
+        CurveKind::Ellipse(ellipse) => {
+            let mut copy = ellipse.clone();
+            if copy.base().gw_nurb().is_none() {
+                copy.make_nurb_owned(k, curve.owner())?;
+            }
+            copy.base().clone()
+        }
+        CurveKind::Hyperbola(hyperbola) => {
+            let mut copy = hyperbola.clone();
+            if copy.base.gw_nurb().is_none() {
+                copy.make_nurb(curve.owner())?;
+            }
+            copy.base.clone()
+        }
+        CurveKind::Parabola(parabola) => {
+            let mut copy = parabola.clone();
+            if copy.base().gw_nurb().is_none() {
+                copy.make_nurb(curve.owner())?;
+            }
+            copy.base().clone()
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(Cow::Owned(result)))
 }
 
 /// The lifted curve of [`Surface::lift_curve`].

@@ -24,6 +24,10 @@ geometry qualification and native construction remain separate migration stages.
 The kernel-port status below describes the
 upstream project, not STEP import qualification.
 
+The fork also provides an owning [runtime BRep constructor](docs/BREP_CONSTRUCTION.md).
+Its tested construction paths do not establish native STEP acceptance; root
+validators and remaining projection dependencies are still migration work.
+
 In scope: the `SMLib` kernel and the `SM_API` operation layer of upstream — NURBS
 math, curve and surface geometry, B-rep topology, intersections, booleans, fillets and
 chamfers, offset/shell, sweeps and skins, primitives, healing/stitching, mass

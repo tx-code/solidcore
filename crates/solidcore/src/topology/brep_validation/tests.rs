@@ -57,23 +57,60 @@ fn fixture() -> (Brep, FaceId, LoopId, EdgeuseId) {
 }
 
 #[test]
-fn required_links_pass_does_not_grant_the_remaining_validator() {
-    let (mut b, _, _, _) = fixture();
+fn completed_pointer_walk_keeps_success_status_even_when_reports_exist() {
+    let (mut b, f, _, _) = fixture();
     required_links(&b, None).unwrap();
-    let error = validate_pointers(
-        &Kernel::default(),
+    let fu = b.face(f).unwrap().faceuse.unwrap();
+    b.faceuse_mut(fu).unwrap().orientation = OrientType::Opposite;
+    let mut reports = AssertArray::new();
+    validate_pointers(
+        &mut Kernel::default(),
         &mut b,
         ValidationOptions::default(),
-        None,
+        Some(&mut reports),
     )
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        SolidError::Unported {
-            unit: "fork.topology_validation",
-            ..
-        }
-    ));
+    .unwrap();
+    assert!(reports.reports().iter().any(|r| r.test_index == 14));
+    assert!(reports.reports().iter().any(|r| r.test_index == 17));
+}
+
+#[test]
+fn release_given_requests_do_not_skip_boolean_geometry_oriented_checks() {
+    let (mut b, f, _, _) = fixture();
+    let fu = b.face(f).unwrap().faceuse.unwrap();
+    b.faceuse_mut(fu).unwrap().orientation = OrientType::Opposite;
+    let mut reports = AssertArray::new();
+    validate_pointers(
+        &mut Kernel::default(),
+        &mut b,
+        ValidationOptions {
+            level: CheckLevel::Given(&[0]),
+            walk: false,
+        },
+        Some(&mut reports),
+    )
+    .unwrap();
+    assert!(reports.reports().iter().any(|r| r.test_index == 14));
+    let first = b.edge(b.edge_list()[0]).unwrap().curve.as_ref().unwrap();
+    let crate::curve::curve::CurveKind::Line(line) = first.kind() else {
+        panic!()
+    };
+    assert!(line.base().gw_nurb().is_some());
+}
+
+#[test]
+fn loop_face_checks_follow_primary_use_incidence_not_the_convenience_cache() {
+    let (mut b, _, l, _) = fixture();
+    b.loop_mut(l).unwrap().face = FaceId::from_index(u32::MAX);
+    let mut reports = AssertArray::new();
+    validate_pointers(
+        &mut Kernel::default(),
+        &mut b,
+        ValidationOptions::default(),
+        Some(&mut reports),
+    )
+    .unwrap();
+    assert!(reports.is_empty());
 }
 #[test]
 fn absent_infinite_region_stops_before_list_getters() {
@@ -160,7 +197,7 @@ fn selected_checks_cannot_skip_the_forced_level_zero_prefix() {
     b.face_mut(f).unwrap().surface = None;
     let mut reports = AssertArray::new();
     let error = validate_pointers(
-        &Kernel::default(),
+        &mut Kernel::default(),
         &mut b,
         ValidationOptions {
             level: CheckLevel::Given(&[]),

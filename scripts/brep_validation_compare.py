@@ -25,12 +25,25 @@ def main():
     p.add_argument('--cpp', type=Path, required=True)
     p.add_argument('--rust', type=Path, required=True)
     p.add_argument('--receipt', type=Path, required=True)
+    p.add_argument('--full', action='store_true', help='Compare complete pointer execution, not AssertValid')
     args = p.parse_args()
     cases = [[d, level] for d, level in itertools.product(DEFECTS, ['zero', 'two', 'given', 'no_reports', 'repeat'])]
     cases += [[a, 'zero', b] for a, b in [('face_no_surface', 'fu_no_mate'),
                                          ('shell_no_owner', 'face_no_surface'),
                                          ('eu_no_ccw', 'edge_no_curve'),
                                          ('vertex_no_uses', 'face_no_primary')]]
+    if args.full:
+        body=['fu_wrong_orientation','mate_wrong_orientation','lu_wrong_orientation','mate_lu_wrong_orientation',
+              'face_low_tolerance','face_high_tolerance','edge_low_tolerance','edge_high_tolerance',
+              'vertex_low_tolerance','vertex_high_tolerance','root_zero_tolerance','surface_no_owner',
+              'reverse_front','reverse_back','reverse_both']
+        cases += [[d,level] for d,level in itertools.product(body,['zero','two','given','no_reports','repeat'])]
+        cases=[case+(['none'] if len(case)==2 else [])+['full'] for case in cases]
+        # Direct NLib cases compare its failure bits and actual control-point
+        # mutation; these are callee evidence, not extra valid-model claims.
+        raw=['reverse_front','reverse_back','reverse_both','reverse_2d','reverse_rational',
+             'reverse_flat','reverse_tiny','reverse_limit','reverse_above']
+        cases += [[d,'zero','none',mode] for d,mode in itertools.product(raw,['raw_fix','raw_check'])]
     rows = []
     for case in cases:
         try:
@@ -42,7 +55,7 @@ def main():
         except (RuntimeError, ValueError) as error:
             rows.append({'input': case, 'status': 'fail', 'error': str(error)})
     failed = [r for r in rows if r['status'] == 'fail']
-    result = {'scope': 'required-link prefix only; full validation not established',
+    result = {'scope': 'complete pointer execution on selected fixtures; AssertValid not established' if args.full else 'required-link prefix only; full validation not established',
               'cases': rows, 'passed': len(rows) - len(failed), 'failed': len(failed)}
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
     args.receipt.write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')

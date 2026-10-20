@@ -24,8 +24,9 @@
 //! Arena links may be incomplete between calls, just as the C++ constructor;
 //! finish is not structural/geometric qualification. Unassigned convenience
 //! endpoints use an invalid sentinel only until `EndLoop` resolves vertex uses.
-//! Optional stitching retains the missing root validator as an explicit dependency
-//! (`fork.topology_validation`); see `docs/BREP_CONSTRUCTION.md` for qualification.
+//! Optional stitching runs the actual pointer validator before delegating; missing
+//! geometry/notification callees remain explicit. See `docs/BREP_CONSTRUCTION.md`
+//! for the separate full-validation and native-acceptance requirements.
 
 mod edges;
 mod geometry;
@@ -408,10 +409,9 @@ impl BrepConstructor {
         use crate::heal::stitch::p1::{DefaultStitchCallback, Stitch};
         use crate::heal::stitch::p2::MinGapRequest;
         // EndShell(TRUE) first invokes the root validator even though C++ ignores
-        // ordinary failure status. That call can update lazy state. The base port
-        // inventory omits it; do not silently substitute a topology-only walk.
-        // UNPORTED(fork.topology_validation): SmBrep::ValidatePointers
-        crate::error::ignore_status(Self::validate_before_stitch())?;
+        // ordinary failure status. Use the actual pointer validator, including
+        // geometry/cache side effects; unported callees still stop construction.
+        crate::error::ignore_status(self.validate_before_stitch(k))?;
         let members = self.brep.shell(shell)?.get_faceuses()?;
         let mut vertices = Vec::new();
         let mut edges = Vec::new();
@@ -449,10 +449,12 @@ impl BrepConstructor {
         )?;
         Ok(())
     }
-    fn validate_before_stitch() -> Result<()> {
-        Err(SolidError::Unported {
-            upstream: "SmBrep::ValidatePointers",
-            unit: "fork.topology_validation",
-        })
+    fn validate_before_stitch(&mut self, k: &mut Kernel) -> Result<()> {
+        super::brep_validation::validate_pointers(
+            k,
+            &mut self.brep,
+            super::brep_validation::ValidationOptions::default(),
+            None,
+        )
     }
 }

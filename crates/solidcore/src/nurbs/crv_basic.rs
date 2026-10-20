@@ -23,6 +23,7 @@
 //! | [`Curve::param_bounds`]                       | `N_CrvGetParamBounds`             |
 //! | [`Curve::set_size_indices`]                   | `N_CrvSetSizeIndices`             |
 //! | [`Curve::compress`]                           | `N_CrvCompress`                   |
+//! | [`Curve::end_reversal`], [`Curve::end_reversal_with_tolerance`] | `N_CrvIsNotReversed` (maintained-fork validity prerequisite) |
 //! | `None` / `Option::is_none` on `Option<Curve>` | `N_CrvInitArrays` / `N_CrvAreArraysNULL` |
 //! | [`size_arrays`]                               | `N_CrvSizeArrays`                 |
 //! | [`Curve::copy_into`], `Clone`                 | `N_CrvCopy`                       |
@@ -138,6 +139,83 @@ pub struct Curve {
 }
 
 impl Curve {
+    /// `N_CrvIsNotReversed`: check the first/last control-polygon triples and,
+    /// when requested, move the adjacent control point to the Euclidean midpoint.
+    /// Returns bit 1 for the front and bit 2 for the back, even when fixed.
+    /// This is a mutating legacy validity check, not an import repair allowance.
+    pub fn end_reversal(&mut self, fix: bool) -> Result<u8> {
+        self.end_reversal_with_tolerance(fix, MODEL_TOL)
+    }
+
+    /// [`Self::end_reversal`] with the caller's explicit `NL_MTOL`. The default
+    /// wrapper preserves the NLib default; no import acceptance budget is chosen.
+    pub fn end_reversal_with_tolerance(&mut self, fix: bool, model_tolerance: f64) -> Result<u8> {
+        if self.n < 4 {
+            return Ok(0);
+        }
+        let mut mask = 0;
+        for (indices, bit) in [([0, 1, 2], 1), ([self.n, self.n - 1, self.n - 2], 2)] {
+            let [a, b, c] = indices;
+            let p0 = self
+                .pw
+                .get(a)
+                .copied()
+                .ok_or_else(|| {
+                    invalid(
+                        "nurbs::crv_basic::Curve::end_reversal",
+                        "missing control point",
+                    )
+                })?
+                .to_euclid();
+            let p1 = self
+                .pw
+                .get(b)
+                .copied()
+                .ok_or_else(|| {
+                    invalid(
+                        "nurbs::crv_basic::Curve::end_reversal",
+                        "missing control point",
+                    )
+                })?
+                .to_euclid();
+            let p2 = self
+                .pw
+                .get(c)
+                .copied()
+                .ok_or_else(|| {
+                    invalid(
+                        "nurbs::crv_basic::Curve::end_reversal",
+                        "missing control point",
+                    )
+                })?
+                .to_euclid();
+            // N_VectorNormalize writes zero vector and magnitude before returning
+            // an error. Its status is ignored by N_CrvIsNotReversed.
+            let (v1, _) = normalize(p1 - p0).unwrap_or((Vec3::ZERO, 0.));
+            let (v2, magnitude) = normalize(p2 - p1).unwrap_or((Vec3::ZERO, 0.));
+            let dot = v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
+            if dot < -0.95 && magnitude > model_tolerance {
+                if fix {
+                    let cp = self.pw.get_mut(b).ok_or_else(|| {
+                        invalid(
+                            "nurbs::crv_basic::Curve::end_reversal",
+                            "missing control point",
+                        )
+                    })?;
+                    cp.x = (p0.x + p2.x) / 2.;
+                    cp.y = (p0.y + p2.y) / 2.;
+                    if cp.z != NOZ {
+                        cp.z = (p0.z + p2.z) / 2.;
+                    }
+                    if cp.w != NOW {
+                        cp.w = 1.;
+                    }
+                }
+                mask += bit;
+            }
+        }
+        Ok(mask)
+    }
     /// Curve over whole arrays (`n = pw.len() - 1`, `m = u.len() - 1`).
     ///
     /// # Errors
@@ -1258,6 +1336,41 @@ pub fn cross_bound_deriv_crv_non_rat_srf(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn end_reversal_keeps_failure_bits_after_fixing_and_preserves_check_only_input() {
+        let points = [0., 1., -1., 2., 1.]
+            .into_iter()
+            .map(|x| CPoint::new(x, 0., NOZ, NOW))
+            .collect();
+        let mut curve = Curve::new(points, 1, vec![0., 0., 0.25, 0.5, 0.75, 1., 1.]).unwrap();
+        let before = curve.clone();
+        assert_eq!(curve.end_reversal(false).unwrap(), 3);
+        assert_eq!(curve, before);
+        assert_eq!(curve.end_reversal(true).unwrap(), 3);
+        assert_eq!(curve.cpts()[1].x, -0.5);
+        assert_eq!(curve.cpts()[3].x, 0.);
+        assert_eq!(curve.cpts()[1].z, NOZ);
+        assert_eq!(curve.cpts()[1].w, NOW);
+        assert_eq!(curve.end_reversal(false).unwrap(), 0);
+    }
+
+    #[test]
+    fn end_reversal_uses_the_strict_second_segment_magnitude_boundary() {
+        let scale = MODEL_TOL / 2.;
+        let points = [0., 1., -1., 0.5, 1.]
+            .into_iter()
+            .map(|x| CPoint::new(x * scale, 0., 0., NOW))
+            .collect();
+        let mut curve = Curve::new(points, 1, vec![0., 0., 0.25, 0.5, 0.75, 1., 1.]).unwrap();
+        assert_eq!(curve.end_reversal(false).unwrap(), 0);
+        assert_eq!(
+            curve
+                .end_reversal_with_tolerance(false, MODEL_TOL * 0.99)
+                .unwrap(),
+            1
+        );
+    }
 
     fn line2() -> Curve {
         Curve::new(

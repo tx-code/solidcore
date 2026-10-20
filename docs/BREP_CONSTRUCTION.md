@@ -60,11 +60,11 @@ unit conversion or quality-profile selection.
 
 ## Missing dependencies remain explicit
 
-`EndShell(true)` invokes `SmBrep::ValidatePointers` before stitching in C++. Root
-`ValidatePointers` / `AssertValid` and their local validator contracts are not
-complete. This additional fork owner is tracked as `fork.topology_validation`,
-outside the base unit inventory. The optional stitch path returns `Unported`
-before the omitted call; it cannot silently succeed by skipping validation.
+`EndShell(true)` now invokes the actual `SmBrep::ValidatePointers` port before
+stitching, including cache/geometry effects and ignored ordinary status. Missing
+geometric or notification callees still return `Unported`. Stitching can reach
+`SmBrep::Notify` (`topology.brep_p2`). Full root/local `AssertValid` and gap/tolerance
+validation remain under `fork.topology_validation`, outside the base inventory.
 
 Three-or-more-face radial insertion can reach `SmSurface::DropCurve`
 (`intersect.surface_drop_lib_p3`); non-iso lifting on non-B-spline surfaces can
@@ -92,32 +92,54 @@ report accumulation still needs model-qualified identity; these local keys are
 not global object handles.
 
 Passing this prefix establishes required-link presence only. The public
-`validate_pointers` entry still returns `Unported` for the remaining predicates;
-constructor stitching/publication gates remain in place. Complete validation must
-also preserve CheckFace/CheckLoop, geometric checks, live-owner and backpointer
-checks, selected-test behavior, root/local AssertValid and gap/tolerance checks.
-The C++ validator's ordinary final success code does not mean its report is empty.
-Its geometry callees can materialize caches and even adjust NURBS control points;
-those effects must be preserved and checked against source before acceptance.
+`validate_pointers` entry also executes the native Release/old-tolerance body,
+reusing CheckFace/CheckLoop and owning topology queries. Its live-owner gate
+precedes geometry; face/loop, radial, incidence and shell/region checks retain
+source order. Disabled source tests 3, 10 and 96 remain unexecuted.
+
+The Release macros run these level-zero predicates for all supported levels,
+including GIVEN: both boolean and value macros ignore its request list. This
+differs from the Debug macros. The port preserves the fixed Release profile
+independently of Rust's debug-assertion build flag. Diagnostic geometry uses the
+static C++ pointer type (`SmSurface` or `SmBSplineCurve`), while identities track
+actual owned objects.
+
+A normally completed pointer walk returns success even with reports. Callers
+inspect both status and reports. Full root/local AssertValid and gap/tolerance
+checks are separate and not established yet. Pointer checking is not native
+import acceptance.
+
+`Curve::check_reverse_direction` and NLib `end_reversal` retain the native
+mutating check: it can move adjacent control points even when edge validation
+requests no tolerance repair. Rational weights and 2D/nonrational sentinels keep
+the source rules; front/back failure bits remain set after correction. Geometric
+checks call real kernel operations. Missing non-B-spline `CrvOnSurf` dispatch is
+explicit, not replaced with samples. Import acceptance must detect and qualify
+any validation-induced defining change.
 
 The synthetic negative observer invokes the actual C++ `ValidatePointers`.
 It obtains test-only data-member access through explicit template instantiation;
 class declarations, function access, layouts and vtables stay unchanged. Mutated
-links are restored before native context teardown. The comparison covers the
-first failed label/owner/message, selection-independent prefix, duplicate report
-handling and optional report arrays, not deep validation or native acceptance.
+links are restored before native context teardown. The comparison covers first-failure and complete pointer status/report paths,
+thresholds, optional/repeated reports and actual control-point mutation. Direct
+NLib fixtures separately compare check-only/fix behavior, rational/2D points and
+magnitude limits; they are callee evidence, not extra imported models. Constructor
+observers can run pointer checking on actual plane, hole, shared-face and
+material/surface box graphs. Deferred calls remain separate from matches. No
+AssertValid or native-acceptance claim follows.
 
 ```text
 cargo test --locked -p solidcore --lib topology::brep_validation
 cargo build --locked -p solidcore --example brep_validation_probe
 python scripts/build_brep_constructor_reference.py --source <cpp-checkout> --sdk <release-sdk> --toolchain-env <msvc-env.json> --output bin/validation-reference --probe validation
 python scripts/brep_validation_compare.py --cpp bin/validation-reference/brep-validation-reference.exe --rust bin/debug/examples/brep_validation_probe.exe --receipt bin/brep-required-links-validation.local.json
+python scripts/brep_validation_compare.py --cpp bin/validation-reference/brep-validation-reference.exe --rust bin/debug/examples/brep_validation_probe.exe --full --receipt bin/brep-pointer-body-validation.local.json
 ```
 
 ## Reusable verification
 
 Library tests exercise scope failure, duplicate definitions, parameter retention,
-identity preservation, vertex loops, root-validation refusal, UV lift success and
+identity preservation, vertex loops, pre-stitch pointer execution, UV lift success and
 failure, and temporary-edge cleanup on the actual radial dependency error.
 
 ```text

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Host-only observer of the maintained fork constructor (d8ed45a). Synthetic
 // construction evidence is separate from native acceptance and lazy validation.
+#include "SmAssertArray.h"
 #include "SmBrep.h"
 #include "SmBrepData.h"
 #include "SmContext.h"
@@ -65,10 +66,32 @@ static void point(const SmPoint3d &p) {
 static double dot(const SmVector3d &a, const SmVector3d &b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
+static void quote(const wchar_t *p) {
+    if (!p) {
+        std::cout << "null";
+        return;
+    }
+    std::cout << '"';
+    for (; *p; ++p) {
+        if (*p == L'"' || *p == L'\\')
+            std::cout << '\\' << static_cast<char>(*p);
+        else if (*p == L'\n')
+            std::cout << "\\n";
+        else if (*p == L'\r')
+            std::cout << "\\r";
+        else if (*p == L'\t')
+            std::cout << "\\t";
+        else if (*p >= 32 && *p < 127)
+            std::cout << static_cast<char>(*p);
+        else
+            throw std::runtime_error("non-ASCII fixed label");
+    }
+    std::cout << '"';
+}
 
 int main(int argc, char **argv) {
     try {
-        if (argc != 9)
+        if (argc != 9 && argc != 10)
             throw std::runtime_error("shape walk outside vertices uv point-limits scale offset");
         std::cout << std::setprecision(17);
         const std::string shape = argv[1];
@@ -203,10 +226,15 @@ int main(int argc, char **argv) {
                 }
             require(builder.EndFace());
         }
-        require(builder.EndShell(FALSE));
+        require(builder.EndShell(argc == 10 && std::string(argv[9]) == "stitch"));
         if (region)
             require(builder.EndRegion());
         require(builder.EndBrep());
+        SmAssertArray validation;
+        SmStatus validation_status = SM_SUCCESS;
+        if (argc == 10)
+            validation_status =
+                brep->ValidatePointers(&validation, SM_LEVEL_2, nullptr, SM_NO_WALK);
         SmTArray<SmRegion *> rr;
         brep->GetRegions(rr);
         const auto regions = list(rr);
@@ -344,6 +372,72 @@ int main(int argc, char **argv) {
             });
             std::cout << ']';
         });
+        if (argc == 10) {
+            std::cout << ",\"pointer_validation\":{\"status\":" << validation_status
+                      << ",\"reports\":[";
+            for (ULONG i = 0; i < validation.GetSize(); ++i) {
+                if (i)
+                    std::cout << ',';
+                auto r = validation[i];
+                long long owner = -1;
+                switch (r->m_lOwnerType) {
+                case SmBrep_TYPE:
+                    owner = 0;
+                    break;
+                case SmRegion_TYPE:
+                    owner = index(regions, static_cast<const SmRegion *>(r->m_pOwner));
+                    break;
+                case SmShell_TYPE:
+                    owner = index(shells, static_cast<const SmShell *>(r->m_pOwner));
+                    break;
+                case SmFace_TYPE:
+                    owner = index(fs, static_cast<const SmFace *>(r->m_pOwner));
+                    break;
+                case SmFaceuse_TYPE: {
+                    auto fu = static_cast<const SmFaceuse *>(r->m_pOwner);
+                    owner = 2 * index(fs, fu->GetFace()) +
+                            (fu == fu->GetFace()->GetUpwardFaceuse() ? 0 : 1);
+                    break;
+                }
+                case SmLoop_TYPE:
+                    owner = index(lus, static_cast<const SmLoop *>(r->m_pOwner)->GetLoopuse()) / 2;
+                    break;
+                case SmLoopuse_TYPE:
+                    owner = index(lus, static_cast<const SmLoopuse *>(r->m_pOwner));
+                    break;
+                case SmEdge_TYPE:
+                    owner = index(edges, static_cast<const SmEdge *>(r->m_pOwner));
+                    break;
+                case SmEdgeuse_TYPE:
+                    owner = index(eus, static_cast<const SmEdgeuse *>(r->m_pOwner));
+                    break;
+                case SmVertex_TYPE:
+                    owner = index(vs, static_cast<const SmVertex *>(r->m_pOwner));
+                    break;
+                case SmVertexuse_TYPE: {
+                    auto vu = static_cast<const SmVertexuse *>(r->m_pOwner);
+                    owner = vu->GetVertexuseType() == SmEdgeuse_TYPE
+                                ? index(eus, vu->GetEdgeuse())
+                                : -1 - index(lus, vu->GetLoopuse());
+                    break;
+                }
+                case SmSurface_TYPE:
+                    for (size_t j = 0; j < fs.size(); ++j)
+                        if (fs[j]->GetSurface() == r->m_pOwner)
+                            owner = static_cast<long long>(j);
+                    break;
+                default:
+                    throw std::runtime_error("unmapped validation object");
+                }
+                std::cout << '[' << r->m_lReportingType << ',' << r->m_lListIndex << ','
+                          << r->m_lTestIndex << ',' << r->m_lOwnerType << ',' << owner << ',';
+                quote(r->m_pName);
+                std::cout << ',';
+                quote(r->m_pMessage);
+                std::cout << ',' << r->m_sTol3d << ',' << r->m_dValue << ']';
+            }
+            std::cout << "]}";
+        }
         std::cout << "}\n";
         return 0;
     } catch (const std::exception &e) {

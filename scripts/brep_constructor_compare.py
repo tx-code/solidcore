@@ -72,9 +72,19 @@ def main():
     parser.add_argument('--cpp', type=Path, required=True)
     parser.add_argument('--rust', type=Path, required=True)
     parser.add_argument('--receipt', type=Path, required=True, help='Ignored local output')
+    parser.add_argument('--pointer-check', action='store_true', help='Also run complete pointer validation on non-UV fixtures')
+    parser.add_argument('--stitch', action='store_true', help='Exercise actual EndShell(true) on canonical non-UV fixtures')
     args = parser.parse_args()
     rows = []
     for case in cases():
+        if args.stitch:
+            if case[0] not in ['plane','hole','two','solid','surface'] or case[1:] != [1,1,1,0,0,1,0]:
+                continue
+            case=[*case,'stitch']
+        elif args.pointer_check:
+            if case[4] or case[0]=='lift':
+                continue
+            case=[*case,'check']
         try:
             cpp = run(args.cpp.resolve(), case)
             rust = run(args.rust.resolve(), case)

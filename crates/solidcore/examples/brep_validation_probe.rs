@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Synthetic required-link observer; successful output is prefix evidence only.
 use serde_json::{json, Value};
-use solidcore::curve::{curve::Curve, line::Line};
+use solidcore::curve::{
+    curve::{Curve, CurveKind},
+    line::Line,
+};
 use solidcore::error::SolidError;
 use solidcore::geom::assert_array::AssertArray;
 use solidcore::geom::extent2d::Extent2d;
@@ -12,7 +15,9 @@ use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::surface::{plane::Plane, surface::Surface};
 use solidcore::topology::brep_cache::{arena_identity, CacheObject};
 use solidcore::topology::brep_constructor::{BrepConstructor, VertexNode};
-use solidcore::topology::brep_validation::required_links;
+use solidcore::topology::brep_validation::{
+    required_links, validate_pointers, CheckLevel, ValidationOptions,
+};
 use solidcore::topology::shell::ShellMembers;
 use solidcore::topology::{Edge, EdgeuseOwner, LoopuseStart, VertexuseOwner};
 use std::error::Error;
@@ -29,6 +34,9 @@ fn run() -> Result<Value> {
     let defect = args.first().ok_or("defect [selection] [second-defect]")?;
     let selection = args.get(1).map_or("zero", String::as_str);
     let second = args.get(2).map_or("none", String::as_str);
+    let mode = args.get(3).map_or("prefix", String::as_str);
+    let full = mode != "prefix";
+    let raw = mode == "raw_fix" || mode == "raw_check";
     let mut k = Kernel::default();
     let mut builder = BrepConstructor::new()?;
     let (outer, _) = builder.start_shell()?;
@@ -60,11 +68,55 @@ fn run() -> Result<Value> {
             Some(*at(&vertices, i)?),
             Some(*at(&vertices, next)?),
         )?;
-        builder.set_edge_curve(
-            &k,
-            Curve::from(Line::from_points(*at(&points, i)?, *at(&points, next)?, 3)),
-            false,
-        )?;
+        let curve = if i == 0 && defect.starts_with("reverse_") {
+            use solidcore::nurbs::{
+                b_spline_curve::BSplineCurve,
+                crv_basic::Curve as NurbCurve,
+                math::{CPoint, NOW, NOZ},
+            };
+            let xs = [
+                0.,
+                if defect == "reverse_back" { -0.5 } else { 1. },
+                -1.,
+                if defect == "reverse_front" { 0.5 } else { 2. },
+                1.,
+            ];
+            let scale = match defect.as_str() {
+                "reverse_tiny" => 1e-8,
+                "reverse_limit" => 5e-8,
+                "reverse_above" => 1e-7,
+                _ => 1.,
+            };
+            let cp = xs
+                .into_iter()
+                .enumerate()
+                .map(|(i, x)| {
+                    let x = if defect == "reverse_flat" && i == 1 {
+                        0.
+                    } else {
+                        x
+                    };
+                    let weight = if defect == "reverse_rational" {
+                        f64::from(u32::try_from(i).unwrap_or(0)) + 2.
+                    } else {
+                        NOW
+                    };
+                    CPoint::new(
+                        x * scale * if weight == NOW { 1. } else { weight },
+                        0.,
+                        if defect == "reverse_2d" { NOZ } else { 0. },
+                        weight,
+                    )
+                })
+                .collect();
+            Curve::from(BSplineCurve::from_gw_nurb(
+                3,
+                &NurbCurve::new(cp, 1, vec![0., 0., 0.25, 0.5, 0.75, 1., 1.])?,
+            ))
+        } else {
+            Curve::from(Line::from_points(*at(&points, i)?, *at(&points, next)?, 3))
+        };
+        builder.set_edge_curve(&k, curve, false)?;
         builder.set_limits(&k, VertexNode::Parameter(0.), VertexNode::Parameter(1.))?;
         builder.end_edge()?;
         edges.push(e);
@@ -98,6 +150,7 @@ fn run() -> Result<Value> {
     for name in [defect.as_str(), second] {
         match name {
             "none" | "edge_no_uses" => {}
+            name if name.starts_with("reverse_") => {}
             "no_infinite_region" => b.set_infinite_region(None),
             "region_no_owner" => {
                 let r = require(b.infinite_region())?;
@@ -129,17 +182,73 @@ fn run() -> Result<Value> {
                 let other = require(b.edgeuse(first)?.ccw)?;
                 b.edgeuse_mut(other)?.ccw = Some(other);
             }
+            "fu_wrong_orientation" => b.faceuse_mut(fu)?.orientation = OrientType::Opposite,
+            "mate_wrong_orientation" => {
+                let mate = require(b.faceuse(fu)?.mate)?;
+                b.faceuse_mut(mate)?.orientation = OrientType::Same;
+            }
+            "lu_wrong_orientation" => b.loopuse_mut(lu)?.orientation = OrientType::Opposite,
+            "mate_lu_wrong_orientation" => {
+                let mate = require(b.loopuse(lu)?.mate)?;
+                b.loopuse_mut(mate)?.orientation = OrientType::Opposite;
+            }
+            "face_low_tolerance" => b.face_mut(face)?.tolerance = 0.000001,
+            "face_high_tolerance" => b.face_mut(face)?.tolerance = 0.1,
+            "edge_low_tolerance" => b.edge_mut(*at(&edges, 0)?)?.tolerance = 0.,
+            "edge_high_tolerance" => b.edge_mut(*at(&edges, 0)?)?.tolerance = 0.1,
+            "vertex_low_tolerance" => b.vertex_mut(v0)?.tolerance = 0.,
+            "vertex_high_tolerance" => b.vertex_mut(v0)?.tolerance = 0.1,
+            "root_zero_tolerance" => b.set_tolerance(0.),
+            "surface_no_owner" => {
+                b.face_mut(face)?
+                    .surface
+                    .as_mut()
+                    .ok_or("missing surface")?
+                    .set_owner(None);
+            }
             _ => return Err("unknown defect".into()),
         }
     }
     let mut reports = AssertArray::new();
-    let result = if selection == "no_reports" {
-        required_links(&b, None)
+    let reversal = if raw {
+        let edge = *at(&edges, 0)?;
+        let curve = b.edge_mut(edge)?.curve.as_mut().ok_or("missing curve")?;
+        let CurveKind::BSpline(base) = curve.kind_mut() else {
+            return Err("raw reversal needs a spline fixture".into());
+        };
+        Some(
+            base.get_or_create_gw_nurb()?
+                .end_reversal(mode == "raw_fix")?,
+        )
     } else {
-        required_links(&b, Some(&mut reports))
+        None
     };
+    let level = match selection {
+        "given" => CheckLevel::Given(&[0]),
+        "two" => CheckLevel::Two,
+        _ => CheckLevel::Zero,
+    };
+    let mut invoke = |reports: Option<&mut AssertArray>| {
+        if raw {
+            Ok(())
+        } else if full {
+            validate_pointers(
+                &mut k,
+                &mut b,
+                ValidationOptions { level, walk: false },
+                reports,
+            )
+        } else {
+            required_links(&b, reports)
+        }
+    };
+    let result = invoke(if selection == "no_reports" {
+        None
+    } else {
+        Some(&mut reports)
+    });
     let result = if selection == "repeat" {
-        required_links(&b, Some(&mut reports))
+        invoke(Some(&mut reports))
     } else {
         result
     };
@@ -160,11 +269,38 @@ fn run() -> Result<Value> {
                 r.owner.map(|k| k.0),
                 r.owner_type,
                 r.name,
-                r.message
+                r.message,
+                r.tol3d,
+                r.value
             ])
         })
         .collect();
-    Ok(json!({"status":status,"last_add":reports.last_add(),"reports":rows}))
+    let mut result = json!({"status":status,"last_add":reports.last_add(),"reports":rows});
+    if let Some(mask) = reversal {
+        result
+            .as_object_mut()
+            .ok_or("observer result is not an object")?
+            .insert("reversal_mask".into(), json!(mask));
+    }
+    if full {
+        let cached = match b.edge(*at(&edges, 0)?)?.curve.as_ref().map(Curve::kind) {
+            Some(CurveKind::BSpline(base)) => base.gw_nurb(),
+            Some(CurveKind::Line(c)) => c.base().gw_nurb(),
+            _ => None,
+        };
+        let points = cached.map_or(Value::Null, |c| {
+            json!(c
+                .cpts()
+                .iter()
+                .map(|p| [p.x, p.y, p.z, p.w])
+                .collect::<Vec<_>>())
+        });
+        result
+            .as_object_mut()
+            .ok_or("observer result is not an object")?
+            .insert("control_points".into(), points);
+    }
+    Ok(result)
 }
 fn main() -> Result<()> {
     println!("{}", run()?);

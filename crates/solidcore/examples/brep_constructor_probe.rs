@@ -4,6 +4,7 @@
 //! Synthetic construction evidence is distinct from native acceptance evidence.
 use serde_json::{json, Value};
 use solidcore::curve::{curve::Curve, line::Line};
+use solidcore::geom::assert_array::{labels, AssertArray};
 use solidcore::geom::extent2d::Extent2d;
 use solidcore::kernel::Kernel;
 use solidcore::math::{Point2, Point3, Vec2};
@@ -11,6 +12,7 @@ use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::surface::{plane::Plane, surface::Surface};
 use solidcore::topology::brep_cache::{arena_identity, CacheObject};
 use solidcore::topology::brep_constructor::{BrepConstructor, VertexNode};
+use solidcore::topology::brep_validation::{validate_pointers, CheckLevel, ValidationOptions};
 use solidcore::topology::edgeuse::p1 as eu;
 use solidcore::topology::shell::ShellMembers;
 use solidcore::topology::{Brep, EdgeId, EdgeuseOwner, LoopuseStart, VertexuseOwner};
@@ -43,7 +45,7 @@ fn point(p: Point3) -> [f64; 3] {
     [p.x, p.y, p.z]
 }
 
-fn observe(b: &Brep, manifold: bool) -> Result<Value> {
+fn observe(b: &Brep, manifold: bool, validation: Option<&(i32, AssertArray)>) -> Result<Value> {
     let regions: Vec<_> = b.regions().ids().collect();
     let shells: Vec<_> = b.shells().ids().collect();
     let faces: Vec<_> = b.faces().ids().collect();
@@ -204,14 +206,63 @@ fn observe(b: &Brep, manifold: bool) -> Result<Value> {
         }
         vs.push(json!([point(vertex.point), vertex.tolerance, owners]));
     }
-    Ok(
-        json!({"manifold":manifold,"regions":rs,"shells":ss,"faces":fs,"loops":ls,"edges":es,"uses":uses,"vertices":vs}),
-    )
+    let mut result = json!({"manifold":manifold,"regions":rs,"shells":ss,"faces":fs,"loops":ls,"edges":es,"uses":uses,"vertices":vs});
+    if let Some((status, reports)) = validation {
+        let mut rows = Vec::new();
+        for r in reports.reports() {
+            let key = r.owner.ok_or("missing report owner")?.0;
+            let raw = u32::try_from(key & 0xffff_ffff)?;
+            let owner = match r.owner_type {
+                labels::BREP_TYPE => 0,
+                labels::REGION_TYPE
+                | labels::SHELL_TYPE
+                | labels::FACE_TYPE
+                | labels::FACEUSE_TYPE
+                | labels::LOOP_TYPE
+                | labels::LOOPUSE_TYPE
+                | labels::EDGE_TYPE
+                | labels::VERTEX_TYPE
+                | labels::SURFACE_TYPE => i64::from(raw),
+                labels::EDGEUSE_TYPE => i64::try_from(index(
+                    &eus,
+                    solidcore::topology::EdgeuseId::from_index(raw),
+                )?)?,
+                labels::VERTEXUSE_TYPE => match b
+                    .vertexuse(solidcore::topology::VertexuseId::from_index(raw))?
+                    .owner
+                {
+                    VertexuseOwner::Edgeuse(u) => i64::try_from(index(&eus, required(u)?)?)?,
+                    VertexuseOwner::Loopuse(l) => -1 - i64::try_from(index(&lus, required(l)?)?)?,
+                    _ => return Err("unmapped vertex-use report".into()),
+                },
+                _ => return Err("unmapped validation object".into()),
+            };
+            rows.push(json!([
+                r.reporting_type,
+                r.list_index,
+                r.test_index,
+                r.owner_type,
+                owner,
+                r.name,
+                r.message,
+                r.tol3d,
+                r.value
+            ]));
+        }
+        result
+            .as_object_mut()
+            .ok_or("observer result is not an object")?
+            .insert(
+                "pointer_validation".into(),
+                json!({"status":status,"reports":rows}),
+            );
+    }
+    Ok(result)
 }
 
 fn run() -> Result<Value> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() != 8 {
+    if args.len() != 8 && args.len() != 9 {
         return Err("shape walk outside vertices uv point-limits scale offset".into());
     }
     let shape = at(&args, 0)?.as_str();
@@ -386,13 +437,32 @@ fn run() -> Result<Value> {
         }
         builder.end_face()?;
     }
-    builder.end_shell(&mut k, false)?;
+    builder.end_shell(&mut k, args.get(8).is_some_and(|v| v == "stitch"))?;
     if region.is_some() {
         builder.end_region()?;
     }
     let manifold = builder.is_manifold_construction();
-    let b = builder.finish()?;
-    observe(&b, manifold)
+    let mut b = builder.finish()?;
+    let validation = if args.len() == 9 {
+        let mut reports = AssertArray::new();
+        let status = match validate_pointers(
+            &mut k,
+            &mut b,
+            ValidationOptions {
+                level: CheckLevel::Two,
+                walk: false,
+            },
+            Some(&mut reports),
+        ) {
+            Ok(()) => 1000,
+            Err(solidcore::error::SolidError::Upstream { code, .. }) => code,
+            Err(error) => return Err(error.into()),
+        };
+        Some((status, reports))
+    } else {
+        None
+    };
+    observe(&b, manifold, validation.as_ref())
 }
 fn main() -> Result<()> {
     match run() {

@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
-use crate::curve::{curve::Curve, line::Line};
+use crate::curve::{
+    curve::{Curve, CurveKind},
+    line::Line,
+};
 use crate::geom::extent2d::Extent2d;
 use crate::math::Vec3;
 use crate::surface::{plane::Plane, surface::Surface};
@@ -142,18 +145,37 @@ fn region_hint_is_not_material_classification_and_swap_only_routes_future_shells
 }
 
 #[test]
-fn optional_stitching_cannot_bypass_missing_root_validation() {
-    let mut b = BrepConstructor::new().unwrap();
-    let mut k = Kernel::default();
-    b.start_shell().unwrap();
-    assert!(matches!(
-        b.end_shell(&mut k, true),
-        Err(SolidError::Unported {
-            upstream: "SmBrep::ValidatePointers",
-            unit: "fork.topology_validation"
-        })
-    ));
-    assert!(b.finish().is_err());
+fn pre_stitch_delegates_to_actual_pointer_and_geometry_validation() {
+    let (mut k, mut b, _, first) = one_edge();
+    b.set_edge_curve(
+        &k,
+        Curve::from(Line::from_points(Point3::ZERO, Vec3::X, 3)),
+        false,
+    )
+    .unwrap();
+    b.set_limits(&k, VertexNode::Parameter(0.), VertexNode::Parameter(1.))
+        .unwrap();
+    b.end_edge().unwrap();
+    for (a, end) in [(Vec3::X, Vec3::Y), (Vec3::Y, Point3::ZERO)] {
+        b.start_edge(&k, OrientType::Same, None, None, None)
+            .unwrap();
+        b.set_edge_curve(&k, Curve::from(Line::from_points(a, end, 3)), false)
+            .unwrap();
+        b.set_limits(&k, VertexNode::Parameter(0.), VertexNode::Parameter(1.))
+            .unwrap();
+        b.end_edge().unwrap();
+    }
+    b.end_loop().unwrap();
+    b.end_face().unwrap();
+    let CurveKind::Line(line) = b.brep().edge(first).unwrap().curve.as_ref().unwrap().kind() else {
+        panic!()
+    };
+    assert!(line.base().gw_nurb().is_none());
+    b.validate_before_stitch(&mut k).unwrap();
+    let CurveKind::Line(line) = b.brep().edge(first).unwrap().curve.as_ref().unwrap().kind() else {
+        panic!()
+    };
+    assert!(line.base().gw_nurb().is_some());
 }
 
 #[test]
@@ -306,7 +328,7 @@ fn uv_only_iso_line_lifts_exactly_without_mutating_the_source_curve() {
         .uv_trim_curve
         .as_ref()
         .unwrap();
-    let crate::curve::curve::CurveKind::Line(line) = source.kind() else {
+    let CurveKind::Line(line) = source.kind() else {
         panic!()
     };
     assert!(line.base().gw_nurb().is_none());

@@ -8,7 +8,7 @@
 //! | Rust | Upstream |
 //! |------|----------|
 //! | [`required_links`] | required-pointer prefix, tests 112--146 |
-//! | [`validate_pointers`] | `SmBrep::ValidatePointers` (remaining predicates pending) |
+//! | [`validate_pointers`] | `SmBrep::ValidatePointers` (Release, old tolerances) |
 //!
 //! Deviations: checked arena access replaces unsafe pointer dereferences. Context
 //! and global list-sentinel presence are intrinsic to the Rust value model. A
@@ -16,7 +16,11 @@
 //! Report keys use type/index namespaces, scoped to this `BRep`. CCW presence walks
 //! retain the source bound of 100,000 visits; region/use recursion is not used.
 //! Passing the required-link prefix is not full runtime or geometric validity.
+//! A completed pointer walk can return success with reports. Full root/local
+//! `AssertValid` and unavailable geometric dispatches remain separate requirements.
 
+mod geometry;
+mod pointers;
 mod presence;
 #[cfg(test)]
 mod tests;
@@ -34,8 +38,8 @@ use crate::math::UNDEF_DOUBLE;
 const OP: &str = "topology::brep_validation";
 const MAX_LOOP_WALK: usize = 100_000;
 
-/// The native level/request selection; requests select predicates in source
-/// execution order, not in request-array order.
+/// Native level/request input. The Release macros use numeric levels, so these
+/// level-zero pointer checks also run for `Given`, ignoring its request list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CheckLevel<'a> {
     /// `SM_LEVEL_0`.
@@ -45,7 +49,10 @@ pub enum CheckLevel<'a> {
     One,
     /// `SM_LEVEL_2`, including all lower levels.
     Two,
-    /// `SM_LEVEL_GIVEN`; an empty slice also models a null request array.
+    /// `SM_LEVEL_HEAL` (3); the Release pointer checks still run at level zero.
+    Heal,
+    /// `SM_LEVEL_GIVEN`; the Release pointer macros ignore this request list.
+    /// An empty slice also models a null request array.
     Given(&'a [u64]),
 }
 
@@ -60,6 +67,18 @@ pub struct ValidationOptions<'a> {
     pub walk: bool,
 }
 
+impl CheckLevel<'_> {
+    fn native_code(self) -> i32 {
+        match self {
+            Self::Zero => 0,
+            Self::One => 1,
+            Self::Two => 2,
+            Self::Heal => 3,
+            Self::Given(_) => 4,
+        }
+    }
+}
+
 /// The required-pointer prefix of `SmBrep::ValidatePointers`, in original order.
 /// Stops on its first failed predicate, retains its ordinary `AssertArray`
 /// report, and returns `SM_ERR`. It does not qualify the rest of validation.
@@ -67,21 +86,18 @@ pub fn required_links(b: &Brep, reports: Option<&mut AssertArray>) -> Result<()>
     presence::check(b, &mut Reporter { reports })
 }
 
-/// Execute runtime pointer validation. The required-pointer prefix runs first;
-/// the remaining validator is still an explicit unported dependency.
-/// A successful prefix must never be published as full validation evidence.
+/// Execute the native Release/old-tolerance pointer validator. A normal completed
+/// walk returns success even when reports were added, exactly as C++ does; callers
+/// inspect both status and reports. Unported geometry remains an explicit error.
 pub fn validate_pointers(
-    _k: &Kernel,
+    k: &mut Kernel,
     b: &mut Brep,
-    _options: ValidationOptions<'_>,
+    options: ValidationOptions<'_>,
     reports: Option<&mut AssertArray>,
 ) -> Result<()> {
-    required_links(b, reports)?;
-    // UNPORTED(fork.topology_validation): SmBrep::ValidatePointers remaining checks
-    Err(SolidError::Unported {
-        upstream: "SmBrep::ValidatePointers remaining checks",
-        unit: "fork.topology_validation",
-    })
+    let mut reporter = Reporter { reports };
+    presence::check(b, &mut reporter)?;
+    pointers::check(k, b, options, &mut reporter)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +113,8 @@ enum Object {
     Edgeuse(EdgeuseId),
     Vertex(VertexId),
     Vertexuse(VertexuseId),
+    Surface(FaceId),
+    UvCurve(EdgeuseId),
 }
 impl Object {
     const fn identity(self) -> (i64, u32, &'static str) {
@@ -112,9 +130,18 @@ impl Object {
             Self::Edgeuse(id) => (labels::EDGEUSE_TYPE, id.index(), "SmEdgeuse"),
             Self::Vertex(id) => (labels::VERTEX_TYPE, id.index(), "SmVertex"),
             Self::Vertexuse(id) => (labels::VERTEXUSE_TYPE, id.index(), "SmVertexuse"),
+            Self::Surface(id) => (labels::SURFACE_TYPE, id.index(), "SmSurface"),
+            Self::UvCurve(id) => (labels::B_SPLINE_CURVE_TYPE, id.index(), "SmBSplineCurve"),
         }
     }
     fn key(self) -> ObjectKey {
+        // Geometry and topology are distinct objects even when their arena index
+        // and concrete type repeat. Keep physical UV ownership in the key.
+        match self {
+            Self::Surface(id) => return ObjectKey((1_u64 << 63) | u64::from(id.index())),
+            Self::UvCurve(id) => return ObjectKey((3_u64 << 62) | u64::from(id.index())),
+            _ => {}
+        }
         let (ty, index, _) = self.identity();
         ObjectKey(((ty as u64) << 32) | u64::from(index))
     }
@@ -125,6 +152,16 @@ struct Reporter<'a> {
 }
 impl Reporter<'_> {
     fn predicate(&mut self, test: u64, owner: Object, passed: bool) -> Result<bool> {
+        self.value(test, owner, passed, UNDEF_DOUBLE, UNDEF_DOUBLE)
+    }
+    fn value(
+        &mut self,
+        test: u64,
+        owner: Object,
+        passed: bool,
+        tol: f64,
+        value: f64,
+    ) -> Result<bool> {
         if let Some(reports) = self.reports.as_deref_mut() {
             if passed {
                 reports.set_last_add(false);
@@ -138,8 +175,8 @@ impl Reporter<'_> {
                     owner_type: ty,
                     owner_type_string: Some(name),
                     other_type_string: Some("NULL"),
-                    tol3d: UNDEF_DOUBLE,
-                    value: UNDEF_DOUBLE,
+                    tol3d: tol,
+                    value,
                     list_index: 1,
                     ..ReportSpec::default()
                 })?);

@@ -22,10 +22,13 @@
 #include <algorithm>
 #include <array>
 #include <functional>
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <list>
 #include <map>
 #include <memory>
+#include <nurbs.h>
 #include <set>
 #include <sstream>
 #include <stack>
@@ -65,6 +68,12 @@ FIELD(EuOwner, SmEdgeuse, m_pSorLU, SmTopology *)
 FIELD(Ccw, SmEdgeuse, m_pCCW, SmEdgeuse *)
 FIELD(Cw, SmEdgeuse, m_pCW, SmEdgeuse *)
 FIELD(VuOwner, SmVertexuse, m_pSorLUorEU, SmTopology *)
+FIELD(FuOrientation, SmFaceuse, m_eOrientation, SmOrientType)
+FIELD(LuOrientation, SmLoopuse, m_eOrientation, SmOrientType)
+FIELD(FaceTol, SmFace, m_sZoneTol3d, SmZoneTol3d)
+FIELD(EdgeTol, SmEdge, m_sZoneTol3d, SmZoneTol3d)
+FIELD(VertexTol, SmVertex, m_sZoneTol3d, SmZoneTol3d)
+FIELD(RootTol, SmBrep, m_sThisZoneTol3d, SmZoneTol3d)
 #undef FIELD
 template <class Tag, class T> static decltype(auto) field(T *p) { return p->*access(Tag{}); }
 struct EmptyEdge final : SmEdge {
@@ -123,10 +132,13 @@ static void record(std::map<const void *, unsigned long long> &keys, T *p, unsig
 }
 int main(int argc, char **argv) {
     try {
-        if (argc < 2 || argc > 4)
+        std::cout << std::setprecision(17);
+        if (argc < 2 || argc > 5)
             throw std::runtime_error("defect [selection] [second-defect]");
         const std::string defect = argv[1], selection = argc > 2 ? argv[2] : "zero",
                           second = argc > 3 ? argv[3] : "none";
+        const std::string mode = argc > 4 ? argv[4] : "prefix";
+        const bool raw = mode == "raw_fix" || mode == "raw_check";
         SmContext context;
         SmBrepConstructor builder;
         auto b = builder.StartBrep(context);
@@ -147,8 +159,38 @@ int main(int argc, char **argv) {
         for (size_t i = 0; i < 3; ++i) {
             if (!builder.StartEdge(SM_OT_SAME, nullptr, vertices[i], vertices[(i + 1) % 3]))
                 throw std::runtime_error("edge");
-            require(builder.SetEdgeCurve(
-                new (&context) SmLine(points[i], points[(i + 1) % 3], 3, &context), FALSE));
+            if (i == 0 && defect.starts_with("reverse_")) {
+                gw_CPOINT cp[5];
+                double u[7] = {0, 0, .25, .5, .75, 1, 1};
+                for (int j = 0; j < 5; ++j) {
+                    cp[j].x = j / 4.;
+                    cp[j].y = cp[j].z = 0;
+                    cp[j].w = -std::numeric_limits<double>::max();
+                }
+                cp[2].x = -1.;
+                cp[1].x = (defect == "reverse_back" ? -.5 : 1.);
+                cp[3].x = (defect == "reverse_front" ? .5 : 2.);
+                if (defect == "reverse_2d")
+                    for (auto &p : cp)
+                        p.z = std::numeric_limits<double>::max();
+                if (defect == "reverse_rational")
+                    for (int j = 0; j < 5; ++j) {
+                        cp[j].w = j + 2.;
+                        cp[j].x *= cp[j].w;
+                    }
+                if (defect == "reverse_flat")
+                    cp[1].x = cp[0].x;
+                double scale = defect == "reverse_tiny"    ? 1e-8
+                               : defect == "reverse_limit" ? 5e-8
+                               : defect == "reverse_above" ? 1e-7
+                                                           : 1.;
+                for (auto &p : cp)
+                    p.x *= scale;
+                require(builder.SetEdgeCurve(
+                    new (&context) SmBSplineCurve(3, 4, 6, 1, cp, u, &context), FALSE));
+            } else
+                require(builder.SetEdgeCurve(
+                    new (&context) SmLine(points[i], points[(i + 1) % 3], 3, &context), FALSE));
             require(builder.SetLimits(SmVertexNode(0.), SmVertexNode(1.)));
             require(builder.EndEdge());
         }
@@ -179,6 +221,7 @@ int main(int argc, char **argv) {
         record(keys, fu, 0);
         record(keys, fu->GetMate(), 1);
         record(keys, loop, 0);
+        keys[f->GetSurface()] = (1ULL << 63);
         record(keys, lu, 0);
         record(keys, lu->GetOtherLoopuse(), 1);
         unsigned use_index = 0, vertexuse_index = 0;
@@ -195,7 +238,7 @@ int main(int argc, char **argv) {
             record(keys, vs[i], i);
         Restore restore;
         auto apply = [&](const std::string &name) {
-            if (name == "none" || name == "edge_no_uses")
+            if (name == "none" || name == "edge_no_uses" || name.starts_with("reverse_"))
                 return;
             if (name == "no_infinite_region")
                 restore.clear(field<Infinite>(b));
@@ -248,6 +291,33 @@ int main(int argc, char **argv) {
             else if (name == "loop_bad_ring") {
                 auto other = first->GetCCWEdgeuse();
                 restore.assign(field<Ccw>(other), other);
+            } else if (name == "fu_wrong_orientation")
+                field<FuOrientation>(fu) = SM_OT_OPPOSITE;
+            else if (name == "mate_wrong_orientation")
+                field<FuOrientation>(fu->GetMate()) = SM_OT_SAME;
+            else if (name == "lu_wrong_orientation")
+                field<LuOrientation>(lu) = SM_OT_OPPOSITE;
+            else if (name == "mate_lu_wrong_orientation")
+                field<LuOrientation>(lu->GetOtherLoopuse()) = SM_OT_OPPOSITE;
+            else if (name == "face_low_tolerance")
+                field<FaceTol>(f) = .000001;
+            else if (name == "face_high_tolerance")
+                field<FaceTol>(f) = .1;
+            else if (name == "edge_low_tolerance")
+                field<EdgeTol>(edges[0]) = 0.;
+            else if (name == "edge_high_tolerance")
+                field<EdgeTol>(edges[0]) = .1;
+            else if (name == "vertex_low_tolerance")
+                field<VertexTol>(vs[0]) = 0.;
+            else if (name == "vertex_high_tolerance")
+                field<VertexTol>(vs[0]) = .1;
+            else if (name == "root_zero_tolerance")
+                field<RootTol>(b) = 0.;
+            else if (name == "surface_no_owner") {
+                auto surface = f->GetSurface();
+                auto old = surface->GetOwner();
+                restore.actions.emplace_back([surface, old] { surface->SetOwner(old); });
+                surface->SetOwner(nullptr);
             } else
                 throw std::runtime_error("unknown defect");
         };
@@ -260,9 +330,16 @@ int main(int argc, char **argv) {
                      : selection == "two" ? SM_LEVEL_2
                                           : SM_LEVEL_0;
         auto target = selection == "no_reports" ? nullptr : &reports;
-        auto status = b->ValidatePointers(target, level,
-                                          selection == "given" ? &requested : nullptr, SM_NO_WALK);
-        if (selection == "repeat")
+        int reversal = -1;
+        auto status =
+            raw ? SM_SUCCESS
+                : b->ValidatePointers(target, level, selection == "given" ? &requested : nullptr,
+                                      SM_NO_WALK);
+        if (raw)
+            reversal = N_CrvIsNotReversed(
+                static_cast<SmBSplineCurve *>(edges[0]->GetCurve())->GetOrCreateGwNurbPointer(),
+                mode == "raw_fix");
+        if (!raw && selection == "repeat")
             status = b->ValidatePointers(target, level, nullptr, SM_NO_WALK);
         std::cout << "{\"status\":" << status
                   << ",\"last_add\":" << (reports.GetLastAdd() ? "true" : "false")
@@ -277,9 +354,31 @@ int main(int argc, char **argv) {
             quote(r->m_pName);
             std::cout << ',';
             quote(r->m_pMessage);
-            std::cout << ']';
+            std::cout << ',' << r->m_sTol3d << ',' << r->m_dValue << ']';
         }
-        std::cout << "]}\n";
+        std::cout << "]";
+        if (argc == 5) {
+            auto curve = static_cast<SmBSplineCurve *>(edges[0]->GetCurve());
+            std::cout << ",\"control_points\":";
+            if (!curve || !curve->GetGwNurbPointer())
+                std::cout << "null";
+            else {
+                ULONG n = 0;
+                double *data = nullptr;
+                require(curve->GetControlPointsPointer(n, data));
+                std::cout << '[';
+                for (ULONG i = 0; i < n; ++i) {
+                    if (i)
+                        std::cout << ',';
+                    std::cout << '[' << data[4 * i] << ',' << data[4 * i + 1] << ','
+                              << data[4 * i + 2] << ',' << data[4 * i + 3] << ']';
+                }
+                std::cout << ']';
+            }
+        }
+        if (raw)
+            std::cout << ",\"reversal_mask\":" << reversal;
+        std::cout << "}\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';

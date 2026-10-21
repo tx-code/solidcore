@@ -10,9 +10,10 @@ source semantics, numerical/ownership contracts and actual failure behavior.
 STEP model-import milestones belong in solidcore: successful source inspection
 or kernel test counts cannot replace actual complete Rust BRep imports. Connect
 the maintained source pipeline to the Rust builder before unrelated kernel work.
-There is currently no native viewer implementation in this Rust repository.
-The requested standalone viewer must use wgpu and support CLI file launch while
-retaining the maintained progress/HUD, rendering and selection/measurement goals.
+An initial standalone wgpu viewer now lives in `crates/solidcore-viewer` and
+supports CLI file launch, progress/HUD and derived planar display over an actual
+native candidate. Broader geometry, selection and measurements remain required;
+this initial display does not establish complete import or workbench parity.
 
 ## Authoritative source and evidence
 
@@ -217,3 +218,19 @@ arrays and explicit safe Rust output-alias selectors. Native reset-alias invalid
 reads remain checked errors with the reset state retained. Root coincidence,
 general projection and the rest of the full SDK/import/binding/viewer ledger
 remain required implementation work; batch topology parity is not completion.
+
+The first owning [native STEP bridge](../crates/solidcore-step-native/README.md)
+now builds source-bound planar candidates and certifies the explicitly qualified
+single affine face. The opt-in general route constructs supported original curve
+and receiver definitions through the complete typed source pipeline, retaining
+unit/parameter/loop/chart-cut receipts. Native validation and general final
+qualification remain separate gates; a construction checkpoint is not an accepted
+real-model import. Native cone/cylinder/torus kinds are retained polymorphically,
+but their missing concrete validity and remaining query dispatches still refuse.
+
+Owner-scoped ray and coincidence queries now reuse the original algorithms with
+actual typed topology tolerance/cache access. This resolves specific missing
+owner-context dependencies without replacing tests with stored-region labels,
+clearing geometry owners, or applying a default model tolerance. Focused native
+tests and selected SDK comparisons qualify their stated operations only; all
+remaining ledger entries and the real-model milestone remain active.

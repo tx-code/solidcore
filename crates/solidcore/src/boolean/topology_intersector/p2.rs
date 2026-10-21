@@ -53,6 +53,11 @@
 //! - **Deleted curves.** `IntersectTopology` and `IntersectInsertRelate` return the
 //!   curve handles deleted (by `SplitIntersectingProtoEdges`, the resolution, the
 //!   imprint and the manager's destructor), as [`p1`](super::p1) does.
+//! - **A failed imprint** (SolidCraft fix, tangency-labs/smlib af8db37, UB-242).
+//!   Upstream's `IntersectInsertRelate` reports a failure of `ImprintIntersections`
+//!   and then overwrites its status with that of `SetRelationships`, so the boolean
+//!   goes on with both B-reps half imprinted (upstream: reads of freed vertex uses).
+//!   The port deletes the manager and returns the imprint's error.
 //! - **Statuses upstream ignores** (`SmBrep` edits whose status is unchecked,
 //!   `RemoveRelationship` in `DeleteFaces` / `FixGaps`, bounding boxes, `DropPoint`,
 //!   `SimpleCoincidenceChecker`, `CalculateUVDomainFromUVTrimCurves`, `Relate` in
@@ -151,6 +156,14 @@ pub const MAX_EDGE_LIST: usize = 1 << 16;
 /// The `SmVertex` walks of this part, on top of [`IntersectorBrep`]
 /// (`SmEdge::GetFaces` is [`ProtoTopology::edge_faces`](crate::topology::proto_topology::p1::ProtoTopology::edge_faces)).
 pub trait IntersectorBrepP2<O>: IntersectorBrep<O> {
+    /// Release unconsumed temporary curves from the adapter's owning geometry
+    /// store. These handles come from the proto-definition destructors, including
+    /// work completed before a later imprint failed. Borrowed edge/trim geometry
+    /// must not be deleted; a slot already transferred or released is a no-op.
+    /// This destructor operation is infallible so it cannot replace the original
+    /// modeling error. The intersector supplies unique handles in first-use order.
+    fn release_temporary_curves(&mut self, curves: &[O]);
+
     /// `SmVertex::GetEdges(rEdges)` (`topology::vertex::edges` with no face filter).
     ///
     /// # Errors
@@ -1181,15 +1194,16 @@ impl<O: ClassObject + SolutionObject + Ord> TopologyIntersector<O> {
 
     /// `IntersectInsertRelate()`: makes the proto topology manager (capture distance
     /// 0.01, at least 2000 times the approximation tolerance), intersects the
-    /// topology, resolves and imprints the intersections (a failing imprint only
-    /// warns), sets the relationships and deletes the manager. `ti` is the handle the
-    /// manager stores for this intersector. Returns the curve handles deleted.
+    /// topology, resolves and imprints the intersections, sets the relationships and
+    /// deletes the manager. `ti` is the handle the manager stores for this
+    /// intersector. Returns the curve handles deleted.
     ///
     /// # Errors
     ///
     /// Those of the manager's construction, `IntersectTopology` and
     /// `ResolveIntersections` (the manager then stays installed, as upstream leaks
-    /// it); [`SolidError::Unported`] / [`SolidError::InvalidInput`] from the imprint;
+    /// it); every error of the imprint, after deleting the manager (SolidCraft fix
+    /// af8db37: upstream goes on with the half-imprinted B-reps);
     /// [`SolidError::InvalidInput`] without both B-reps, and when the manager's
     /// destructor would read a freed proto edge (UB-175; the manager is still
     /// destroyed and every other effect has happened).
@@ -1228,11 +1242,17 @@ impl<O: ClassObject + SolutionObject + Ord> TopologyIntersector<O> {
         // Resolve Intersections; if that didn't work, quit before we mess up the Breps.
         deleted.extend(self.resolve_intersections(k, brep)?);
 
-        // Imprint Intersections, now we'll modify the Breps (SE_MSG: a problem only
-        // informs the public)
-        if let Some(d) = ignore_soft(self.imprint_intersections(k, brep))? {
-            deleted.extend(d);
-        }
+        // Imprint Intersections, now we'll modify the Breps. If that didn't work, the
+        // Breps are partly imprinted and no longer consistent: stop here, so that no
+        // caller goes on to relate, classify or measure them (SolidCraft change,
+        // tangency-labs/smlib af8db37; upstream only warns and overwrites the status).
+        let imprinted = self.imprint_intersections_into(k, brep, &mut deleted);
+        finish_imprint_stage(
+            &mut self.proto_topo_mgr,
+            &mut deleted,
+            imprinted,
+            |curves| brep.release_temporary_curves(curves),
+        )?;
 
         // Set relationship maps.
         let status = self.set_relationships(k, brep);
@@ -2213,6 +2233,32 @@ impl<O: ClassObject + SolutionObject + Ord> TopologyIntersector<O> {
     }
 }
 
+/// Complete the imprint stage before any relationships can be established.
+/// The fixed SDK's `SmProtoTopology.cpp::~SmProtoTopologyManager` and
+/// `~SmEdgeDefinition` destroy curves that were not consumed by topology.
+/// Rust's manager returns opaque handles instead: dropping that list does not
+/// free the adapter's actual curves. Combine all prior destruction receipts with
+/// the manager's on failure, while keeping the imprint's original status.
+fn finish_imprint_stage<O: ClassObject + Ord>(
+    manager: &mut Option<ProtoTopologyManager<O>>,
+    deleted: &mut Vec<O>,
+    status: Result<()>,
+    release: impl FnOnce(&[O]),
+) -> Result<()> {
+    if let Err(error) = status {
+        if let Some(mut owned) = manager.take() {
+            deleted.extend(owned.destroy());
+        }
+        // Source traversal determines release order; the set only removes repeated
+        // identities (a transferred/previously destroyed slot is also harmless).
+        let mut seen = std::collections::BTreeSet::new();
+        deleted.retain(|curve| seen.insert(*curve));
+        release(deleted);
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Whether `~SmProtoTopologyManager` reads freed memory (UB-175): it deletes the listed
 /// proto edges before the listed proto vertices, each `~SmProtoEdge` unlists itself
 /// once from its start vertex and once from a different end vertex, and each
@@ -2259,4 +2305,149 @@ fn teardown_reads_freed<O: ClassObject>(mgr: &ProtoTopologyManager<O>) -> bool {
     lists
         .iter()
         .any(|(_, l)| l.iter().any(|e| freed.contains(e)))
+}
+
+#[cfg(test)]
+mod imprint_cleanup_tests {
+    use super::*;
+    use crate::curve::line::Line;
+    use crate::geom::extent1d::Extent1d;
+    use crate::math::Vec3;
+    use crate::topology::proto_topology::p1::EdgeDefinition;
+    use crate::topology::Brep;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct H(u8, usize);
+
+    impl ClassObject for H {
+        fn class_kind(&self) -> ClassObjectKind {
+            if self.0 == 0 {
+                ClassObjectKind::Curve
+            } else if self.0 == 1 {
+                ClassObjectKind::Edge
+            } else {
+                ClassObjectKind::Other
+            }
+        }
+    }
+
+    fn manager(kernel: &Kernel) -> ProtoTopologyManager<H> {
+        let a = Brep::new();
+        let b = Brep::new();
+        ProtoTopologyManager::new(
+            kernel,
+            (H(2, 0), &a),
+            (H(2, 1), &b),
+            H(2, 2),
+            1e-5,
+            0.01,
+            1e-5,
+        )
+        .unwrap()
+    }
+
+    fn curve_store() -> Vec<Option<Curve>> {
+        (0_u32..7)
+            .map(|i| {
+                Some(Curve::from(Line::from_points(
+                    Vec3::new(f64::from(i), 0., 0.),
+                    Vec3::new(f64::from(i) + 1., 0., 0.),
+                    3,
+                )))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn failed_imprint_releases_actual_prior_and_manager_curves_in_first_use_order() {
+        for error in [
+            SolidError::sm_err("test::ordinary_imprint_failure"),
+            SolidError::invalid_input("test::imprint", "injected failure"),
+            SolidError::unported("test::imprint", "test.unit"),
+        ] {
+            let kernel = Kernel::default();
+            let mut store = curve_store();
+            // One curve has already transferred to another owning value; it must
+            // survive the temporary store cleanup. This is actual Curve storage,
+            // not a counter that pretends opaque handles free their geometry.
+            let transferred = store[6].take().unwrap();
+            let mut mgr = manager(&kernel);
+            let a = mgr.new_proto_vertex(Vec3::ZERO, 1e-5).unwrap();
+            let b = mgr.new_proto_vertex(Vec3::X, 1e-5).unwrap();
+            mgr.add_proto_vertex(a);
+            mgr.add_proto_vertex(b);
+            let pe = mgr
+                .new_proto_edge(&kernel, Some(a), Some(b), Extent1d::from_min_max(0., 1.))
+                .unwrap();
+            mgr.add_proto_edge(pe);
+            let failed = mgr
+                .insert_edge_definition(EdgeDefinition::new(
+                    Some(H(0, 2)),
+                    Extent1d::from_min_max(0., 1.),
+                    H(1, 0),
+                    H(1, 1),
+                    1e-5,
+                    Some(H(0, 0)),
+                    None,
+                    Some(pe),
+                ))
+                .unwrap();
+            let remaining = mgr
+                .insert_edge_definition(EdgeDefinition::new(
+                    Some(H(0, 4)),
+                    Extent1d::from_min_max(0., 1.),
+                    H(1, 0),
+                    H(1, 1),
+                    1e-5,
+                    Some(H(0, 1)),
+                    Some(H(0, 3)),
+                    Some(pe),
+                ))
+                .unwrap();
+            mgr.proto_edge_mut(pe)
+                .unwrap()
+                .edge_definitions_mut()
+                .extend([failed, remaining]);
+            let mut deleted = vec![H(0, 5)]; // completed earlier topology/resolve work
+            mgr.proto_edge_mut(pe)
+                .unwrap()
+                .remove_edge_definition(failed)
+                .unwrap();
+            deleted.extend(mgr.delete_edge_definition(failed)); // failed imprint's own receipt
+            deleted.push(H(0, 2)); // repeated cleanup identity must not delete twice
+            let mut manager = Some(mgr);
+            let mut released = Vec::new();
+            let result =
+                finish_imprint_stage(&mut manager, &mut deleted, Err(error.clone()), |curves| {
+                    for &curve in curves {
+                        assert_eq!(curve.0, 0);
+                        released.push(curve);
+                        assert!(store[curve.1].take().is_some());
+                    }
+                });
+            assert_eq!(result.unwrap_err(), error);
+            assert!(manager.is_none());
+            let expected = [H(0, 5), H(0, 2), H(0, 0), H(0, 4), H(0, 1), H(0, 3)];
+            assert_eq!(released, expected);
+            assert_eq!(deleted, expected);
+            assert_eq!(store.iter().filter(|slot| slot.is_some()).count(), 0);
+            assert_eq!(
+                transferred.evaluate_point(&kernel, 0.5).unwrap(),
+                Vec3::new(6.5, 0., 0.)
+            );
+        }
+    }
+
+    #[test]
+    fn successful_imprint_keeps_the_manager_and_normal_destruction_receipts() {
+        let kernel = Kernel::default();
+        let mut manager = Some(manager(&kernel));
+        let mut deleted = vec![H(0, 5), H(0, 2), H(0, 5)];
+        let original = deleted.clone();
+        let mut released = false;
+        finish_imprint_stage(&mut manager, &mut deleted, Ok(()), |_| released = true).unwrap();
+        assert!(manager.is_some());
+        assert!(!released);
+        assert_eq!(deleted, original);
+    }
 }

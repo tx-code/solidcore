@@ -111,8 +111,8 @@ pub struct KernelManifoldIntersector {
     /// `m_bTopologyDeleted`; dependency editing stages update this same flag.
     pub topology_deleted: bool,
     intersector: TopologyIntersector<H>,
-    curves: Vec<crate::curve::curve::Curve>,
-    extra_curves: Vec<crate::curve::curve::Curve>,
+    curves: Vec<Option<crate::curve::curve::Curve>>,
+    extra_curves: Vec<Option<crate::curve::curve::Curve>>,
     namespace: u32,
     subset: Option<BTreeSet<ObjectRef>>,
 }

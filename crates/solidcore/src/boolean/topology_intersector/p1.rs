@@ -1702,26 +1702,48 @@ impl<O: ClassObject + SolutionObject + Ord> TopologyIntersector<O> {
         k: &mut Kernel,
         brep: &mut impl IntersectorBrep<O>,
     ) -> Result<Vec<O>> {
+        let mut deleted = Vec::new();
+        self.imprint_intersections_into(k, brep, &mut deleted)?;
+        Ok(deleted)
+    }
+
+    /// Keep destruction receipts in the caller even when an imprint fails.
+    /// `IntersectInsertRelate` must release these handles before propagating the
+    /// original error; a `Result<Vec<O>>` alone loses its partial list on failure.
+    pub(super) fn imprint_intersections_into(
+        &mut self,
+        k: &mut Kernel,
+        brep: &mut impl IntersectorBrep<O>,
+        deleted: &mut Vec<O>,
+    ) -> Result<()> {
         // Don't SER on each imprint: if one fails, keep pushing on.
         let mut ret: Result<()> = Ok(());
-        let mut deleted = Vec::new();
-
         let this_brep = self.brep.ok_or(dangling("no B-rep"))?;
         let other_brep = self.other.ok_or(dangling("no other B-rep"))?;
         let old_edit1 = brep.set_editing_enabled(this_brep, true)?;
-        let old_edit2 = brep.set_editing_enabled(other_brep, true)?;
+        let old_edit2 = match brep.set_editing_enabled(other_brep, true) {
+            Ok(previous) => previous,
+            Err(error) => {
+                let _ = brep.set_editing_enabled(this_brep, old_edit1);
+                return Err(error);
+            }
+        };
         let old_doing_boolean = k.context.doing_boolean();
         k.context.set_doing_boolean(true);
 
-        let result = self.imprint_body(k, brep, &mut ret, &mut deleted);
+        let result = self.imprint_body(k, brep, &mut ret, deleted);
 
-        // SmTemporaryChangeValue destructors
+        // SmTemporaryChangeValue destructors: attempt both operand restorations,
+        // even if one fails. Cleanup must not overwrite the original imprint
+        // error or leave the other valid operand's flag enabled by this scope.
         k.context.set_doing_boolean(old_doing_boolean);
-        brep.set_editing_enabled(other_brep, old_edit2)?;
-        brep.set_editing_enabled(this_brep, old_edit1)?;
-
+        let restore_other = brep.set_editing_enabled(other_brep, old_edit2);
+        let restore_this = brep.set_editing_enabled(this_brep, old_edit1);
         result?;
-        ret.map(|()| deleted)
+        ret?;
+        restore_other?;
+        restore_this?;
+        Ok(())
     }
 
     /// The body of [`TopologyIntersector::imprint_intersections`] between the temporary

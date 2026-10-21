@@ -562,7 +562,14 @@ fn blocks(i: &Inputs) -> Result<Vec<f64>, HarnessError> {
 fn export(i: &Inputs) -> Result<Vec<f64>, HarnessError> {
     let pa = path_of(Some(&i.brep_a))?;
     let pb = path_of(i.brep_b.as_ref())?;
-    ffi::eval(Op::Export, [&pa, &pb], &blocks(i)?).map_err(|e| harness(format!("c++ export: {e}")))
+    let block = blocks(i)?;
+    crate::export_memo::export(
+        "boolean_topology_intersector_p1",
+        &[&pa, &pb],
+        &block,
+        || ffi::eval(Op::Export, [&pa, &pb], &block),
+    )
+    .map_err(|e| harness(format!("c++ export: {e}")))
 }
 
 /// A build failure as an operation error.
@@ -765,8 +772,8 @@ fn vertexuse_ref(vu: VertexuseId) -> ObjectRef {
 /// 7).
 pub(crate) struct Two {
     breps: [Option<Brep>; 2],
-    curves: Vec<SmCurve>,
-    extra: Vec<SmCurve>,
+    curves: Vec<Option<SmCurve>>,
+    extra: Vec<Option<SmCurve>>,
     env: [NotifyEnv; 2],
     /// Each B-rep's cache (`SmBrep::GetBrepCache`), built on first use as the C++
     /// topology solver builds it on demand.
@@ -908,13 +915,13 @@ impl ClassGeometry<H> for Two {
     fn curve(&self, o: H) -> Option<&SmCurve> {
         match o.kind {
             K_EDGE_CURVE => self.brep(o)?.edge(eid(o)).ok()?.curve.as_ref(),
-            K_CURVE => self.curves.get(o.i as usize),
+            K_CURVE => self.curves.get(o.i as usize)?.as_ref(),
             K_TRIM_CURVE => {
                 eu1::uv_trim_curve(self.brep(o)?, EdgeuseId::from_index(o.i))
                     .ok()?
                     .0
             }
-            K_EXTRA => self.extra.get(o.i as usize),
+            K_EXTRA => self.extra.get(o.i as usize)?.as_ref(),
             _ => None,
         }
     }
@@ -953,8 +960,8 @@ impl ProtoGeometry<H> for Two {
     fn curve_mut(&mut self, o: H) -> Option<&mut SmCurve> {
         match o.kind {
             K_EDGE_CURVE => self.brep_mut(o)?.edge_mut(eid(o)).ok()?.curve.as_mut(),
-            K_CURVE => self.curves.get_mut(o.i as usize),
-            K_EXTRA => self.extra.get_mut(o.i as usize),
+            K_CURVE => self.curves.get_mut(o.i as usize)?.as_mut(),
+            K_EXTRA => self.extra.get_mut(o.i as usize)?.as_mut(),
             _ => None,
         }
     }
@@ -1051,7 +1058,7 @@ impl ProtoBrep<H> for Two {
     fn insert_curve(&mut self, curve: SmCurve) -> Option<H> {
         let i = u32::try_from(self.extra.len()).ok()?;
         let hh = curve_h(2, K_EXTRA, i, &curve);
-        self.extra.push(curve);
+        self.extra.push(Some(curve));
         Some(hh)
     }
     fn vertex_common_edges(&self, v1: H, v2: H) -> solidcore::Result<Vec<H>> {
@@ -1953,7 +1960,13 @@ fn resolve_prefix(
 /// Resolves every op of `ops` against the imported B-reps; `Err(name)` names the
 /// first op that cannot be run.
 #[allow(clippy::too_many_lines)]
-fn resolve(k: &Kernel, ops: &[OpIn], c: &Counts, two: &Two, start: Start) -> Result<Vec<ROp>, String> {
+fn resolve(
+    k: &Kernel,
+    ops: &[OpIn],
+    c: &Counts,
+    two: &Two,
+    start: Start,
+) -> Result<Vec<ROp>, String> {
     let i_ctor = start.ctor;
     let mut approx = start.approx;
     let mut out = Vec::new();
@@ -3045,7 +3058,7 @@ fn run_rust_script(i: &Inputs, p: Prepared) -> Result<(Vec<f64>, Vec<usize>), Fa
                     let curve = rust_curve(c)?;
                     let idx = u32::try_from(two.curves.len()).map_err(|_| harness("store"))?;
                     let h = curve_h(2, K_CURVE, idx, &curve);
-                    two.curves.push(curve);
+                    two.curves.push(Some(curve));
                     Ok(h)
                 };
                 for sc in curves {
@@ -3700,6 +3713,22 @@ fn run_part2_op(
 }
 
 impl IntersectorBrepP2<H> for Two {
+    fn release_temporary_curves(&mut self, handles: &[H]) {
+        for handle in handles {
+            if handle.b != 2 {
+                continue;
+            }
+            let store = match handle.kind {
+                K_CURVE => &mut self.curves,
+                K_EXTRA => &mut self.extra,
+                _ => continue,
+            };
+            if let Some(slot) = store.get_mut(handle.i as usize) {
+                slot.take();
+            }
+        }
+    }
+
     fn brep_faces(&self, brep: H) -> solidcore::Result<Vec<H>> {
         let b = self.brep_r(brep)?;
         Ok(bp1::faces(b, None)?

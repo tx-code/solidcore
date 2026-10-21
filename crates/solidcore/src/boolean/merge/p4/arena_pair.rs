@@ -165,8 +165,8 @@ pub(super) const fn brep_h(b: i8) -> H {
 #[derive(Debug)]
 pub(super) struct ArenaPair<'a> {
     breps: [Option<&'a mut Brep>; 2],
-    curves: &'a mut Vec<SmCurve>,
-    extra: &'a mut Vec<SmCurve>,
+    curves: &'a mut Vec<Option<SmCurve>>,
+    extra: &'a mut Vec<Option<SmCurve>>,
     records: &'a mut BTreeMap<ObjectKey, Topology>,
     attributes: &'a mut AttributeStore,
     primary_context: &'a mut Context,
@@ -191,8 +191,8 @@ impl ArenaPair<'_> {
     pub(super) fn new<'a>(
         primary: &'a mut Brep,
         other: Option<&'a mut Brep>,
-        curves: &'a mut Vec<SmCurve>,
-        extra: &'a mut Vec<SmCurve>,
+        curves: &'a mut Vec<Option<SmCurve>>,
+        extra: &'a mut Vec<Option<SmCurve>>,
         records: &'a mut BTreeMap<ObjectKey, Topology>,
         attributes: &'a mut AttributeStore,
         cache_kernels: [Kernel; 2],
@@ -282,13 +282,13 @@ impl ClassGeometry<H> for ArenaPair<'_> {
     fn curve(&self, o: H) -> Option<&SmCurve> {
         match o.kind {
             K_EDGE_CURVE => self.brep(o)?.edge(eid(o)).ok()?.curve.as_ref(),
-            K_CURVE => self.curves.get(o.i as usize),
+            K_CURVE => self.curves.get(o.i as usize)?.as_ref(),
             K_TRIM_CURVE => {
                 eu1::uv_trim_curve(self.brep(o)?, EdgeuseId::from_index(o.i))
                     .ok()?
                     .0
             }
-            K_EXTRA => self.extra.get(o.i as usize),
+            K_EXTRA => self.extra.get(o.i as usize)?.as_ref(),
             _ => None,
         }
     }
@@ -323,8 +323,8 @@ impl ProtoGeometry<H> for ArenaPair<'_> {
     fn curve_mut(&mut self, o: H) -> Option<&mut SmCurve> {
         match o.kind {
             K_EDGE_CURVE => self.brep_mut(o)?.edge_mut(eid(o)).ok()?.curve.as_mut(),
-            K_CURVE => self.curves.get_mut(o.i as usize),
-            K_EXTRA => self.extra.get_mut(o.i as usize),
+            K_CURVE => self.curves.get_mut(o.i as usize)?.as_mut(),
+            K_EXTRA => self.extra.get_mut(o.i as usize)?.as_mut(),
             _ => None,
         }
     }
@@ -421,7 +421,7 @@ impl ProtoBrep<H> for ArenaPair<'_> {
     fn insert_curve(&mut self, curve: SmCurve) -> Option<H> {
         let i = u32::try_from(self.extra.len()).ok()?;
         let hh = curve_h(2, K_EXTRA, i, &curve);
-        self.extra.push(curve);
+        self.extra.push(Some(curve));
         Some(hh)
     }
     fn vertex_common_edges(&self, v1: H, v2: H) -> crate::Result<Vec<H>> {
@@ -1072,6 +1072,26 @@ impl TopologyObjects<H> for ArenaPair<'_> {
 }
 
 impl IntersectorBrepP2<H> for ArenaPair<'_> {
+    fn release_temporary_curves(&mut self, handles: &[H]) {
+        // SmProtoTopologyManager::Destroy deletes temporary geometry. A generic
+        // handle list alone does not release its value-owned Rust store. Leave
+        // tombstones so surviving handles never shift to a different curve;
+        // borrowed edge/trim geometry is owned by the BRep and must survive.
+        for handle in handles {
+            if handle.b != 2 {
+                continue;
+            }
+            let store = match handle.kind {
+                K_CURVE => &mut self.curves,
+                K_EXTRA => &mut self.extra,
+                _ => continue,
+            };
+            if let Some(slot) = store.get_mut(handle.i as usize) {
+                slot.take();
+            }
+        }
+    }
+
     fn brep_faces(&self, brep: H) -> crate::Result<Vec<H>> {
         let b = self.brep_r(brep)?;
         Ok(bp1::faces(b, None)?
@@ -1255,5 +1275,71 @@ pub(super) fn deleted_edge(h: H) -> crate::Result<EdgeId> {
         Ok(eid(h))
     } else {
         Err(invalid("deleted edge is not a primary edge"))
+    }
+}
+
+#[cfg(test)]
+mod temporary_curve_tests {
+    use super::*;
+    use crate::curve::line::Line;
+    use crate::math::Vec3;
+
+    #[test]
+    fn releasing_owned_curve_slots_never_shifts_ids_or_deletes_brep_geometry() {
+        let line = || SmCurve::from(Line::from_points(Vec3::ZERO, Vec3::X, 3));
+        let mut primary = Brep::new();
+        let a = primary.add_vertex(Vec3::ZERO).unwrap();
+        let b = primary.add_vertex(Vec3::X).unwrap();
+        let edge = primary.add_edge(a, b).unwrap();
+        primary.edge_mut(edge).unwrap().curve = Some(line());
+        let mut curves = vec![Some(line()), Some(line())];
+        let mut extra = vec![Some(line()), None];
+        let mut records = BTreeMap::new();
+        let mut attributes = AttributeStore::default();
+        let mut context = Context::default();
+        let mut pair = ArenaPair::new(
+            &mut primary,
+            None,
+            &mut curves,
+            &mut extra,
+            &mut records,
+            &mut attributes,
+            [Kernel::default(), Kernel::default()],
+            &mut context,
+            None,
+            4,
+        );
+        let survivor = hd(2, K_CURVE, 1);
+        let borrowed = hd(0, K_EDGE_CURVE, edge.index());
+        let original = ClassGeometry::curve(&pair, survivor)
+            .unwrap()
+            .evaluate_point(&Kernel::default(), 0.5)
+            .unwrap();
+        pair.release_temporary_curves(&[
+            hd(2, K_CURVE, 0),
+            hd(2, K_EXTRA, 0),
+            hd(2, K_CURVE, 0),
+            hd(2, K_EXTRA, 1),
+            hd(2, K_CURVE, u32::MAX),
+            borrowed,
+            hd(0, K_CURVE, 1),
+            hd(2, K_TRIM_CURVE, 0),
+        ]);
+        assert!(ClassGeometry::curve(&pair, hd(2, K_CURVE, 0)).is_none());
+        assert!(ClassGeometry::curve(&pair, hd(2, K_EXTRA, 0)).is_none());
+        assert!(ClassGeometry::curve(&pair, borrowed).is_some());
+        let retained = ClassGeometry::curve(&pair, survivor).unwrap();
+        assert_eq!(
+            retained.evaluate_point(&Kernel::default(), 0.5).unwrap(),
+            original
+        );
+        pair.release_temporary_curves(&[hd(2, K_CURVE, 0), hd(2, K_EXTRA, 0)]);
+        assert!(ClassGeometry::curve(&pair, survivor).is_some());
+        drop(pair);
+        assert_eq!(curves.len(), 2);
+        assert_eq!(extra.len(), 2);
+        assert_eq!(curves.iter().filter(|slot| slot.is_some()).count(), 1);
+        assert_eq!(extra.iter().filter(|slot| slot.is_some()).count(), 0);
+        assert!(primary.edge(edge).unwrap().curve.is_some());
     }
 }

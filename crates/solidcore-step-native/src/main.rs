@@ -12,6 +12,7 @@ struct Arguments {
     ap214: bool,
     development_unit_policy: DevelopmentUnitPolicy,
     quality: Option<PathBuf>,
+    material_accuracy: Option<f64>,
     carrier: solidcore_step::InspectOptions,
 }
 
@@ -29,13 +30,14 @@ fn parse_arguments(
         ap214: false,
         development_unit_policy: DevelopmentUnitPolicy::Disabled,
         quality: None,
+        material_accuracy: None,
         carrier: solidcore_step::InspectOptions::default(),
     };
     let mut fixture = false;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--help" | "-h") => {
-                println!("step-native-import --fixture-limits FILE [--general-development --quality JSON] [--interop] [--ap214-unregistered-as-2010] [--opaque-header-name] [--opaque-data-strings] [--level1-as-corrected-encoding] [--development-ap214-angle-dimensions]\n\nConstruction checkpoints only; accepted_import remains false. General mode runs complete typed source checks, never the P0 rule subset. Its quality JSON must explicitly provide all budgets in mm. Input and work limits selected by --fixture-limits are development values, not production defaults. Carrier exceptions require explicit general + interoperability mode. Opaque strings retain bytes with unestablished text; their typed uses still require semantic approval. Level-1 interpretation remains an unverified assumption, never a corrected declaration. The independent development angle-unit policy only continues after source-reference, dimension and conversion proofs; original syntax remains unverified and results are separate from strict qualification.");
+                println!("step-native-import --fixture-limits FILE [--general-development --quality JSON] [--interop] [--ap214-unregistered-as-2010] [--opaque-header-name] [--opaque-data-strings] [--level1-as-corrected-encoding] [--development-ap214-angle-dimensions] [--measure-material-accuracy VALUE]\n\nConstruction checkpoints only; accepted_import remains false. General mode runs complete typed source checks, never the P0 rule subset. Its quality JSON must explicitly provide all budgets in mm. Input and work limits selected by --fixture-limits are development values, not production defaults. Carrier exceptions require explicit general + interoperability mode. Opaque strings retain bytes with unestablished text; their typed uses still require semantic approval. Level-1 interpretation remains an unverified assumption, never a corrected declaration. The independent development angle-unit policy only continues after source-reference, dimension and conversion proofs; original syntax remains unverified and results are separate from strict qualification. Material integration requires an independent explicit accuracy in [1e-8,1e-4]; numerical measurements do not grant import acceptance.");
                 return Ok(None);
             }
             Some("--fixture-limits") => fixture = true,
@@ -60,6 +62,22 @@ fn parse_arguments(
             }
             Some("--quality") => {
                 result.quality = Some(args.next().ok_or("--quality requires a JSON file")?.into());
+            }
+            Some("--measure-material-accuracy") => {
+                let value = args
+                    .next()
+                    .ok_or("--measure-material-accuracy requires a value")?;
+                let value: f64 = value
+                    .to_str()
+                    .ok_or("Accuracy must be numeric ASCII")?
+                    .parse()?;
+                if !value.is_finite() || !(1e-8..=1e-4).contains(&value) {
+                    return Err(
+                        "Material integration accuracy must be finite and within [1e-8,1e-4]"
+                            .into(),
+                    );
+                }
+                result.material_accuracy = Some(value);
             }
             Some(flag) if flag.starts_with('-') => {
                 return Err(format!("Unknown option {flag}; use --help").into())
@@ -90,6 +108,9 @@ fn parse_arguments(
     }
     if result.development_unit_policy != DevelopmentUnitPolicy::Disabled && !result.general {
         return Err("--development-ap214-angle-dimensions requires --general-development and an explicit quality configuration".into());
+    }
+    if result.material_accuracy.is_some() && !result.general {
+        return Err("Material measurements require explicit general mode and quality".into());
     }
     Ok(Some(result))
 }
@@ -174,11 +195,62 @@ fn general(
     )?)
 }
 
+#[cfg(feature = "general-development")]
+fn run_general(
+    raw: &solidcore_step::Outcome,
+    args: &Arguments,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut model = general(raw, args)?
+        .validate_native()?
+        .measure_general_trims()?;
+    if let Some(accuracy) = args.material_accuracy {
+        model = model.measure_general_material(accuracy)?;
+    }
+    let general_report = model.general_report().ok_or("Missing general report")?;
+    let trims = general_report
+        .final_trim_measurements
+        .ok_or("Missing final trim measurements")?;
+    let material = general_report.material_measurements.map(|m| serde_json::json!({
+        "status":"Passed", "requested_relative_accuracy":m.requested_relative_accuracy,
+        "area_mm2":m.area_mm2, "material_volume_mm3":m.material_volume_mm3,
+        "centroid_mm":[m.centroid_mm.x,m.centroid_mm.y,m.centroid_mm.z],
+        "boundary_mm":m.boundary_mm, "evidence":"numerical_observations_not_continuous_error_bounds"
+    }));
+    let unrun = if material.is_some() {
+        vec![
+            "general_continuous_correspondence",
+            "general_development_publication",
+        ]
+    } else {
+        vec![
+            "material_measurements",
+            "general_continuous_correspondence",
+            "general_development_publication",
+        ]
+    };
+    println!(
+        "{}",
+        serde_json::json!({"status":"NativeConstructed","accepted_import":false,
+        "general_development":true,"source_policy":model.source().source_policy(),
+        "development_unit_policy":model.source().development_unit_policy(),
+        "development_unit_receipt":model.source().development_unit_receipt(),
+        "source_sha256":raw.sha256,"carrier_options":raw.options(),
+        "carrier_assumption":raw.carrier_assumption(),
+        "schema_interpretation":model.source().applied_interpretation(),
+        "vertices":model.vertices().len(),"edges":model.edges().len(),"faces":model.faces().len(),
+        "operations":model.operations(),"native_pointer_validation":"Passed","native_deep_validation":"Passed",
+        "final_trim_measurements":{"status":"Passed","maximum_mm":trims.maximum_mm,
+        "samples":trims.samples,"edge_uses":trims.edge_uses,"evidence":"finite_same_parameter_samples_not_a_continuous_bound"},
+        "material_measurements":material,"unrun":unrun,"repair":"None"})
+    );
+    Ok(())
+}
+
 #[cfg(not(feature = "general-development"))]
-fn general(
+fn run_general(
     _raw: &solidcore_step::Outcome,
     _args: &Arguments,
-) -> Result<solidcore_step_native::Candidate, Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error>> {
     Err("General construction requires building with --features cli,general-development".into())
 }
 
@@ -196,29 +268,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // contract; they neither rewrite raw text nor approve opaque typed fields.
     let raw = solidcore_step::inspect_with_options(bytes, limits, args.carrier);
     if args.general {
-        let model = general(&raw, &args)?
-            .validate_native()?
-            .measure_general_trims()?;
-        let general_report = model.general_report().ok_or("Missing general report")?;
-        let trims = general_report
-            .final_trim_measurements
-            .ok_or("Missing final trim measurements")?;
-        println!(
-            "{}",
-            serde_json::json!({"status":"NativeConstructed","accepted_import":false,
-            "general_development":true,"source_policy":model.source().source_policy(),
-            "development_unit_policy":model.source().development_unit_policy(),
-            "development_unit_receipt":model.source().development_unit_receipt(),
-            "source_sha256":raw.sha256,"carrier_options":raw.options(),
-            "carrier_assumption":raw.carrier_assumption(),
-            "schema_interpretation":model.source().applied_interpretation(),
-            "vertices":model.vertices().len(),"edges":model.edges().len(),"faces":model.faces().len(),
-            "operations":model.operations(),"native_pointer_validation":"Passed","native_deep_validation":"Passed",
-            "final_trim_measurements":{"status":"Passed","maximum_mm":trims.maximum_mm,
-            "samples":trims.samples,"edge_uses":trims.edge_uses,"evidence":"finite_same_parameter_samples_not_a_continuous_bound"},
-            "unrun":["material_measurements","general_development_publication"],"repair":"None"})
-        );
-        return Ok(());
+        return run_general(&raw, &args);
     }
     let sem = solidcore_step::semantics::check(
         &raw,
@@ -298,6 +348,37 @@ mod tests {
         );
         assert!(!requested.interop);
         assert_eq!(requested.carrier, InspectOptions::default());
+    }
+
+    #[test]
+    fn material_accuracy_is_explicit_and_cannot_be_clamped_or_selected_in_planar_mode() {
+        let parse = |extra: &[&str], general| {
+            let mut words = vec!["--fixture-limits", "synthetic.step"];
+            if general {
+                words.extend(["--general-development", "--quality", "quality.json"]);
+            }
+            words.extend_from_slice(extra);
+            parse_arguments(words.into_iter().map(Into::into))
+        };
+        assert!(parse(&[], true)
+            .unwrap()
+            .unwrap()
+            .material_accuracy
+            .is_none());
+        for value in ["0.00000001", "0.0000001", "0.0001"] {
+            assert_eq!(
+                parse(&["--measure-material-accuracy", value], true)
+                    .unwrap()
+                    .unwrap()
+                    .material_accuracy,
+                Some(value.parse().unwrap())
+            );
+            assert!(parse(&["--measure-material-accuracy", value], false).is_err());
+        }
+        for value in ["NaN", "inf", "-1", "0", "1e-9", "1e-3"] {
+            assert!(parse(&["--measure-material-accuracy", value], true).is_err());
+        }
+        assert!(parse(&["--measure-material-accuracy"], true).is_err());
     }
 
     #[test]

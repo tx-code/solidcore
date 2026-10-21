@@ -244,3 +244,13 @@ owner-context dependencies without replacing tests with stored-region labels,
 clearing geometry owners, or applying a default model tolerance. Focused native
 tests and selected SDK comparisons qualify their stated operations only; all
 remaining ledger entries and the real-model milestone remain active.
+
+Periodic seam validation now executes actual owning gap, sector and binormal
+queries. Concrete Circle/Ellipse validation and directed point-solver owner
+tolerance dispatch are connected. Shared face integrals preserve independent
+area/volume origins and exact positive knot spans, without tolerance merging.
+The general STEP candidate can obtain complete numerical material observations
+with explicit integration accuracy and refresh all final trims afterwards.
+The public analytic box/cylinder/annular controls exercise these checkpoints;
+continuous general qualification, publication, broader source/topology coverage,
+curved viewer rendering and the remaining SDK/binding/tool ledger are unfinished.

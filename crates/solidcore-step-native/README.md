@@ -144,7 +144,24 @@ remains absent until every use succeeds. These are finite measurements, not a
 continuous bound. A later owner UV query invalidates this receipt before it can
 change derived state; callers must measure the complete result again.
 
-This increment still returns an unpublished **candidate**. Material measurements,
+`measure_general_material(relative_accuracy)` adds numerical tight bounds, area,
+material volume, volume centroid, per-face area centroids and unique target-edge
+lengths. It requires the previous native and trim checkpoints, the retained
+material region and complete source correspondence. The caller supplies a separate
+relative integration control in `[1e-8,1e-4]`, as in the maintained C++ contract;
+no value is inferred from source uncertainty or millimeter budgets. Actual owner
+queries retain lazy state in the candidate, and every final trim is measured again
+after the last consumer. Measurement charges `2*F+E+1`; the final refresh separately
+charges each edge use. All results attach only after the whole consuming call
+succeeds. Revalidation or a later owning UV query invalidates both receipts.
+
+The CLI selects this checkpoint with `--measure-material-accuracy VALUE`. It keeps
+`accepted_import:false` and distinguishes numerical observations from continuous
+error bounds. Public box, explicit-seam cylinder and annular-cylinder tests use
+independent analytic area/volume/centroid truth. They do not qualify arbitrary
+general sources or production tolerances.
+
+This increment still returns an unpublished **candidate**. General qualification,
 complete continuous correspondence qualification,
 application cancellation/publication, and several kernel back-edges remain to be
 migrated. Concrete cone/cylinder/torus validators execute their actual rules and

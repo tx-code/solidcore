@@ -8,12 +8,16 @@
 //! typed snapshot; source topology is never recovered from a display mesh.
 
 mod geometry;
+mod material_measurement;
 mod surface;
 mod trim_measurement;
 
 use super::{Candidate, Error, Execution, GeneralFailureKind, Options, Result, SourcePlan};
 use geometry::{BuiltCurve, Geometry};
 pub use geometry::{ParameterMapping, UnitConversion};
+pub use material_measurement::{
+    GeneralMaterialEdgeMeasurement, GeneralMaterialFaceMeasurement, GeneralMaterialMeasurements,
+};
 use solidcore::geom::extent3d::Extent3d;
 use solidcore::kernel::Kernel;
 use solidcore::math::Vec3;
@@ -21,7 +25,7 @@ use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::topology::{
     brep_constructor::{BrepConstructor, VertexNode},
     face::p3 as fp3,
-    EdgeId, EdgeuseId, FaceId, VertexId,
+    EdgeId, EdgeuseId, FaceId, RegionId, VertexId,
 };
 use solidcore_step::{planar::Rational, semantics as s};
 use std::collections::{BTreeMap, BTreeSet};
@@ -128,6 +132,9 @@ pub struct GeneralReport<'a> {
     /// Absent until all final installed trims passed the separate measured gate.
     /// A measured zero is distinct from a checkpoint that has not run.
     pub final_trim_measurements: Option<&'a GeneralTrimMeasurements>,
+    /// Absent until the complete separate material measurement checkpoint succeeds.
+    /// Numerical observations do not grant continuous qualification or acceptance.
+    pub material_measurements: Option<&'a GeneralMaterialMeasurements>,
 }
 
 pub(super) struct SourceVertex {
@@ -178,11 +185,14 @@ pub(super) struct Plan {
     unit_conversions: Vec<UnitConversion>,
     length_scale_mm: Rational,
     final_trim_measurements: Option<GeneralTrimMeasurements>,
+    material_measurements: Option<GeneralMaterialMeasurements>,
+    material_region: Option<RegionId>,
 }
 
 impl Plan {
     pub(super) fn invalidate_final_trim_measurements(&mut self) {
         self.final_trim_measurements = None;
+        self.material_measurements = None;
     }
     pub fn source(&self) -> &s::Snapshot {
         &self.source
@@ -201,6 +211,7 @@ impl Plan {
             chart_cuts: &self.normalizations,
             observations: self.observations,
             final_trim_measurements: self.final_trim_measurements.as_ref(),
+            material_measurements: self.material_measurements.as_ref(),
         }
     }
 }
@@ -223,6 +234,9 @@ impl Candidate {
         let SourcePlan::General(plan) = &mut self.plan else {
             return Err(Error::Invalid("GeneralFinalTrimRequiresGeneralCandidate"));
         };
+        // A new trim checkpoint supersedes any observation attached to the
+        // previous derived representation, even if its queries eventually fail.
+        plan.material_measurements = None;
         let mapped_faces: BTreeSet<_> = self.faces.values().copied().collect();
         if mapped_faces.len() != plan.faces.len()
             || self.faces.len() != plan.faces.len()
@@ -355,6 +369,51 @@ impl Candidate {
         // No intermediate zero or partial list can look like completed readiness.
         plan.final_trim_measurements = Some(measured);
         self.operations = execution.used;
+        Ok(self)
+    }
+
+    /// Measure the complete checked general material boundary with an explicit
+    /// dimensionless numerical integration control, without an implicit default.
+    /// Requires actual native checks and completed final-trim observations.
+    /// Tight native face bounds, shared two-frame face integrals and actual target
+    /// edge lengths charge `2*faces+edges+1` checkpoints; the subsequent complete
+    /// final-trim refresh charges one additional checkpoint per edge use.
+    /// This consumes the candidate on failure; no partial observation escapes.
+    /// It establishes no continuous bound, material-region proof or accepted import.
+    ///
+    /// # Errors
+    /// Unsupported numerical control, missing readiness/correspondence/material
+    /// owner, attributed mass, native query dependencies/failures, nonfinite or
+    /// degenerate measures, working-tolerance growth, or the operation limit.
+    pub fn measure_general_material(mut self, relative_accuracy: f64) -> Result<Self> {
+        material_measurement::validate_accuracy(relative_accuracy)?;
+        if self.native_checks.is_none() {
+            return Err(Error::Invalid("GeneralMaterialRequiresNativeChecks"));
+        }
+        let SourcePlan::General(plan) = &self.plan else {
+            return Err(Error::Invalid("GeneralMaterialRequiresGeneralCandidate"));
+        };
+        if plan.final_trim_measurements.is_none() {
+            return Err(Error::Invalid("GeneralMaterialRequiresFinalTrims"));
+        }
+        let mut execution = Execution {
+            used: self.operations,
+            max: self.operation_limit,
+        };
+        // Tight bounds execute real owner queries which may change derived UV.
+        // Keep all results private and refresh every final trim after the last
+        // consumer, rather than retaining evidence of an earlier native state.
+        let measured = material_measurement::measure(&mut self, relative_accuracy, &mut execution)?;
+        let SourcePlan::General(plan) = &mut self.plan else {
+            return Err(Error::Invalid("GeneralMaterialRequiresGeneralCandidate"));
+        };
+        plan.invalidate_final_trim_measurements();
+        self.operations = execution.used;
+        self = self.measure_general_trims()?;
+        let SourcePlan::General(plan) = &mut self.plan else {
+            return Err(Error::Invalid("GeneralMaterialRequiresGeneralCandidate"));
+        };
+        plan.material_measurements = Some(measured);
         Ok(self)
     }
 }
@@ -627,6 +686,8 @@ pub fn construct_general(
         unit_conversions: geometry.conversions().to_vec(),
         length_scale_mm: geometry.length_scale_exact(),
         final_trim_measurements: None,
+        material_measurements: None,
+        material_region: None,
     };
     plan.prepare(&geometry)?;
     for face in &plan.faces {
@@ -701,6 +762,7 @@ pub fn construct_general(
     execution.step()?;
     let region = builder.start_region(true, None)?;
     builder.brep_mut().region_mut(region)?.is_void = 0;
+    plan.material_region = Some(region);
     execution.step()?;
     builder.start_shell()?;
     let mut edges: BTreeMap<usize, EdgeId> = BTreeMap::new();

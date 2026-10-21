@@ -22,6 +22,10 @@ pub use general::{
     construct_general, GeneralLoopMapping, GeneralObservations, GeneralQuality, GeneralReport,
     GeneralTrimMeasurements, GeneralTrimUseMeasurement, ParameterMapping, UnitConversion,
 };
+#[cfg(feature = "general-development")]
+pub use general::{
+    GeneralMaterialEdgeMeasurement, GeneralMaterialFaceMeasurement, GeneralMaterialMeasurements,
+};
 
 use plan::{ExactPoint, Plan};
 
@@ -268,6 +272,13 @@ impl Candidate {
         use solidcore::topology::brep_validation::{
             self as validation, AssertValidOptions, CheckLevel, ValidationOptions,
         };
+        #[cfg(feature = "general-development")]
+        if let SourcePlan::General(plan) = &mut self.plan {
+            // The real validator can materialize or change derived UV state.
+            // Revalidating a measured candidate must discard observations of
+            // its previous state before any native operation starts.
+            plan.invalidate_final_trim_measurements();
+        }
         let mut pointers = AssertArray::new();
         self.charge()?;
         validation::validate_pointers(

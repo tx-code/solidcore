@@ -89,6 +89,86 @@ fn general_box_retains_owner_shared_topology_and_source_receipts() {
 }
 
 #[test]
+fn general_explicit_seam_cylinder_keeps_concrete_receiver_and_checked_trims() {
+    use solidcore::surface::surface::SurfaceKind;
+
+    // Public analytic control: r=3 mm, z in [0,7] mm. The native seam shares
+    // one defining edge across both incidences; no inferred ring split is needed.
+    let bytes = include_bytes!("fixtures/cylinder.step");
+    let candidate = build(bytes, 100_000).unwrap();
+    assert_eq!(candidate.source().source().bytes(), bytes);
+    assert_eq!(
+        (
+            candidate.vertices().len(),
+            candidate.edges().len(),
+            candidate.faces().len()
+        ),
+        (2, 3, 3)
+    );
+    let mut cylinders = 0;
+    for face in candidate.faces().values() {
+        let native = candidate.brep().face(*face).unwrap();
+        let surface = native.surface.as_ref().unwrap();
+        if matches!(surface.kind(), SurfaceKind::Cone(c) if c.is_cylinder_class()) {
+            cylinders += 1;
+        }
+    }
+    assert_eq!(cylinders, 1);
+    let mut heights = Vec::new();
+    for vertex in candidate.vertices().values() {
+        let point = candidate.brep().vertex(*vertex).unwrap().point;
+        assert_eq!((point.x, point.y), (0., 3.));
+        heights.push(point.z);
+    }
+    heights.sort_by(f64::total_cmp);
+    assert_eq!(heights, [0., 7.]);
+    let checked = candidate
+        .validate_native()
+        .unwrap()
+        .measure_general_trims()
+        .unwrap();
+    let receipt = checked
+        .general_report()
+        .unwrap()
+        .final_trim_measurements
+        .unwrap();
+    // Two cap uses and four cylinder uses include both sides of the same seam.
+    assert_eq!(receipt.edge_uses, 6);
+    assert!(receipt.samples >= 6 * 9);
+    assert!(receipt.maximum_mm.is_finite() && receipt.maximum_mm <= 1e-6);
+}
+
+#[test]
+fn repeated_native_validation_invalidates_old_trim_measurements() {
+    let bytes = include_bytes!("../../solidcore-step/tests/fixtures/material-box.step");
+    let measured = build(bytes, 100_000)
+        .unwrap()
+        .validate_native()
+        .unwrap()
+        .measure_general_trims()
+        .unwrap();
+    assert!(measured
+        .general_report()
+        .unwrap()
+        .final_trim_measurements
+        .is_some());
+    let revalidated = measured.validate_native().unwrap();
+    assert!(revalidated.native_checks().is_some());
+    assert!(revalidated
+        .general_report()
+        .unwrap()
+        .final_trim_measurements
+        .is_none());
+    assert!(revalidated
+        .measure_general_trims()
+        .unwrap()
+        .general_report()
+        .unwrap()
+        .final_trim_measurements
+        .is_some());
+}
+
+#[test]
 fn general_budget_exhaustion_does_not_modify_the_next_request() {
     let bytes = include_bytes!("../../solidcore-step/tests/fixtures/material-box.step");
     let operations = build(bytes, 100_000).unwrap().operations();

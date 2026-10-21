@@ -69,6 +69,7 @@ pub(super) struct Checker<'a> {
     pub scope: super::GeometryScope,
     pub pending: Vec<super::interop::Pending>,
     pub ownership_evidence: Option<super::interop::OwnershipEvidence>,
+    pub development_units: super::development_units::Working,
     pub outcome: Outcome,
 }
 impl<'a> Checker<'a> {
@@ -1024,6 +1025,11 @@ impl<'a> Checker<'a> {
                                 &self.raw(v.span),
                                 "explicit-to-derived redeclaration",
                             );
+                            if self.development_dimensions_candidate(r, &a, v) {
+                                self.defer_development_dimensions(r, *failure)?;
+                                self.scalar(v, Kind::Reference, f, r, c, &path)?;
+                                continue;
+                            }
                             if !self.interoperability()
                                 || !catalog.ap214()
                                 || f.name != "dimensions"
@@ -1261,6 +1267,16 @@ impl<'a> Checker<'a> {
         let result = self.binding(options);
         self.outcome.binding = progress(&result);
         result?;
+        if options.development_unit_policy != super::DevelopmentUnitPolicy::Disabled
+            && !self.schema()?.ap214()
+        {
+            return Err(simple_failure(
+                Status::Unsupported,
+                "DevelopmentUnitPolicyRequiresAp214",
+                "ProfileUnsupported",
+                "Explicit angle-dimensions development policy applies only to AP214 source catalogs",
+            ));
+        }
         let result = self
             .mapping()
             .and_then(|()| self.foreign())
@@ -1320,6 +1336,7 @@ impl<'a> Checker<'a> {
             self.outcome.interoperability = progress(&result);
             result?;
         }
+        self.publish_development_units()?;
         Ok(())
     }
 }
@@ -1339,12 +1356,18 @@ pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> O
     let mut effective = options.clone();
     // Original Check always executes the full source pipeline for this policy;
     // no shortened checkpoint may publish provisionally preserved source errors.
-    if options.source_policy == super::SourcePolicy::PreserveNonGeometric {
+    if options.source_policy == super::SourcePolicy::PreserveNonGeometric
+        || options.development_unit_policy != super::DevelopmentUnitPolicy::Disabled
+    {
         effective.check_geometry_dependencies = true;
         effective.check_part_and_closure = true;
     }
     let options = &effective;
     let mut outcome = Outcome {
+        development_units: super::development_units::Qualification {
+            requested: options.development_unit_policy,
+            ..Default::default()
+        },
         qualification: super::interop::Qualification::new(options),
         source_capture: source.captured.clone(),
         check_part_and_closure: options.check_part_and_closure,
@@ -1366,6 +1389,16 @@ pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> O
         limits,
         diagnostics: Vec::new(),
     };
+    if options.development_unit_policy != super::DevelopmentUnitPolicy::Disabled
+        && options.geometry_scope != super::GeometryScope::GeneralBrep
+    {
+        outcome.status = Status::InvalidRequest;
+        outcome.diagnostics.push(simple_failure(
+            Status::InvalidRequest, "DevelopmentUnitsRequireGeneralSource", "InvalidRequest",
+            "Development angle-unit policy requires explicitly selected GeneralBrep source checks",
+        ).diagnostic);
+        return outcome;
+    }
     // STEP_SEMANTICS::Check requires explicit general interoperability even for
     // an enabled-but-unused legacy option. Consult the immutable owner, never
     // resettable notices; shortened strict checkpoints cannot acquire approval.
@@ -1450,6 +1483,7 @@ pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> O
         scope: options.geometry_scope,
         pending: Vec::new(),
         ownership_evidence: None,
+        development_units: super::development_units::Working::default(),
         outcome,
     };
     let result = checker.run(options);
@@ -1468,6 +1502,7 @@ pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> O
             if checker.outcome.status == Status::Checked
                 && (!checker.outcome.preserved_diagnostics().is_empty()
                     || !checker.outcome.interpretation_diagnostics().is_empty()
+                    || checker.outcome.development_units.receipt.is_some()
                     || raw.carrier_assumption().is_some())
             {
                 checker.outcome.status = Status::CheckedWithDiagnostics;
@@ -1475,6 +1510,7 @@ pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> O
             if let (Some(catalog), Some(profile)) = (checker.catalog, checker.profile.take()) {
                 checker.outcome.snapshot = Some(Snapshot {
                     data: Arc::new(Data {
+                        development_units: checker.outcome.development_units.clone(),
                         qualification: checker.outcome.qualification.clone(),
                         source: raw.clone(),
                         catalog,
@@ -1494,6 +1530,12 @@ pub(super) fn check(source: &RawOutcome, limits: Limits, options: &Options) -> O
         }
         Err(failure) => {
             checker.outcome.status = failure.status;
+            if !checker.outcome.development_unit_diagnostics().is_empty() {
+                // Provisional development checks never erase the original D1
+                // source error, including on a later unit/resource/owner failure.
+                let original = checker.outcome.development_unit_diagnostics().to_vec();
+                checker.outcome.diagnostics.extend(original);
+            }
             checker.outcome.diagnostics.push(failure.diagnostic);
         }
     }

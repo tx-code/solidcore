@@ -14,7 +14,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "step-semantic-inspect --fixture-limits [--general-brep-source] [--source-semantics | --geometry-dependencies | --part-and-closure] [--interop-nongeometric] [--interpret-unregistered-ap214-2010 | --interpret-ap214-name-only-as-2010] [--interpret-level1-as-corrected | --interpret-level1-with-lowercase-hex] [--preserve-opaque-header-name] [--preserve-opaque-data-strings] [--unit-context ID] [--dependency-visits N] [--preserved-diagnostics N] [source budget overrides] FILE\n--interop-nongeometric runs the complete source pipeline and final exclusion proof. Schema/carrier interpretations require explicit general interoperability.\nSource overrides: --input-bytes, --records, --values, --references, --nesting, --string-bytes, --record-bytes, --report-bytes, --id-digits.\nPlanar/global qualification, continuous geometry consistency, native build and repair are NOT RUN.";
+const USAGE: &str = "step-semantic-inspect --fixture-limits [--general-brep-source] [--development-ap214-angle-dimensions] [--source-semantics | --geometry-dependencies | --part-and-closure] [--interop-nongeometric] [--interpret-unregistered-ap214-2010 | --interpret-ap214-name-only-as-2010] [--interpret-level1-as-corrected | --interpret-level1-with-lowercase-hex] [--preserve-opaque-header-name] [--preserve-opaque-data-strings] [--unit-context ID] [--dependency-visits N] [--preserved-diagnostics N] [source budget overrides] FILE\n--interop-nongeometric runs the complete source pipeline and final exclusion proof. Schema/carrier interpretations require explicit general interoperability. Development angle-dimensions policy is independent, requires general scope and full source checks, retains the source syntax defect and never establishes formal AP validity.\nSource overrides: --input-bytes, --records, --values, --references, --nesting, --string-bytes, --record-bytes, --report-bytes, --id-digits.\nPlanar/global qualification, continuous geometry consistency, native build and repair are NOT RUN.";
 
 struct Request {
     path: PathBuf,
@@ -53,6 +53,11 @@ fn arguments() -> Result<Option<Request>, ()> {
         }
         if flags && arg == "--general-brep-source" {
             options.geometry_scope = semantics::GeometryScope::GeneralBrep;
+            continue;
+        }
+        if flags && arg == "--development-ap214-angle-dimensions" {
+            options.development_unit_policy =
+                semantics::DevelopmentUnitPolicy::Ap214ExplicitPlaneAngleDimensions;
             continue;
         }
         if flags && arg == "--preserve-opaque-header-name" {
@@ -151,6 +156,11 @@ fn arguments() -> Result<Option<Request>, ()> {
         }
     }
     if !explicit {
+        return Err(());
+    }
+    if options.development_unit_policy != semantics::DevelopmentUnitPolicy::Disabled
+        && options.geometry_scope != semantics::GeometryScope::GeneralBrep
+    {
         return Err(());
     }
     // Preserve Check's invalid-request precedence even if capture would fail.

@@ -29,6 +29,7 @@ struct Node {
     record: usize,
     edges: Vec<Edge>,
     dimensions: Vector,
+    development: Option<super::DevelopmentAngleUnit>,
 }
 fn basis(i: usize) -> Vector {
     let mut dims = [Rational::default(); 7];
@@ -221,7 +222,26 @@ fn evaluate(checker: &mut Checker<'_>, nodes: &[Node], node: usize) -> Checked<V
                     *d = decimal(checker, source_dimensions, name)?;
                 }
                 count(checker, bound.span)?;
-                if explicit != dimensions {
+                if checker
+                    .development_units
+                    .candidates
+                    .binary_search(&r)
+                    .is_ok()
+                {
+                    if explicit != [Rational::default(); 7]
+                        || dimensions != [Rational::default(); 7]
+                    {
+                        return Err(development_failure(
+                            checker,
+                            Status::Rejected,
+                            r,
+                            "dimensions",
+                            "DevelopmentPlaneAngleDimensionsMustBeZero",
+                            "seven exact zero exponents",
+                            "explicit or factor-derived nonzero dimensions",
+                        ));
+                    }
+                } else if explicit != dimensions {
                     return Err(fail(checker, Status::Rejected, r, "dimensions",
                         "MetadataMassUnitDimensionsConflict", "factor-derived dimensional vector",
                         "contradictory explicit source vector",
@@ -445,6 +465,7 @@ pub(super) fn check(checker: &mut Checker<'_>) -> Checked<()> {
                 record: r,
                 edges: Vec::new(),
                 dimensions: [Rational::default(); 7],
+                development: None,
             });
         }
     }
@@ -474,6 +495,10 @@ pub(super) fn check(checker: &mut Checker<'_>) -> Checked<()> {
             });
         }
     }
+    // The development proof walks this same, already typed dependency graph.
+    // It never rebuilds a second unit interpretation or skips zero exponents.
+    // No extra visits/checks occur when the separate policy has no candidates.
+    let development = development_closure(checker, &nodes, &indices)?;
     let mut state = vec![0_u8; nodes.len()];
     let mut stack: Vec<(usize, usize)> = Vec::new();
     for start in 0..nodes.len() {
@@ -524,6 +549,10 @@ pub(super) fn check(checker: &mut Checker<'_>) -> Checked<()> {
             }
             let dimensions = evaluate(checker, &nodes, node)?;
             nodes.get_mut(node).ok_or_else(internal)?.dimensions = dimensions;
+            if development.get(node) == Some(&true) {
+                let proof = development_angle_unit(checker, &nodes, node)?;
+                nodes.get_mut(node).ok_or_else(internal)?.development = Some(proof);
+            }
             checker.outcome.unit_dependency_checks.unit_definitions += 1;
             *state.get_mut(node).ok_or_else(internal)? = 2;
             stack.pop();
@@ -533,6 +562,9 @@ pub(super) fn check(checker: &mut Checker<'_>) -> Checked<()> {
     // Derived observations are published only after every unit and measure
     // prerequisite succeeds; the owning snapshot waits for all requested checks.
     for node in nodes {
+        if let Some(proof) = node.development {
+            checker.development_units.definitions.push(proof);
+        }
         checker.units.dimension_definitions.push(UnitDimension {
             record_index: node.record,
             nominal: nominal(checker, node.record).into(),
@@ -542,5 +574,192 @@ pub(super) fn check(checker: &mut Checker<'_>) -> Checked<()> {
             }),
         });
     }
+    checker.development_units.units_checked = true;
     Ok(())
+}
+
+fn development_failure(
+    checker: &Checker<'_>,
+    status: Status,
+    r: usize,
+    field: &str,
+    key: &str,
+    expected: &str,
+    actual: &str,
+) -> Box<super::checker::Failure> {
+    fail(checker, status, r, field, key, expected, actual,
+        "explicit development angle-unit compatibility; source syntax and formal AP validity remain unestablished")
+}
+
+fn development_closure(
+    checker: &mut Checker<'_>,
+    nodes: &[Node],
+    indices: &[Option<usize>],
+) -> Checked<Vec<bool>> {
+    if checker.development_units.candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut needed = vec![false; nodes.len()];
+    let mut pending = Vec::new();
+    for &record in &checker.development_units.candidates {
+        pending.push(node_index(indices, record)?);
+    }
+    while let Some(index) = pending.pop() {
+        let node = nodes.get(index).ok_or_else(internal)?;
+        checker.visit(checker.record(node.record)?.span)?;
+        let seen = needed.get_mut(index).ok_or_else(internal)?;
+        if *seen {
+            continue;
+        }
+        *seen = true;
+        for edge in &node.edges {
+            pending.push(edge.target);
+        }
+    }
+    Ok(needed)
+}
+
+fn development_angle_unit(
+    checker: &mut Checker<'_>,
+    nodes: &[Node],
+    node: usize,
+) -> Checked<super::DevelopmentAngleUnit> {
+    let current = nodes.get(node).ok_or_else(internal)?;
+    let r = current.record;
+    checker.visit(checker.record(r)?.span)?;
+    if !checker.is_a(r, "PLANE_ANGLE_UNIT") || current.dimensions != [Rational::default(); 7] {
+        return Err(development_failure(
+            checker,
+            Status::Unsupported,
+            r,
+            "dimensions",
+            "DevelopmentPlaneAngleDependencyKind",
+            "nominal plane-angle unit with seven exact zero dimensions",
+            nominal(checker, r),
+        ));
+    }
+    let (_, bound) = checker.field(r, "dimensions")?;
+    let dimensions_record = (bound.kind == crate::ValueKind::Reference)
+        .then(|| checker.target(bound))
+        .transpose()?;
+    if checker.is_a(r, "SI_UNIT") {
+        let (_, name) = checker.field(r, "name")?;
+        let (_, prefix) = checker.field(r, "prefix")?;
+        count(checker, name.span)?;
+        count(checker, prefix.span)?;
+        if name.text != "RADIAN" {
+            return Err(development_failure(
+                checker,
+                Status::Unsupported,
+                r,
+                "name",
+                "DevelopmentPlaneAngleSiRoot",
+                "source SI RADIAN with nominal PLANE_ANGLE_UNIT",
+                &name.text,
+            ));
+        }
+        let prefix_text = if prefix.kind == crate::ValueKind::Unset {
+            ""
+        } else {
+            &prefix.text
+        };
+        let power = checker
+            .schema()?
+            .prefixes
+            .iter()
+            .find(|p| p.0 == prefix_text)
+            .ok_or_else(internal)?
+            .1;
+        let scale = 10_f64.powi(power);
+        if !scale.is_finite() || scale <= 0. {
+            return Err(internal());
+        }
+        return Ok(super::DevelopmentAngleUnit {
+            record_index: r,
+            dimensions_record,
+            conversion_factor_record: None,
+            dependency_unit: None,
+            factor_measure: None,
+            factor_lexeme: None,
+            si_prefix: Some(prefix_text.to_owned()),
+            scale_to_radians: scale,
+        });
+    }
+    if !checker.is_a(r, "CONVERSION_BASED_UNIT") {
+        return Err(development_failure(
+            checker,
+            Status::Unsupported,
+            r,
+            "dimensions",
+            "DevelopmentPlaneAngleUnanchoredUnit",
+            "SI radian or an explicit conversion dependency",
+            "unanchored named unit",
+        ));
+    }
+    let edge = current.edges.first().ok_or_else(internal)?;
+    let dependency = nodes.get(edge.target).ok_or_else(internal)?;
+    let dependency_scale = dependency
+        .development
+        .as_ref()
+        .ok_or_else(internal)?
+        .scale_to_radians;
+    let factor = edge.owner;
+    let (_, value) = checker.field(factor, "value_component")?;
+    count(checker, value.span)?;
+    if !matches!(
+        value.text.as_str(),
+        "PLANE_ANGLE_MEASURE" | "POSITIVE_PLANE_ANGLE_MEASURE"
+    ) {
+        return Err(development_failure(
+            checker,
+            Status::Unsupported,
+            factor,
+            "value_component",
+            "DevelopmentPlaneAngleFactorMeasure",
+            "plane-angle measure in an actual MEASURE_WITH_UNIT",
+            &value.text,
+        ));
+    }
+    let scalar = value.children.first().ok_or_else(internal)?;
+    count(checker, scalar.span)?;
+    if compare(&scalar.text, "0.") <= 0 {
+        return Err(development_failure(
+            checker,
+            Status::Rejected,
+            factor,
+            "value_component",
+            "DevelopmentPlaneAngleScaleNonPositive",
+            "exact source value greater than zero",
+            &scalar.text,
+        ));
+    }
+    let numeric = scalar
+        .text
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v > 0.);
+    let scale = numeric
+        .map(|value| value * dependency_scale)
+        .filter(|v| v.is_finite() && *v > 0.);
+    let Some(scale) = scale else {
+        return Err(development_failure(
+            checker,
+            Status::Unsupported,
+            factor,
+            "value_component",
+            "DevelopmentPlaneAngleScaleRangeUnestablished",
+            "finite positive scalar and accumulated radian scale",
+            &scalar.text,
+        ));
+    };
+    Ok(super::DevelopmentAngleUnit {
+        record_index: r,
+        dimensions_record,
+        conversion_factor_record: Some(factor),
+        dependency_unit: Some(dependency.record),
+        factor_measure: Some(value.text.clone()),
+        factor_lexeme: Some(checker.raw(scalar.span)),
+        si_prefix: None,
+        scale_to_radians: scale,
+    })
 }

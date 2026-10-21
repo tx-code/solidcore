@@ -17,6 +17,13 @@ identities, selected roles and dependency ownership before checking the actual
 part context. Geometry dependencies, planar qualification, interoperability
 approval and native construction remain separate unrun stages.
 
+The independent [development angle-unit policy](DEVELOPMENT_UNITS.md) can retain
+one bounded AP214 derived-slot defect only after complete source checks and a
+positive, finite angle-unit dependency proof. It preserves the original source
+error and records `sourceSyntaxVerified=false`; it does not grant strict source
+qualification, formal AP validity or qualified import. It is disabled by default
+and does not expand the nongeometric interoperability policy.
+
 [Source geometry prerequisites](GEOMETRY_SOURCE.md) are now available separately
 or through `--source-semantics`, which runs the maintained strict source phases in
 C++ order. Continuous general geometry evidence and exact native construction

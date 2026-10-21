@@ -60,6 +60,18 @@ pub(crate) struct Report<'a> {
     scope: &'static str,
     status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
+    development_unit_policy: Option<super::DevelopmentUnitPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    development_unit_policy_applied: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    development_unit_receipt: Option<&'a super::DevelopmentUnitReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    development_unit_diagnostics: Option<&'a [Diagnostic]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_syntax_verified: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    formal_ap_validity: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     policy: Option<super::SourcePolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     geometry_scope: Option<super::GeometryScope>,
@@ -124,12 +136,24 @@ pub(crate) fn view<'a>(
     if !bound {
         return Err(ReportError::SourceMismatch);
     }
+    if let Some(snapshot) = &outcome.snapshot {
+        if !source
+            .captured
+            .as_ref()
+            .is_some_and(|capture| Arc::ptr_eq(capture, &snapshot.data.source.data.bytes))
+        {
+            return Err(ReportError::SourceMismatch);
+        }
+    }
     let explicit = outcome.source_policy() != super::SourcePolicy::Strict;
     let interpreted = outcome.requested_interpretation()
         != super::SchemaInterpretation::DeclaredOnly
         || outcome.applied_interpretation() != super::SchemaInterpretation::DeclaredOnly;
+    let development = outcome.development_unit_policy() != super::DevelopmentUnitPolicy::Disabled;
     let report = Report {
-        schema: if explicit {
+        schema: if development {
+            "solidcore.step.development-unit-source.v1"
+        } else if explicit {
             "solidcore.step.interoperability-source.v1"
         } else if outcome.check_geometry_dependencies && outcome.check_part_and_closure {
             "solidcore.step.source-semantics.v1"
@@ -140,7 +164,9 @@ pub(crate) fn view<'a>(
         } else {
             "solidcore.step.types-units.v1"
         },
-        scope: if explicit {
+        scope: if development {
+            "SourceSemanticsWithExplicitDevelopmentUnitCompatibility"
+        } else if explicit {
             "SourceSemanticsWithInteroperability"
         } else if outcome.check_geometry_dependencies && outcome.check_part_and_closure {
             "StrictSourceSemantics"
@@ -152,8 +178,16 @@ pub(crate) fn view<'a>(
             "TypesAndUnitsCheckpoint"
         },
         status: outcome.status,
+        development_unit_policy: development.then_some(outcome.development_unit_policy()),
+        development_unit_policy_applied: development
+            .then_some(outcome.development_unit_receipt().is_some()),
+        development_unit_receipt: outcome.development_unit_receipt(),
+        development_unit_diagnostics: development.then_some(outcome.development_unit_diagnostics()),
+        source_syntax_verified: development.then_some(false),
+        formal_ap_validity: development.then_some("Unestablished"),
         policy: explicit.then_some(outcome.source_policy()),
-        geometry_scope: (explicit || interpreted).then_some(outcome.geometry_scope()),
+        geometry_scope: (explicit || interpreted || development)
+            .then_some(outcome.geometry_scope()),
         requested_interpretation: interpreted.then_some(outcome.requested_interpretation()),
         applied_interpretation: interpreted.then_some(outcome.applied_interpretation()),
         source_binding_verified: interpreted.then_some(false),
@@ -185,6 +219,7 @@ pub(crate) fn view<'a>(
             dependency_visits: outcome.limits.dependency_visits,
             preserved_diagnostics: (explicit
                 || interpreted
+                || development
                 || outcome.limits.preserved_diagnostics
                     != Limits::fixtures().preserved_diagnostics)
                 .then_some(outcome.limits.preserved_diagnostics),

@@ -198,12 +198,12 @@ int main(int argc, char **argv) {
         // Capture creation identities before later faces reorder radial lists.
         // Observer IDs describe arenas, never transient list positions.
         std::map<SmEdgeuse*,unsigned> allocated_uses;
-        auto capture_uses=[&](SmEdge* edge){SmTArray<SmEdgeuse*> uses;edge->GetEdgeuses(uses);
+        auto capture_uses=[&](SmEdge* edge,SmOrientType created_orientation){SmTArray<SmEdgeuse*> uses;edge->GetEdgeuses(uses);
             std::vector<SmEdgeuse*> fresh;
             for(ULONG i=0;i<uses.GetSize();++i)if(!allocated_uses.contains(uses[i]))fresh.push_back(uses[i]);
-            // The Rust arena creates SAME then OPPOSITE. A reused edge's radial
-            // list can encounter the new OPPOSITE first; it is not creation order.
-            std::sort(fresh.begin(),fresh.end(),[](auto a,auto b){return a->GetOrientation()==SM_OT_SAME&&b->GetOrientation()!=SM_OT_SAME;});
+            // BrepConstructor creates its requested orientation first, then its
+            // mate. Radial list order can start at either member of this pair.
+            std::sort(fresh.begin(),fresh.end(),[=](auto a,auto b){return a->GetOrientation()==created_orientation&&b->GetOrientation()!=created_orientation;});
             for(auto use:fresh)allocated_uses[use]=unsigned(allocated_uses.size());};
         SmEdge* shared_edge=nullptr;
         for (size_t i = 0; i < 3; ++i) {
@@ -245,7 +245,7 @@ int main(int argc, char **argv) {
                     new (&context) SmLine(points[i], points[(i + 1) % 3], 3, &context), FALSE));
             require(builder.SetLimits(SmVertexNode(0.), SmVertexNode(1.)));
             require(builder.EndEdge());
-            capture_uses(created_edge);
+            capture_uses(created_edge,SM_OT_SAME);
         }
         require(builder.EndLoop());
         if(mode.find("_hole")!=std::string::npos){
@@ -283,7 +283,7 @@ int main(int argc, char **argv) {
                     if(!edge)throw std::runtime_error("radial edge");
                     if(j!=0){require(builder.SetEdgeCurve(new(&context)SmLine(pp[j],pp[(j+1)%3],3,&context),FALSE));
                         require(builder.SetLimits(SmVertexNode(0.),SmVertexNode(1.)));}
-                    require(builder.EndEdge());capture_uses(edge);
+                    require(builder.EndEdge());capture_uses(edge,j==0?SM_OT_OPPOSITE:SM_OT_SAME);
                 }
                 require(builder.EndLoop());require(builder.EndFace());
             }

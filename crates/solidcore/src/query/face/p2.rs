@@ -749,9 +749,129 @@ pub fn curve_on_classify<O: ClassObject>(
     do_check_3d: bool,
     uv_space_okay: bool,
 ) -> Result<bool> {
+    curve_on_classify_using(
+        k,
+        &mut BorrowedCurveOn { b, f, objects },
+        do_point_classify,
+        cc,
+        has_big_gaps,
+        do_check_3d,
+        uv_space_okay,
+    )
+}
+
+/// One native two-pass controller. Adapters supply only operations requiring
+/// their distinct borrowed versus actual mutable topology environment.
+pub(crate) trait CurveOnExecution<O: ClassObject> {
+    fn face_handle(&self) -> O;
+    fn surface_handle(&self) -> Option<O>;
+    fn curve(&self, cc: &CurveClassification<O>) -> Result<&Curve>;
+    fn intersect_boundary(
+        &mut self,
+        k: &Kernel,
+        cc: &mut CurveClassification<O>,
+        uv: bool,
+        has_big_gaps: bool,
+        do_check_3d: bool,
+    ) -> Result<()>;
+    fn classify_interval(
+        &mut self,
+        k: &Kernel,
+        cc: &mut CurveClassification<O>,
+        index: usize,
+        do_point_classify: bool,
+        uv_space_okay: bool,
+    ) -> Result<()>;
+}
+
+struct BorrowedCurveOn<'a, M> {
+    b: &'a Brep,
+    f: FaceId,
+    objects: &'a M,
+}
+
+impl<O: ClassObject, M: CurveOnClassifyObjects<O>> CurveOnExecution<O> for BorrowedCurveOn<'_, M> {
+    fn face_handle(&self) -> O {
+        self.objects.face(self.f)
+    }
+    fn surface_handle(&self) -> Option<O> {
+        self.objects.face_surface(self.f)
+    }
+    fn curve(&self, cc: &CurveClassification<O>) -> Result<&Curve> {
+        classification_curve(self.objects, cc)
+    }
+    fn intersect_boundary(
+        &mut self,
+        k: &Kernel,
+        cc: &mut CurveClassification<O>,
+        uv: bool,
+        has_big_gaps: bool,
+        do_check_3d: bool,
+    ) -> Result<()> {
+        if uv {
+            return intersect_ts_bound(k, self.b, self.objects, cc, self.f, do_check_3d);
+        }
+        let tgt_loops = cc
+            .tgt_loops()
+            .iter()
+            .map(|&o| {
+                self.objects
+                    .loop_id(o)
+                    .ok_or_else(|| null(OP_CURVE, "unresolvable target loop"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let vertices = face_vertices(self.b, self.f, cc.tgt_loops_only(), Some(&tgt_loops))?;
+        let surface = self
+            .b
+            .face(self.f)?
+            .surface
+            .as_ref()
+            .ok_or_else(|| null(OP_CURVE, "face without surface"))?;
+        let vertices = vertices
+            .iter()
+            .map(|&v| self.objects.vertex(v))
+            .collect::<Vec<_>>();
+        cc.intersect_vertices(k, self.objects, &vertices, surface, has_big_gaps, true)?;
+
+        // 2nd intersect face edges with the curve
+        let edges = face_edges(self.b, self.f, cc.tgt_loops_only(), Some(&tgt_loops))?;
+        intersect_edges(k, self.b, self.objects, cc, &edges, self.f, has_big_gaps)?;
+        Ok(())
+    }
+    fn classify_interval(
+        &mut self,
+        k: &Kernel,
+        cc: &mut CurveClassification<O>,
+        index: usize,
+        do_point_classify: bool,
+        uv_space_okay: bool,
+    ) -> Result<()> {
+        cc.classify_face_interval(
+            k,
+            self.objects,
+            index,
+            do_point_classify,
+            self.objects.face(self.f),
+            None,
+            uv_space_okay,
+            None,
+        )
+    }
+}
+
+#[allow(clippy::fn_params_excessive_bools)] // same native arguments as the public entry
+pub(crate) fn curve_on_classify_using<O: ClassObject>(
+    k: &Kernel,
+    execution: &mut impl CurveOnExecution<O>,
+    do_point_classify: bool,
+    cc: &mut CurveClassification<O>,
+    has_big_gaps: bool,
+    do_check_3d: bool,
+    uv_space_okay: bool,
+) -> Result<bool> {
     // init output
     reset_classification(k, cc)?;
-    cc.set_face(Some(objects.face(f)));
+    cc.set_face(Some(execution.face_handle()));
     let mut modified = false;
 
     // for two iterations to allow the surf/surf/surf intersection heuristic a chance to
@@ -766,50 +886,23 @@ pub fn curve_on_classify<O: ClassObject>(
             reset_classification(k, cc)?;
         }
 
-        let curve = classification_curve(objects, cc)?;
-        if curve.dim() == 2 {
-            // 2D Curve branch - work in surface's uv space directly on the Face's UVcurves
-            cc.set_surface1(objects.face_surface(f));
-            match intersect_ts_bound(k, b, objects, cc, f, do_check_3d) {
+        if execution.curve(cc)?.dim() == 2 {
+            cc.set_surface1(execution.surface_handle());
+            match execution.intersect_boundary(k, cc, true, has_big_gaps, do_check_3d) {
                 Ok(()) => {}
                 Err(e) if e.is_unported() => return Err(e),
                 Err(_) => return Err(SolidError::sm_err(OP_CURVE)),
             }
         } else {
-            // 3D Curve Branch
-            // 1st intersect face vertices with the curve
-            let tgt_loops = cc
-                .tgt_loops()
-                .iter()
-                .map(|&o| {
-                    objects
-                        .loop_id(o)
-                        .ok_or_else(|| null(OP_CURVE, "unresolvable target loop"))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let vertices = face_vertices(b, f, cc.tgt_loops_only(), Some(&tgt_loops))?;
-            let surface = b
-                .face(f)?
-                .surface
-                .as_ref()
-                .ok_or_else(|| null(OP_CURVE, "face without surface"))?;
-            let vertices = vertices
-                .iter()
-                .map(|&v| objects.vertex(v))
-                .collect::<Vec<_>>();
-            cc.intersect_vertices(k, objects, &vertices, surface, has_big_gaps, true)?;
-
-            // 2nd intersect face edges with the curve
-            let edges = face_edges(b, f, cc.tgt_loops_only(), Some(&tgt_loops))?;
-            intersect_edges(k, b, objects, cc, &edges, f, has_big_gaps)?;
+            execution.intersect_boundary(k, cc, false, has_big_gaps, do_check_3d)?;
         }
     }
 
     // 2. classify each interval relative to the face
     let src_zone_tol_3d = src_zone_tol_3d_of(k, Some(cc));
-    let face_handle = objects.face(f);
+    let face_handle = execution.face_handle();
     for ii in 0..cc.size() {
-        let degenerate = classification_curve(objects, cc)?.is_degenerate(EFF_ZERO, None)?;
+        let degenerate = execution.curve(cc)?.is_degenerate(EFF_ZERO, None)?;
         let ivl = cc.at_mut(ii)?;
 
         // set Face_BackPtr and SrcZoneTol3d values in interval's PointClassifications
@@ -834,16 +927,7 @@ pub fn curve_on_classify<O: ClassObject>(
 
         // classify the interval - avoiding point classification if possible
         if ivl.mid.point_class() == PointClassType::Unknown {
-            cc.classify_face_interval(
-                k,
-                objects,
-                ii,
-                do_point_classify,
-                face_handle,
-                None,
-                uv_space_okay,
-                None,
-            )?;
+            execution.classify_interval(k, cc, ii, do_point_classify, uv_space_okay)?;
         }
     }
     Ok(modified)

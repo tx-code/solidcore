@@ -3653,6 +3653,40 @@ impl<'t, O: SolutionObject + 't> CciGlobalSolver<'t, O> {
 }
 
 impl<'t, O: SolutionObject + 't> GlobalSolve<'t, O> for CciGlobalSolver<'t, O> {
+    fn identical_solutions(
+        &self,
+        a: &Solution<O>,
+        b: &Solution<O>,
+    ) -> Result<(
+        crate::geom::global_solver::SolutionPairType,
+        Option<crate::geom::global_solver::PreferredSolution>,
+    )> {
+        // SmCurve.cpp::SmCCIGlobalSolver::LocalSolve names tree[0/1]'s actual
+        // curves in its two-object answers. Resolve only that same namespace;
+        // SmSolutionArray.cpp::GetParameterInterval uses the full natural domain,
+        // not this solve's trimmed interval. Keep its object-index/NULL behavior
+        // and the single shared IdenticalSolutions comparison formula.
+        GlobalSolver::identical_solutions_with_intervals(a, b, |solution, index| {
+            if let (Some(curves), Some((object_index, 0))) = (
+                self.curves,
+                solution.object_index_for_parameter_index(index)?,
+            ) {
+                if let (Some(curve), Some(Some(object))) =
+                    (curves.get(object_index), solution.objects.get(object_index))
+                {
+                    if object
+                        .kind()
+                        .is_kind_of(crate::geom::solution_array::ObjectKind::Curve)
+                        && Some(*object) == self.base.tree(object_index)?.owner_object()?
+                    {
+                        return Ok(Some(curve.natural_interval()));
+                    }
+                }
+            }
+            solution.parameter_interval(index)
+        })
+    }
+
     fn solver(&self) -> &GlobalSolver<'t, O> {
         &self.base
     }
@@ -3670,6 +3704,80 @@ impl<'t, O: SolutionObject + 't> GlobalSolve<'t, O> for CciGlobalSolver<'t, O> {
 mod tests {
     use super::*;
     use crate::geom::attribute::ObjectKey;
+
+    #[test]
+    fn cci_compares_actual_natural_domains_and_preserves_foreign_and_null_handles() {
+        use crate::curve::curve::p5::make_curve_cache;
+        use crate::geom::global_solver::SolutionPairType;
+        use crate::geom::solution_array::{ObjectKind, SolutionType};
+        #[derive(Clone, Copy, PartialEq)]
+        struct OpaqueCurve(u8);
+        impl SolutionObject for OpaqueCurve {
+            fn kind(&self) -> ObjectKind {
+                ObjectKind::Curve
+            }
+        }
+        let kernel = Kernel::default();
+        let mut first = cubic();
+        let mut second = cubic();
+        first
+            .edit_parameterization(&kernel, &Extent1d::from_min_max(2., 6.))
+            .unwrap();
+        second
+            .edit_parameterization(&kernel, &Extent1d::from_min_max(20., 80.))
+            .unwrap();
+        let first_cache = make_curve_cache(&kernel, &first, Some(OpaqueCurve(0))).unwrap();
+        let second_cache = make_curve_cache(&kernel, &second, Some(OpaqueCurve(1))).unwrap();
+        let solver = CciGlobalSolver::new(
+            first_cache.tree().unwrap(),
+            second_cache.tree().unwrap(),
+            Extent1d::from_min_max(3., 5.),
+            Extent1d::from_min_max(30., 50.),
+            false,
+            ProjectionType::Parallel,
+        )
+        .with_curves(&first, &second, &kernel);
+        let mut a = Solution::new();
+        a.num_objects = 2;
+        a.num_variables = 2;
+        a.solution_type = SolutionType::SingleValue;
+        a.objects[0] = Some(OpaqueCurve(0));
+        a.objects[1] = Some(OpaqueCurve(1));
+        a.start.parameters[0] = 4.;
+        a.start.parameters[1] = 40.;
+        let mut b = a;
+        // Both differences exceed 1/10000 of the query interval, while falling
+        // below 1/10000 of the corresponding *actual* natural domain.
+        b.start.parameters[0] += 0.0003;
+        b.start.parameters[1] += 0.003;
+        assert_eq!(
+            solver.identical_solutions(&a, &b).unwrap().0,
+            SolutionPairType::Identical
+        );
+        b.start.parameters[1] += 0.004;
+        assert_eq!(
+            solver.identical_solutions(&a, &b).unwrap().0,
+            SolutionPairType::DiffParameters
+        );
+        a.objects[1] = Some(OpaqueCurve(2));
+        b = a;
+        assert!(matches!(
+            solver.identical_solutions(&a, &b),
+            Err(SolidError::Unported {
+                upstream: "SmCurve::GetNaturalInterval",
+                ..
+            })
+        ));
+        a.objects[0] = None;
+        b = a;
+        b.start.parameters[0] += 0.0003;
+        // The source index query stops at a first NULL; do not manufacture a
+        // natural interval for an object that this layout does not identify.
+        assert_eq!(
+            solver.identical_solutions(&a, &b).unwrap().0,
+            SolutionPairType::DiffParameters
+        );
+    }
 
     fn hermite() -> Curve {
         Curve::from(HermiteCurve::new(

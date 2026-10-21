@@ -367,6 +367,59 @@ impl<O: ClassObject> CurveClassification<O> {
     /// [`SolidError::InvalidInput`] for an empty classification (upstream reads its
     /// missing first interval); those of [`PointClassification::is_connected_to_any`].
     pub fn point_classifies_connected_to(&self, targets: &[O]) -> Result<Vec<TouchData<O>>> {
+        self.point_classifies_connected_to_using(targets, |pc| pc.is_connected_to_any(targets))
+    }
+
+    /// The same ordered boundary query with actual topology behind both handles.
+    /// Opaque handles retain the public entry's explicit dependency failure.
+    pub(crate) fn point_classifies_connected_to_with_geometry(
+        &self,
+        geometry: &impl ClassGeometry<O>,
+        targets: &[O],
+    ) -> Result<Vec<TouchData<O>>> {
+        self.point_classifies_connected_to_using(targets, |pc| {
+            for (i, &target) in targets.iter().enumerate() {
+                let connected = match pc
+                    .object()
+                    .and_then(|o| geometry.topology_entity(o))
+                    .zip(geometry.topology_entity(target))
+                {
+                    Some(((source_brep, source), (target_brep, target))) => {
+                        // Handles resolve into borrowed arenas. Equal numeric ids
+                        // from distinct actual B-reps do not name the same object.
+                        if core::ptr::eq(source_brep, target_brep) {
+                            match source {
+                                EntityRef::Vertex(v) => crate::topology::vertex::is_connected_to(
+                                    source_brep,
+                                    v,
+                                    Some(target),
+                                )?,
+                                EntityRef::Edge(e) => crate::topology::edge::is_connected_to(
+                                    source_brep,
+                                    e,
+                                    Some(target),
+                                )?,
+                                _ => pc.is_connected_to(target)?,
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    None => pc.is_connected_to(target)?,
+                };
+                if connected {
+                    return Ok(Some(i));
+                }
+            }
+            Ok(None)
+        })
+    }
+
+    fn point_classifies_connected_to_using(
+        &self,
+        targets: &[O],
+        mut connected: impl FnMut(&PointClassification<O>) -> Result<Option<usize>>,
+    ) -> Result<Vec<TouchData<O>>> {
         // locals
         let mut touches = Vec::new();
         let mut found_index = UNDEF_LOOP_INDEX;
@@ -391,7 +444,8 @@ impl<O: ClassObject> CurveClassification<O> {
 
         // When First Interval Start Edge/Vertex Object is connected to a target
         if is_vertex_or_edge(&first.start)
-            && (targets.is_empty() || connected_any(&first.start, targets, &mut found_index)?)
+            && (targets.is_empty()
+                || connected_any(&first.start, &mut connected, &mut found_index)?)
         {
             push(&mut touches, first.interval.min(), 0, found_index);
         }
@@ -399,7 +453,8 @@ impl<O: ClassObject> CurveClassification<O> {
         // for every Interval End
         for (ii, ivl) in self.intervals().iter().enumerate() {
             if is_vertex_or_edge(&ivl.end)
-                && (targets.is_empty() || connected_any(&ivl.end, targets, &mut found_index)?)
+                && (targets.is_empty()
+                    || connected_any(&ivl.end, &mut connected, &mut found_index)?)
             {
                 push(&mut touches, ivl.interval.max(), ii + 1, found_index);
             }
@@ -528,6 +583,31 @@ impl<O: ClassObject> CurveClassification<O> {
     /// [`SolidError::Unported`] for an interval end on an edge (`SmEdge::GetInterval`,
     /// unit `topology.edge`).
     pub fn is_crossed_by_edge(&self) -> Result<bool> {
+        self.is_crossed_by_edge_using(edge_interval)
+    }
+
+    /// Same native traversal with intervals resolved from the actual owner.
+    /// Opaque or wrongly typed handles never acquire a manufactured domain.
+    pub(crate) fn is_crossed_by_edge_with_geometry(
+        &self,
+        geometry: &impl ClassGeometry<O>,
+    ) -> Result<bool> {
+        self.is_crossed_by_edge_using(|object| {
+            match object.and_then(|o| geometry.topology_entity(o)) {
+                Some((brep, EntityRef::Edge(edge))) => topo_edge::interval(brep, edge),
+                Some(_) => Err(SolidError::invalid_input(
+                    "intersect::curve_class::p7::is_crossed_by_edge",
+                    "handle is not an edge",
+                )),
+                None => edge_interval(object),
+            }
+        })
+    }
+
+    fn is_crossed_by_edge_using(
+        &self,
+        interval_of: impl Fn(Option<O>) -> Result<Extent1d>,
+    ) -> Result<bool> {
         let size = self.size();
 
         // for every classification interval
@@ -538,7 +618,7 @@ impl<O: ClassObject> CurveClassification<O> {
             if ivl.start.point_class() == PointClassType::Edge {
                 let t = ivl.start.t_param();
                 let edge = ivl.start.edge_object();
-                let edge_ivl = edge_interval(edge)?;
+                let edge_ivl = interval_of(edge)?;
                 let sz = t.scaled_zero();
 
                 // not crossing when XSection happens at bndry of pEdge Interval
@@ -571,7 +651,7 @@ impl<O: ClassObject> CurveClassification<O> {
             if ivl.end.point_class() == PointClassType::Edge {
                 let t = ivl.end.t_param();
                 let edge = ivl.end.edge_object();
-                let edge_ivl = edge_interval(edge)?;
+                let edge_ivl = interval_of(edge)?;
                 let sz = t.scaled_zero();
 
                 // not crossing if the intersection happens at boundary of the pEdge Interval
@@ -1577,10 +1657,10 @@ fn is_vertex_or_edge<O: ClassObject>(pc: &PointClassification<O>) -> bool {
 /// `IsConnectedTo(crTgtOwners, lFoundIndx)`: on a match the found index is updated.
 fn connected_any<O: ClassObject>(
     pc: &PointClassification<O>,
-    targets: &[O],
+    connected: &mut impl FnMut(&PointClassification<O>) -> Result<Option<usize>>,
     found_index: &mut u64,
 ) -> Result<bool> {
-    match pc.is_connected_to_any(targets)? {
+    match connected(pc)? {
         Some(i) => {
             *found_index = i as u64;
             Ok(true)
@@ -1807,6 +1887,8 @@ mod tests {
     use crate::curve::line::{BoundedLineOptions, Line};
     use crate::intersect::point_class::ClassObjectKind as K;
     use crate::surface::volume::Volume;
+    use crate::topology::brep_constructor::{BrepConstructor, VertexNode};
+    use crate::topology::{Brep, EdgeId, FaceId, LoopId, VertexId};
 
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct H(usize, K);
@@ -1855,6 +1937,267 @@ mod tests {
         }
         cc.set_curve(Some(H(0, K::Curve)), false);
         cc
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct TopologyObject {
+        arena: usize,
+        entity: EntityRef,
+    }
+
+    impl ClassObject for TopologyObject {
+        fn class_kind(&self) -> K {
+            match self.entity {
+                EntityRef::Vertex(_) => K::Vertex,
+                EntityRef::Edge(_) => K::Edge,
+                EntityRef::Face(_) => K::Face,
+                EntityRef::Loop(_) => K::Loop,
+                _ => K::Other,
+            }
+        }
+    }
+
+    struct TopologyGeometry<'a> {
+        breps: [&'a Brep; 2],
+    }
+
+    impl ClassGeometry<TopologyObject> for TopologyGeometry<'_> {
+        fn curve(&self, _: TopologyObject) -> Option<&Curve> {
+            None
+        }
+        fn surface(&self, _: TopologyObject) -> Option<&Surface> {
+            None
+        }
+        fn volume(&self, _: TopologyObject) -> Option<&Volume> {
+            None
+        }
+        fn point(&self, _: TopologyObject) -> Option<Point3> {
+            None
+        }
+        fn topology_entity(&self, object: TopologyObject) -> Option<(&Brep, EntityRef)> {
+            Some((*self.breps.get(object.arena)?, object.entity))
+        }
+    }
+
+    fn connectivity_model() -> (Brep, VertexId, EdgeId, LoopId, FaceId) {
+        use crate::geom::extent2d::Extent2d;
+        use crate::math::Vec2;
+        use crate::surface::plane::Plane;
+        let mut k = Kernel::default();
+        let mut builder = BrepConstructor::new().unwrap();
+        builder.start_shell().unwrap();
+        let face = builder.start_face(OrientType::Same).unwrap();
+        let domain = Extent2d::from_bounds(0., 0., 1., 1.);
+        builder
+            .set_face_surface(
+                Plane::new(Vec3::ZERO, Vec3::X, Vec3::Y, Vec2::new(1., 1.), &domain).into(),
+                domain,
+            )
+            .unwrap();
+        let loop_id = builder.start_loop(OrientType::Same).unwrap();
+        let corners = [Vec3::ZERO, Vec3::X, Vec3::new(1., 1., 0.), Vec3::Y];
+        let mut first = None;
+        for i in 0..corners.len() {
+            let edge = builder
+                .start_edge(&k, OrientType::Same, None, None, None)
+                .unwrap();
+            first.get_or_insert(edge);
+            builder
+                .set_edge_curve(
+                    &k,
+                    Line::from_points(corners[i], corners[(i + 1) % corners.len()], 3).into(),
+                    false,
+                )
+                .unwrap();
+            builder
+                .set_limits(&k, VertexNode::Parameter(0.), VertexNode::Parameter(1.))
+                .unwrap();
+            builder.end_edge().unwrap();
+        }
+        builder.end_loop().unwrap();
+        builder.end_face().unwrap();
+        builder.end_shell(&mut k, false).unwrap();
+        let brep = builder.finish().unwrap();
+        let edge = first.unwrap();
+        let vertex = crate::topology::edge::start_vertex(&brep, edge)
+            .unwrap()
+            .unwrap();
+        (brep, vertex, edge, loop_id, face)
+    }
+
+    fn topology_classification(
+        k: &Kernel,
+        vertex: VertexId,
+        edge: EdgeId,
+    ) -> CurveClassification<TopologyObject> {
+        let mut cc = CurveClassification::new(k);
+        cc.set_size(k, 1).unwrap();
+        let interval = cc.at_mut(0).unwrap();
+        interval.set_interval(&Extent1d::from_min_max(0., 1.));
+        interval.start.set_class_object(
+            PointClassType::Vertex,
+            Some(TopologyObject {
+                arena: 0,
+                entity: EntityRef::Vertex(vertex),
+            }),
+        );
+        interval.end.set_class_object(
+            PointClassType::Edge,
+            Some(TopologyObject {
+                arena: 0,
+                entity: EntityRef::Edge(edge),
+            }),
+        );
+        cc
+    }
+
+    #[test]
+    fn real_topology_connectivity_distinguishes_arenas_and_preserves_first_matching_target() {
+        let k = Kernel::default();
+        let (first, vertex, edge, loop_id, face) = connectivity_model();
+        // Construct independently: no B-rep copy can disguise arena identity.
+        let (second, other_vertex, other_edge, other_loop, _) = connectivity_model();
+        assert_eq!(
+            (vertex, edge, loop_id),
+            (other_vertex, other_edge, other_loop)
+        );
+        let geometry = TopologyGeometry {
+            breps: [&first, &second],
+        };
+        let cc = topology_classification(&k, vertex, edge);
+        let local_loop = TopologyObject {
+            arena: 0,
+            entity: EntityRef::Loop(loop_id),
+        };
+        let foreign_loop = TopologyObject {
+            arena: 1,
+            entity: EntityRef::Loop(other_loop),
+        };
+        let local_face = TopologyObject {
+            arena: 0,
+            entity: EntityRef::Face(face),
+        };
+        assert!(cc
+            .point_classifies_connected_to_with_geometry(&geometry, &[foreign_loop])
+            .unwrap()
+            .is_empty());
+        for targets in [
+            vec![foreign_loop, local_loop, local_face],
+            vec![foreign_loop, local_face, local_loop],
+        ] {
+            let touches = cc
+                .point_classifies_connected_to_with_geometry(&geometry, &targets)
+                .unwrap();
+            assert_eq!(touches.len(), 2);
+            for (i, touch) in touches.iter().enumerate() {
+                assert_eq!(touch.loop_index, 1);
+                assert_eq!(touch.connected_to, Some(targets[1]));
+                assert_eq!(touch.pt_classify_index, i as u64);
+                assert_eq!(touch.param, i as f64);
+            }
+        }
+    }
+
+    #[test]
+    fn real_topology_connectivity_stops_at_first_match_and_propagates_first_target_error() {
+        let k = Kernel::default();
+        let (first, vertex, edge, loop_id, _) = connectivity_model();
+        let (second, _, _, other_loop, _) = connectivity_model();
+        let geometry = TopologyGeometry {
+            breps: [&first, &second],
+        };
+        let cc = topology_classification(&k, vertex, edge);
+        let before = cc.intervals().to_vec();
+        let local = TopologyObject {
+            arena: 0,
+            entity: EntityRef::Loop(loop_id),
+        };
+        let foreign = TopologyObject {
+            arena: 1,
+            entity: EntityRef::Loop(other_loop),
+        };
+        // This fails in the real owning arena's edge lookup, not in a mock
+        // callback. A successful earlier target must prevent that later read.
+        let invalid = TopologyObject {
+            arena: 0,
+            entity: EntityRef::Edge(EdgeId::from_index(u32::MAX)),
+        };
+        let touches = cc
+            .point_classifies_connected_to_with_geometry(&geometry, &[local, invalid])
+            .unwrap();
+        assert_eq!(touches.len(), 2);
+        assert!(touches
+            .iter()
+            .all(|t| t.connected_to == Some(local) && t.loop_index == 0));
+        for targets in [vec![invalid, local], vec![foreign, invalid, local]] {
+            let error = cc
+                .point_classifies_connected_to_with_geometry(&geometry, &targets)
+                .unwrap_err();
+            assert!(matches!(error, SolidError::NotFound { .. }));
+            assert_eq!(cc.intervals(), before);
+        }
+        let unfiltered = cc
+            .point_classifies_connected_to_with_geometry(&geometry, &[])
+            .unwrap();
+        assert_eq!(unfiltered.len(), 2);
+        assert!(unfiltered
+            .iter()
+            .all(|t| t.connected_to.is_none() && t.loop_index == UNDEF_LOOP_INDEX));
+    }
+
+    #[test]
+    fn real_edge_crossing_uses_native_interval_and_preserves_coincident_guards() {
+        let k = Kernel::default();
+        let (first, _, edge, _, _) = connectivity_model();
+        let (second, _, _, _, _) = connectivity_model();
+        let geometry = TopologyGeometry {
+            breps: [&first, &second],
+        };
+        let target = TopologyObject {
+            arena: 0,
+            entity: EntityRef::Edge(edge),
+        };
+        let mut cc = CurveClassification::new(&k);
+        cc.set_size(&k, 1).unwrap();
+        cc.at_mut(0)
+            .unwrap()
+            .set_interval(&Extent1d::from_min_max(0., 1.));
+        for end in [false, true] {
+            for parameter in [0., 1., 0.5] {
+                let ivl = cc.at_mut(0).unwrap();
+                ivl.start.reset(&k, None);
+                ivl.end.reset(&k, None);
+                ivl.mid.reset(&k, None);
+                let point = if end { &mut ivl.end } else { &mut ivl.start };
+                point.set_class_object(PointClassType::Edge, Some(target));
+                point.set_t_param(parameter, false);
+                assert_eq!(
+                    cc.is_crossed_by_edge_with_geometry(&geometry).unwrap(),
+                    parameter == 0.5
+                );
+            }
+        }
+        // An interior endpoint is not a crossing when its interval itself is
+        // coincident with the same edge. Keep the native exact-handle guard.
+        cc.at_mut(0)
+            .unwrap()
+            .mid
+            .set_class_object(PointClassType::Edge, Some(target));
+        assert!(!cc.is_crossed_by_edge_with_geometry(&geometry).unwrap());
+        cc.at_mut(0).unwrap().mid.reset(&k, None);
+        let invalid = TopologyObject {
+            arena: 0,
+            entity: EntityRef::Edge(EdgeId::from_index(u32::MAX)),
+        };
+        cc.at_mut(0)
+            .unwrap()
+            .end
+            .set_class_object(PointClassType::Edge, Some(invalid));
+        assert!(matches!(
+            cc.is_crossed_by_edge_with_geometry(&geometry),
+            Err(SolidError::NotFound { .. })
+        ));
+        assert!(cc.is_crossed_by_edge().unwrap_err().is_unported());
     }
 
     #[test]

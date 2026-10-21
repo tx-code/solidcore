@@ -20,6 +20,8 @@
 //! | [`PrecisePropertyLayout`]               | `SmPrecisePropertyLayout` (constructor, `Add`)    |
 //! | [`OdeIsoCurveLength`]                   | `SmODEIsoCurveLengthIFEO` (constructor, `Evaluate`) |
 //! | [`OdeArea`]                             | `SmODEAreaIFEO::Evaluate`                         |
+//! The independent area/volume frames and normalized native-span evaluator follow
+//! maintained `SmFace.cpp` SHA256 `6f68ced6cffc0cf235644b17b071423294d6ac5a601750fad0c65adb0d30c3e1`.
 //! | [`create_curves_by_trimming`], [`TrimmedCurves`] | `SmFace::CreateCurvesByTrimming`         |
 //! | [`create_curves_from_face`], [`FaceCurves`] | `SmFace::CreateCurvesFromFace`                |
 //! | [`fix_uv_trim_curves`]                  | `sm_FixUVTrimCurves`                              |
@@ -109,6 +111,7 @@ use crate::intersect::curve_class::p1::{CurveClassification, CurveInterval};
 use crate::intersect::curve_class::p4::ClassificationInit;
 use crate::intersect::point_class::{ClassGeometry, ClassObject, ClassObjectKind, PointClassType};
 use crate::kernel::Kernel;
+use crate::mass::integrator::properties::spans::Span;
 use crate::math::{Point3, Vec3, BIG_DOUBLE, EFF_ZERO, EFF_ZERO_SQ};
 use crate::nurbs::b_spline_curve::BSplineCurve;
 use crate::nurbs::b_spline_curve_n_lib::TrimMode;
@@ -1442,6 +1445,8 @@ pub struct OdeIsoCurveLength<'a> {
     surface: &'a Surface,
     u_iso_value: f64,
     origin: Point3,
+    area_origin: Point3,
+    separate_origins: bool,
     face_thickness: f64,
     layout: &'a PrecisePropertyLayout,
 }
@@ -1458,11 +1463,39 @@ impl<'a> OdeIsoCurveLength<'a> {
         face_thickness: f64,
         layout: &'a PrecisePropertyLayout,
     ) -> Self {
-        Self {
+        Self::with_origins(
             kernel,
             surface,
             u_iso_value,
             origin,
+            origin,
+            face_thickness,
+            layout,
+        )
+    }
+
+    /// The maintained double-origin overload: area moments are formed directly
+    /// in `area_origin`; geometric volume moments retain `volume_origin`.
+    /// Equal origins retain the legacy shifted point and arithmetic order.
+    #[must_use]
+    pub const fn with_origins(
+        kernel: &'a Kernel,
+        surface: &'a Surface,
+        u_iso_value: f64,
+        volume_origin: Point3,
+        area_origin: Point3,
+        face_thickness: f64,
+        layout: &'a PrecisePropertyLayout,
+    ) -> Self {
+        Self {
+            kernel,
+            surface,
+            u_iso_value,
+            origin: volume_origin,
+            area_origin,
+            separate_origins: volume_origin.x != area_origin.x
+                || volume_origin.y != area_origin.y
+                || volume_origin.z != area_origin.z,
             face_thickness,
             layout,
         }
@@ -1517,7 +1550,19 @@ impl<'a> OdeIsoCurveLength<'a> {
                 copy_block(&mut pv, &r);
             }
 
+            // SmFace.cpp:5778--5787, reference SHA256 6f68ced6cffc0cf2:
+            // form local area coordinates BEFORE shifting the volume point.
+            // Shifting an already accumulated area moment would lose small
+            // local offsets far from the model-wide origin.
+            let mut area_ipnt = if self.separate_origins {
+                pv[0][0] - self.area_origin
+            } else {
+                Point3::ZERO
+            };
             pv[0][0] -= self.origin;
+            if !self.separate_origins {
+                area_ipnt = pv[0][0];
+            }
 
             // Compute first fundamental form
             let norm = pv[1][0].cross(pv[0][1]);
@@ -1536,40 +1581,65 @@ impl<'a> OdeIsoCurveLength<'a> {
             // Compute area static moments
             let idx = lay.moments[0];
             if idx != 0 {
-                put(dydx, idx, ipnt.x * area_delta, false)?;
-                put(dydx, idx + 1, ipnt.y * area_delta, false)?;
-                put(dydx, idx + 2, ipnt.z * area_delta, false)?;
+                put(dydx, idx, area_ipnt.x * area_delta, false)?;
+                put(dydx, idx + 1, area_ipnt.y * area_delta, false)?;
+                put(dydx, idx + 2, area_ipnt.z * area_delta, false)?;
             }
 
             let idx = lay.moments[1];
             if idx != 0 {
                 // Compute area Ixx, Iyy, Izz
-                put(dydx, idx, (ipnt.x * ipnt.x) * area_delta, false)?;
-                put(dydx, idx + 1, (ipnt.y * ipnt.y) * area_delta, false)?;
-                put(dydx, idx + 2, (ipnt.z * ipnt.z) * area_delta, false)?;
+                put(dydx, idx, (area_ipnt.x * area_ipnt.x) * area_delta, false)?;
+                put(
+                    dydx,
+                    idx + 1,
+                    (area_ipnt.y * area_ipnt.y) * area_delta,
+                    false,
+                )?;
+                put(
+                    dydx,
+                    idx + 2,
+                    (area_ipnt.z * area_ipnt.z) * area_delta,
+                    false,
+                )?;
 
                 // Compute area Iyz, Izx, Ixy
-                put(dydx, idx + 3, (ipnt.y * ipnt.z) * area_delta, false)?;
-                put(dydx, idx + 4, (ipnt.z * ipnt.x) * area_delta, false)?;
-                put(dydx, idx + 5, (ipnt.x * ipnt.y) * area_delta, false)?;
+                put(
+                    dydx,
+                    idx + 3,
+                    (area_ipnt.y * area_ipnt.z) * area_delta,
+                    false,
+                )?;
+                put(
+                    dydx,
+                    idx + 4,
+                    (area_ipnt.z * area_ipnt.x) * area_delta,
+                    false,
+                )?;
+                put(
+                    dydx,
+                    idx + 5,
+                    (area_ipnt.x * area_ipnt.y) * area_delta,
+                    false,
+                )?;
 
                 // Compute area second moments Ixx, Iyy, Izz about coordinate axes
                 put(
                     dydx,
                     idx + 6,
-                    (ipnt.y * ipnt.y + ipnt.z * ipnt.z) * area_delta,
+                    (area_ipnt.y * area_ipnt.y + area_ipnt.z * area_ipnt.z) * area_delta,
                     false,
                 )?;
                 put(
                     dydx,
                     idx + 7,
-                    (ipnt.x * ipnt.x + ipnt.z * ipnt.z) * area_delta,
+                    (area_ipnt.x * area_ipnt.x + area_ipnt.z * area_ipnt.z) * area_delta,
                     false,
                 )?;
                 put(
                     dydx,
                     idx + 8,
-                    (ipnt.x * ipnt.x + ipnt.y * ipnt.y) * area_delta,
+                    (area_ipnt.x * area_ipnt.x + area_ipnt.y * area_ipnt.y) * area_delta,
                     false,
                 )?;
             }
@@ -1746,7 +1816,26 @@ impl OdeArea<'_> {
     ///
     /// Those of the curve evaluation and the inner integration evaluator.
     pub fn evaluate(&self, t: f64, dydx: &mut Vec<f64>) -> Result<()> {
-        let pv = self.uv_curve.evaluate(t, 1, true, true)?;
+        self.evaluate_in_frame_and_span(t, dydx, self.origin, None)
+    }
+
+    // Kept separate from the public struct's fields so existing evaluator
+    // callers retain their literal construction and legacy no-span behavior.
+    // SmFace.cpp:5940--6023, reference SHA256 6f68ced6cffc0cf2.
+    #[allow(clippy::neg_multiply)] // Preserve SmFace.cpp's literal Jacobian operation order.
+    pub(crate) fn evaluate_in_frame_and_span(
+        &self,
+        t: f64,
+        dydx: &mut Vec<f64>,
+        area_origin: Point3,
+        native_span: Option<Span>,
+    ) -> Result<()> {
+        if native_span.is_some() && (!t.is_finite() || !(0.0..=1.0).contains(&t)) {
+            return Err(null("OdeArea: split-span parameter is outside [0,1]"));
+        }
+        let native_t = native_span.map_or(t, |span| span.parameter(t));
+        let from_left = native_span.is_none_or(|span| span.evaluate_from_left(native_t));
+        let pv = self.uv_curve.evaluate(native_t, 1, from_left, true)?;
         let p0 = pv
             .first()
             .copied()
@@ -1756,11 +1845,12 @@ impl OdeArea<'_> {
             .copied()
             .ok_or_else(|| null("OdeArea: no curve tangent"))?;
 
-        let eval = OdeIsoCurveLength::new(
+        let eval = OdeIsoCurveLength::with_origins(
             self.kernel,
             self.surface,
             p0.x,
             self.origin,
+            area_origin,
             self.face_thickness,
             self.layout,
         );
@@ -1784,10 +1874,17 @@ impl OdeArea<'_> {
             dydx.clear();
             dydx.push(0.0);
             dydx.extend_from_slice(&dy);
+            // Preserve the native derivative cutoff above. Only after that
+            // test apply the split parameter's Jacobian, before the product.
+            let du = native_span.map_or(p1.x, |span| p1.x * span.length());
             for v in dydx.iter_mut().skip(1) {
-                // (* -1.0: an exact negation)
-                *v = -(*v * p1.x);
+                *v = *v * du * -1.0;
             }
+        } else if native_span.is_some() {
+            // A normalized RK stage must overwrite a preceding nonvertical
+            // stage's derivatives, even when this native tangent is vertical.
+            dydx.clear();
+            dydx.resize(self.y_scale.len() + 1, 0.0);
         }
 
         Ok(())
@@ -2829,7 +2926,15 @@ mod tests {
         b.face_mut(f).unwrap().surface = Some(plane());
         b.face_mut(f).unwrap().uv_domain = Extent2d::from_bounds(0.0, 0.0, 1.0, 1.0);
         let k = Kernel::default();
-        let uv = [None];
+        // SmFace.cpp::CreateCurvesByTrimming skips null/degenerate UV curves
+        // before classification. Exercise both branches on this bare face.
+        let degenerate = Curve::from(crate::curve::line::Line::from_points(
+            Vec3::ZERO,
+            Vec3::ZERO,
+            2,
+        ));
+        assert!(degenerate.is_degenerate(EFF_ZERO, None).unwrap());
+        let uv = [None, Some(degenerate)];
         let r = create_curves_by_trimming(&k, &b, f, None, None, Some(&uv), true, true).unwrap();
         assert_eq!(r.curves_3d.map(|v| v.len()), Some(0));
         assert_eq!(r.uv_curves.map(|v| v.len()), Some(0));
@@ -2837,12 +2942,20 @@ mod tests {
             BSplineCurve::create_line_segment(2, Vec3::ZERO, Vec3::new(1.0, 1.0, 0.0)).unwrap(),
         );
         let uv = [Some(line)];
-        assert!(
+        // The nondegenerate control reaches the actual classifier. This fixture
+        // deliberately has no upward faceuse, so it cannot supply trim loops.
+        // SmFace.cpp:8740--8743 maps a failed IntersectTSBound to SM_ERR, as the
+        // Rust query adapter does; a missing port is no longer the expected error.
+        assert_eq!(upward_faceuse(&b, f).unwrap(), None);
+        assert_eq!(
             create_curves_by_trimming(&k, &b, f, Some(1.0), None, Some(&uv), false, true)
-                .unwrap_err()
-                .is_unported()
+                .unwrap_err(),
+            SolidError::sm_err("query::face::p2::curve_on_classify")
         );
-        assert!(create_curves_by_trimming(&k, &b, f, None, None, None, true, false).is_err());
+        assert_eq!(
+            create_curves_by_trimming(&k, &b, f, None, None, None, true, false).unwrap_err(),
+            SolidError::invalid_input(OP, "CreateCurvesByTrimming: no curves to trim")
+        );
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2876,5 +2989,87 @@ mod tests {
         let k = Kernel::default();
         let mut cc: CurveClassification<H> = CurveClassification::new(&k);
         assert!(review_start_and_stop_on_seam_crv_classifies(&NoGeometry, &mut cc).is_err());
+    }
+
+    #[test]
+    fn iso_integrand_keeps_direct_local_area_frame_and_common_volume_frame() {
+        let k = Kernel::default();
+        let origin = Vec3::new(1e9, -2e9, 2.0);
+        let surface = Surface::from(Plane::new(
+            origin,
+            Vec3::X,
+            Vec3::Y,
+            Vec2::new(2.0, 3.0),
+            &Extent2d::from_bounds(0., 0., 1., 1.),
+        ));
+        let layout = PrecisePropertyLayout::new(PPF_ALL);
+        let eval =
+            OdeIsoCurveLength::with_origins(&k, &surface, 0.5, Vec3::ZERO, origin, 0., &layout);
+        let mut derivative = vec![0.; layout.num_components + 1];
+        eval.evaluate(0.25, &mut derivative).unwrap();
+        // S=(1e9+1,-2e9+3/4,2), |Su x Sv|=6. Area coordinates
+        // are (1,3/4,0); geometric volume contribution is 6*2=12.
+        assert_eq!(derivative[layout.area], 6.);
+        assert_eq!(derivative[layout.volume], 12.);
+        let ai = layout.moments[0];
+        assert_eq!(&derivative[ai..ai + 3], &[6., 4.5, 0.]);
+        let vi = layout.moments[4];
+        assert_eq!(
+            &derivative[vi..vi + 3],
+            &[(1e9 + 1.) * 12., (-2e9 + 0.75) * 12., 12.]
+        );
+        let legacy = OdeIsoCurveLength::new(&k, &surface, 0.5, origin, 0., &layout);
+        let equal = OdeIsoCurveLength::with_origins(&k, &surface, 0.5, origin, origin, 0., &layout);
+        let mut a = vec![0.; layout.num_components + 1];
+        let mut b = a.clone();
+        legacy.evaluate(0.25, &mut a).unwrap();
+        equal.evaluate(0.25, &mut b).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn normalized_vertical_stage_zeros_previous_derivatives_but_legacy_stage_is_untouched() {
+        use crate::curve::line::Line;
+        let k = Kernel::default();
+        let surface = plane();
+        let curve: Curve =
+            Line::create_line_segment(2, Vec3::new(1., 0., 0.), Vec3::new(1., 1., 0.), None)
+                .unwrap()
+                .into();
+        let layout = PrecisePropertyLayout::new(PPF_AREA);
+        let scale = vec![1.; layout.num_components];
+        let eval = OdeArea {
+            kernel: &k,
+            surface: &surface,
+            uv_curve: &curve,
+            min_v: 0.,
+            iso_curve_accuracy: 1e-6,
+            y_scale: &scale,
+            origin: Vec3::ZERO,
+            face_thickness: 0.,
+            layout: &layout,
+        };
+        let mut legacy = vec![7.; layout.num_components + 1];
+        eval.evaluate(0.5, &mut legacy).unwrap();
+        assert!(legacy.iter().all(|&value| value == 7.));
+        let mut split = legacy.clone();
+        eval.evaluate_in_frame_and_span(
+            0.5,
+            &mut split,
+            Vec3::ZERO,
+            Some(Span { min: 0., max: 1. }),
+        )
+        .unwrap();
+        assert!(split.iter().all(|&value| value == 0.));
+        for t in [-f64::EPSILON, 1. + f64::EPSILON, f64::NAN] {
+            assert!(eval
+                .evaluate_in_frame_and_span(
+                    t,
+                    &mut split,
+                    Vec3::ZERO,
+                    Some(Span { min: 0., max: 1. })
+                )
+                .is_err());
+        }
     }
 }

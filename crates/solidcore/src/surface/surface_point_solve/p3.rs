@@ -438,7 +438,7 @@ impl Surface {
         surface_object: Option<O>,
         face_tolerance: Option<f64>,
     ) -> Result<SolutionArray<O>> {
-        let mut solver = SurfPtGlobalSolver::new(
+        let mut solver = SurfPtGlobalSolver::new_for_face(
             k,
             self,
             domain,
@@ -447,8 +447,8 @@ impl Surface {
             distance_tolerance,
             target_distance,
             requested,
+            face_tolerance,
         )?;
-        solver.face_tolerance = face_tolerance;
         solver.solve(k, surface_object)
     }
 
@@ -523,7 +523,17 @@ impl Surface {
         } else {
             EFF_ZERO_SQRT * 100.0
         };
-        let mut curr = SurfPtSolveStepper::new(k, self, domain, point, guess, tight, loose, op)?;
+        let mut curr = SurfPtSolveStepper::new_for_face(
+            k,
+            self,
+            domain,
+            point,
+            guess,
+            tight,
+            loose,
+            op,
+            face_tolerance,
+        )?;
         let mut solution = Solution::new();
         solution.solution_type = SolutionType::SingleValue;
         solution.num_objects = 1;

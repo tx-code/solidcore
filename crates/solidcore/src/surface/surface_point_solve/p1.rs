@@ -145,8 +145,35 @@ impl<'s> SurfacePointSolver<'s> {
         solver_op: SolverOperation,
         test_point: Point3,
         distance_tolerance: f64,
+        opt_target_distance: Option<f64>,
+        solution_requested: SolutionRequested,
+    ) -> Result<Self> {
+        Self::new_for_face(
+            k,
+            surface,
+            uv_domain,
+            solver_op,
+            test_point,
+            distance_tolerance,
+            opt_target_distance,
+            solution_requested,
+            None,
+        )
+    }
+
+    // The directed objective constructs its reference plane from a box before
+    // iteration starts. Resolve the actual owner tolerance at construction too;
+    // assigning it to the outer solver afterwards is too late for this branch.
+    pub(super) fn new_for_face(
+        k: &Kernel,
+        surface: &'s Surface,
+        uv_domain: &Extent2d,
+        solver_op: SolverOperation,
+        test_point: Point3,
+        distance_tolerance: f64,
         _opt_target_distance: Option<f64>,
         _solution_requested: SolutionRequested,
+        face_tolerance: Option<f64>,
     ) -> Result<Self> {
         // We need an SmBSplineSurface for some operations.
         let b_spline = b_spline_part(surface);
@@ -170,13 +197,22 @@ impl<'s> SurfacePointSolver<'s> {
 
             // A point to define a plane: a corner of the expanded bounding box.
             // (status ignored: a failing box is left in its initial, inside-out state)
-            let mut bbox =
-                match surface.calculate_bounding_box(k, &solver.domain, [true, false, false], true)
-                {
-                    Ok(boxes) => boxes.normal_box.unwrap_or_else(Extent3d::new),
-                    Err(e) if e.is_unported() => return Err(e),
-                    Err(_) => Extent3d::new(),
-                };
+            let mut bbox = match match face_tolerance {
+                Some(tol) => surface.calculate_bounding_box_for_face(
+                    k,
+                    &solver.domain,
+                    [true, false, false],
+                    true,
+                    tol,
+                ),
+                None => {
+                    surface.calculate_bounding_box(k, &solver.domain, [true, false, false], true)
+                }
+            } {
+                Ok(boxes) => boxes.normal_box.unwrap_or_else(Extent3d::new),
+                Err(e) if e.is_unported() => return Err(e),
+                Err(_) => Extent3d::new(),
+            };
             bbox.expand_relative(0.2);
 
             let d = solver.dir_vec;
@@ -512,8 +548,33 @@ impl<'s> SurfPtGlobalSolver<'s> {
         opt_target_distance: Option<f64>,
         solution_requested: SolutionRequested,
     ) -> Result<Self> {
+        Self::new_for_face(
+            k,
+            surface,
+            uv_domain,
+            solver_op,
+            test_point,
+            distance_tolerance,
+            opt_target_distance,
+            solution_requested,
+            None,
+        )
+    }
+
+    /// Native owning execution, including the constructor's directed box query.
+    pub(super) fn new_for_face(
+        k: &Kernel,
+        surface: &'s Surface,
+        uv_domain: &Extent2d,
+        solver_op: SolverOperation,
+        test_point: Point3,
+        distance_tolerance: f64,
+        opt_target_distance: Option<f64>,
+        solution_requested: SolutionRequested,
+        face_tolerance: Option<f64>,
+    ) -> Result<Self> {
         Ok(Self {
-            base: SurfacePointSolver::new(
+            base: SurfacePointSolver::new_for_face(
                 k,
                 surface,
                 uv_domain,
@@ -522,10 +583,11 @@ impl<'s> SurfPtGlobalSolver<'s> {
                 distance_tolerance,
                 opt_target_distance,
                 solution_requested,
+                face_tolerance,
             )?,
             closed_in_u: None,
             closed_in_v: None,
-            face_tolerance: None,
+            face_tolerance,
         })
     }
 
@@ -1482,7 +1544,24 @@ impl<'s> SurfPtSolveStepper<'s> {
         loose_tol: f64,
         solver_op: SolverOperation,
     ) -> Result<Self> {
-        let mut base = SurfacePointSolver::new(
+        Self::new_for_face(
+            k, surface, domain, test_pt, uv, tight_tol, loose_tol, solver_op, None,
+        )
+    }
+
+    /// Local stepper with the directed constructor's actual owning tolerance.
+    pub(super) fn new_for_face(
+        k: &Kernel,
+        surface: &'s Surface,
+        domain: &Extent2d,
+        test_pt: Point3,
+        uv: Point2,
+        tight_tol: f64,
+        loose_tol: f64,
+        solver_op: SolverOperation,
+        face_tolerance: Option<f64>,
+    ) -> Result<Self> {
+        let mut base = SurfacePointSolver::new_for_face(
             k,
             surface,
             domain,
@@ -1491,6 +1570,7 @@ impl<'s> SurfPtSolveStepper<'s> {
             loose_tol,
             None,
             SolutionRequested::Single,
+            face_tolerance,
         )?;
         base.tight_tol = tight_tol;
 

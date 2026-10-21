@@ -55,9 +55,10 @@
 //! - **Not ported (reporting only).** `SM_ASSERT*`, `SM_DBG_WARN`, `ERR_MSG` and `MSG`
 //!   messages and the `SM_DEBUG_CODE` blocks (the release build compiles them out).
 //! - **Callees.** `SmCurveInterval::GetMinUV` / `GetMaxUV` are those of
-//!   `intersect::curve_class::p2`. `ReSet` and `ConnectIntervals` stay stubs
-//!   ([`SolidError::Unported`], unit `intersect.curve_class_p2`): wired, they make
-//!   difftest cases disagree or fail (plan/findings.md).
+//!   `intersect::curve_class::p2`, as is the constructor's `ReSet`.
+//!   `ConnectIntervals` stays a stub ([`SolidError::Unported`], unit
+//!   `intersect.curve_class_p2`): wired, it makes generated squeeze cases disagree
+//!   (plan/findings.md).
 //! - **`EvaluateBinormal`** takes `&mut Brep` in the port; with `bUse3DOnly` true it
 //!   creates nothing, so it runs on a copy of the B-rep, as `ComputeUVSector` does. Both
 //!   upstream call sites ignore its status: a failure keeps the out-vectors as upstream
@@ -81,6 +82,7 @@ use crate::heal::face_props::{FaceProps, HealerOpType, LoopObject, PropStage, Tr
 use crate::intersect::curve_class::p1::{
     get_connected_touches, CrvDirOnFaceType, CurveClassification, IntervalPosition, TouchData,
 };
+use crate::intersect::curve_class::p2::ResetOptions;
 use crate::intersect::curve_class::p3::curve_is_degenerate;
 use crate::intersect::point_class::{
     object_zone_tol_3d, ClassGeometry, ClassObject, PointClassType, PointClassification,
@@ -156,7 +158,7 @@ pub struct LoopCrossings<O> {
 
 /// The parts of `SmUVSectorIO` (`SmVertexuse::ComputeUVSector`) the loop crossings read.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct UvSectorIo<O> {
+pub(crate) struct UvSectorIo<O> {
     /// `m_pBegEdgeuse`.
     beg_edgeuse: Option<O>,
     /// `m_pEndEdgeuse`.
@@ -177,6 +179,90 @@ struct UvSectorIo<O> {
     vertex_on_pole: bool,
 }
 
+/// The two mutation-sensitive calls within the single loop-crossings controller.
+/// Each geometry view ends before a hook runs, so an owning execution can use the
+/// actual arena, including lazy cache writes, without interior mutability.
+pub(crate) trait LoopCrossingsExecution<O: ClassObject> {
+    type Geometry<'a>: ClassGeometry<O>
+    where
+        Self: 'a;
+    fn geometry(&self) -> Self::Geometry<'_>;
+    fn vertexuse_sector(&mut self, k: &Kernel, vertexuse: O) -> Result<UvSectorIo<O>>;
+    fn edgeuse_binormal(
+        &mut self,
+        k: &Kernel,
+        edgeuse: O,
+        parameter: f64,
+        point: &mut Vec3,
+        binormal: &mut Vec3,
+    ) -> Result<()>;
+}
+
+struct BorrowedCrossings<'a, G> {
+    geometry: &'a G,
+}
+
+impl<O: ClassObject, G: ClassGeometry<O>> ClassGeometry<O> for BorrowedCrossings<'_, G> {
+    fn curve(&self, o: O) -> Option<&Curve> {
+        self.geometry.curve(o)
+    }
+    fn surface(&self, o: O) -> Option<&Surface> {
+        self.geometry.surface(o)
+    }
+    fn volume(&self, o: O) -> Option<&crate::surface::volume::Volume> {
+        self.geometry.volume(o)
+    }
+    fn point(&self, o: O) -> Option<Point3> {
+        self.geometry.point(o)
+    }
+    fn classification_vertex_point(&self, o: O) -> Option<Point3> {
+        self.geometry.classification_vertex_point(o)
+    }
+    fn topology_zone_tol_3d(&self, o: O) -> Option<f64> {
+        self.geometry.topology_zone_tol_3d(o)
+    }
+    fn vertex_face_gap(&self, v: O, s: &Surface, f: Option<O>) -> Option<f64> {
+        self.geometry.vertex_face_gap(v, s, f)
+    }
+    fn topology_entity(&self, o: O) -> Option<(&Brep, EntityRef)> {
+        self.geometry.topology_entity(o)
+    }
+    fn topology_handle(&self, e: EntityRef) -> Option<O> {
+        self.geometry.topology_handle(e)
+    }
+    fn owner_of(
+        &self,
+        o: crate::geom::object::ObjectRef,
+    ) -> Option<crate::geom::object::ObjectRef> {
+        self.geometry.owner_of(o)
+    }
+}
+
+impl<O: ClassObject, G: ClassGeometry<O>> LoopCrossingsExecution<O> for BorrowedCrossings<'_, G> {
+    type Geometry<'a>
+        = BorrowedCrossings<'a, G>
+    where
+        Self: 'a;
+    fn geometry(&self) -> Self::Geometry<'_> {
+        BorrowedCrossings {
+            geometry: self.geometry,
+        }
+    }
+    fn vertexuse_sector(&mut self, k: &Kernel, vu: O) -> Result<UvSectorIo<O>> {
+        vertexuse_compute_uv_sector(k, self.geometry, vu)
+    }
+    fn edgeuse_binormal(
+        &mut self,
+        k: &Kernel,
+        eu: O,
+        parameter: f64,
+        point: &mut Vec3,
+        binormal: &mut Vec3,
+    ) -> Result<()> {
+        edgeuse_evaluate_binormal(k, self.geometry, eu, parameter, point, binormal)
+    }
+}
+
 /// The handle of the face surface inside this unit's point drops.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct SurfHandle;
@@ -191,18 +277,27 @@ impl SolutionObject for SurfHandle {
 
 /// `SmCurveClassification::ReSet(...)` with the constructor's arguments.
 fn reset<O: ClassObject>(
+    k: &Kernel,
     cc: &mut CurveClassification<O>,
     init: &ClassificationInit<O>,
 ) -> Result<()> {
-    let _ = (cc, init);
-    // Not wired: with the real CurveClassification::reset, topology.brep_p2's
-    // MergeCurves fixture (merge_plane10_line) reaches a classification handle its
-    // ClassGeometry cannot resolve (plan/findings.md, intersect.curve_class_p4).
-    // UNPORTED(intersect.curve_class_p2): SmCurveClassification::ReSet
-    Err(SolidError::unported(
-        "SmCurveClassification::ReSet",
-        "intersect.curve_class_p2",
-    ))
+    // SmCurveClass.cpp:4932--4951 forwards the constructor arguments to ReSet.
+    // As in p2, Rust owns the interval array rather than borrowing caller memory.
+    cc.reset(
+        k,
+        &ResetOptions {
+            curve: init.curve,
+            interval: Some(init.interval),
+            uv_curve: init.uv_curve,
+            zone_tol_3d: init.src_zone_tol_3d,
+            is_curve_owned: init.is_curve_owned,
+            is_curve_current: init.is_curve_current,
+            surface1: init.surface1,
+            surface2: init.surface2,
+            uv_curve2: init.uv_curve2,
+            ti: init.ti,
+        },
+    )
 }
 
 /// `SmCurveClassification::ConnectIntervals(index, end, allowRemovalOfEnds)`.
@@ -450,14 +545,23 @@ fn edgeuse_evaluate_binormal<O: ClassObject, G: ClassGeometry<O>>(
         return Ok(());
     }
     let mut scratch = b.clone();
-    match topo_eu3::evaluate_binormal(
-        k,
-        &mut scratch,
-        eu,
-        param,
-        true,
-        &topo_eu3::BinormalOptions::default(),
-    ) {
+    evaluate_crossing_binormal(k, &mut scratch, eu, param, point, binormal)
+}
+
+/// Source binormal output/status handling shared by both arena adapters.
+pub(crate) fn evaluate_crossing_binormal(
+    k: &Kernel,
+    b: &mut Brep,
+    eu: EdgeuseId,
+    param: f64,
+    point: &mut Vec3,
+    binormal: &mut Vec3,
+) -> Result<()> {
+    if !eu1::is_loop_edgeuse(b, eu)? {
+        return Ok(());
+    }
+    match topo_eu3::evaluate_binormal(k, b, eu, param, true, &topo_eu3::BinormalOptions::default())
+    {
         Ok(r) => {
             *point = r.point;
             *binormal = r.binormal;
@@ -511,6 +615,14 @@ fn vertexuse_compute_uv_sector<O: ClassObject, G: ClassGeometry<O>>(
     let (b, vu) = vertexuse_id(geometry, vertexuse, OP_CROSS)?;
     let mut scratch = b.clone();
     let io = topo_vertexuse::compute_uv_sector(k, &mut scratch, vu, false)?.io;
+    map_crossing_sector(geometry, &io)
+}
+
+/// Map the actual sector's edgeuse ids back into the caller's handle namespace.
+pub(crate) fn map_crossing_sector<O: ClassObject>(
+    geometry: &impl ClassGeometry<O>,
+    io: &topo_vertexuse::UvSectorIo,
+) -> Result<UvSectorIo<O>> {
     let eu_handle = |eu: Option<EdgeuseId>| -> Result<Option<O>> {
         eu.map(|eu| handle_of(geometry, EntityRef::Edgeuse(eu), OP_CROSS))
             .transpose()
@@ -549,10 +661,44 @@ fn eval_pn_into(curve: &Curve, t: f64, pn: &mut [Vec3; 2]) -> Result<()> {
     Ok(())
 }
 
+/// Resolve only a face owner whose arena's actual surface is this receiver.
+/// Geometry owner keys and caller-chosen classification handles are separate
+/// namespaces; the two topology hooks perform the checked round trip.
+fn owning_surface_tolerance<O: ClassObject>(
+    geometry: &impl ClassGeometry<O>,
+    surface: &Surface,
+    owner: crate::geom::object::ObjectRef,
+) -> Result<f64> {
+    let unresolved = || SolidError::unported("SmFace::GetTolerance", "topology.face_p2");
+    let index = u32::try_from(owner.key.0).map_err(|_| unresolved())?;
+    let face = FaceId::from_index(index);
+    let handle = geometry
+        .topology_handle(EntityRef::Face(face))
+        .ok_or_else(unresolved)?;
+    let (brep, resolved) = face_id(geometry, handle, OP_CROSS)?;
+    let actual = face_p2::surface(brep, resolved)?.ok_or_else(unresolved)?;
+    if resolved != face || !core::ptr::eq(actual, surface) || actual.face()? != Some(owner) {
+        return Err(unresolved());
+    }
+    face_p2::tolerance(brep, resolved)
+}
+
+fn surface_zone<O: ClassObject>(
+    k: &Kernel,
+    geometry: &impl ClassGeometry<O>,
+    surface: &Surface,
+) -> Result<f64> {
+    match surface.face()? {
+        Some(owner) => owning_surface_tolerance(geometry, surface, owner),
+        None => crate::surface::surface::p1::zone_tol_3d(k, surface),
+    }
+}
+
 /// `pSurface->DropPoint(pt, domain, guess, ..., op, seamSide)` with the status ignored:
 /// the dropped UV point (`initial` when the call fails).
-fn drop_uv(
+fn drop_uv<O: ClassObject>(
     k: &Kernel,
+    geometry: &impl ClassGeometry<O>,
     surface: &Surface,
     pt: Point3,
     domain: &Extent2d,
@@ -566,10 +712,15 @@ fn drop_uv(
         tgt_seam_side,
         want_solutions: false,
     };
-    Ok(
-        ignored(surface.drop_point::<SurfHandle>(k, pt, domain, &opts))?
-            .map_or(initial, |d| d.result_uv),
-    )
+    let lookup = |owner| owning_surface_tolerance(geometry, surface, owner);
+    Ok(ignored(surface.drop_point_with_face_lookup::<SurfHandle>(
+        k,
+        pt,
+        domain,
+        &opts,
+        Some(&lookup),
+    ))?
+    .map_or(initial, |d| d.result_uv))
 }
 
 /// `pSurface->DropVectors(uv, TRUE, TRUE, 1, &v, &out)` with the status ignored.
@@ -657,6 +808,7 @@ fn set_touch<O>(list: &mut [TouchData<O>], index: usize, value: TouchData<O>) ->
 #[allow(clippy::too_many_arguments)]
 fn end_on_seams<O: LoopObject>(
     k: &Kernel,
+    geometry: &impl ClassGeometry<O>,
     surface: &Surface,
     props: &FaceProps<O>,
     on_pole: u32,
@@ -677,6 +829,7 @@ fn end_on_seams<O: LoopObject>(
     // drop End to Surface
     let mut end_uv = drop_uv(
         k,
+        geometry,
         surface,
         end_pn[0],
         &props.natural_uv_domain,
@@ -712,7 +865,7 @@ fn end_on_seams<O: LoopObject>(
     }
 
     // classify end against seam
-    let seam = surface.is_on_seam(k, end_uv, None)?;
+    let seam = surface.is_on_seam(k, end_uv, Some(surface_zone(k, geometry, surface)?))?;
     let dir = seam.seam_dir;
     let u = seam.on_seam
         && on_seam != SurfParamType::U
@@ -772,12 +925,13 @@ impl<O: ClassObject> CurveClassification<O> {
     ///
     /// # Errors
     ///
-    /// [`SolidError::Unported`] from `ReSet` (not wired, see plan/findings.md).
+    /// Those of [`CurveClassification::reset`]. Ordinary status failures are ignored
+    /// as in the source constructor; unsupported dependencies still propagate.
     pub fn with_curve(k: &Kernel, init: &ClassificationInit<O>) -> Result<Self> {
         let mut cc = Self::new(k);
 
         // pass the call along
-        ignore_status(reset(&mut cc, init))?;
+        ignore_status(reset(k, &mut cc, init))?;
         Ok(cc)
     }
 
@@ -920,6 +1074,24 @@ impl<O: ClassObject> CurveClassification<O> {
     where
         O: LoopObject,
     {
+        self.get_loop_crossings_using(k, &mut BorrowedCrossings { geometry }, loops, face_props)
+    }
+
+    /// The original ordered controller with short-lived arena reads and two
+    /// actual mutation hooks. The public readonly adapter preserves its behavior.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn get_loop_crossings_using(
+        &self,
+        k: &Kernel,
+        execution: &mut impl LoopCrossingsExecution<O>,
+        loops: &[O],
+        face_props: Option<&mut FaceProps<O>>,
+    ) -> Result<LoopCrossings<O>>
+    where
+        O: LoopObject,
+    {
+        let view = execution.geometry();
+        let geometry = &view;
         // direct optional input and output
         let mut local_props = FaceProps::<O>::new();
         let props: &mut FaceProps<O> = match face_props {
@@ -1010,6 +1182,7 @@ impl<O: ClassObject> CurveClassification<O> {
                 smp_pt = ignored(classify_crv.evaluate_point(smp_param))?.unwrap_or(smp_pt);
                 smp_uv = drop_uv(
                     k,
+                    geometry,
                     surface,
                     smp_pt,
                     &surface.natural_uv_domain(),
@@ -1019,7 +1192,8 @@ impl<O: ClassObject> CurveClassification<O> {
                 )?;
 
                 // Classify SmpPtUV against Seams
-                let seam = surface.is_on_seam(k, smp_uv, None)?;
+                let seam =
+                    surface.is_on_seam(k, smp_uv, Some(surface_zone(k, geometry, surface)?))?;
                 on_seam &= seam.on_seam;
                 if !on_seam {
                     classify_crv_on_seam = SurfParamType::Neither;
@@ -1031,7 +1205,7 @@ impl<O: ClassObject> CurveClassification<O> {
         }
 
         // ---- Build Raw Touch List
-        let mut raw = self.point_classifies_connected_to(loops)?;
+        let mut raw = self.point_classifies_connected_to_with_geometry(geometry, loops)?;
 
         // no work - ClassifyCrv does not touch any TgtLoop
         if raw.is_empty() {
@@ -1077,6 +1251,7 @@ impl<O: ClassObject> CurveClassification<O> {
         };
         let touch_1st_uv0 = drop_uv(
             k,
+            geometry,
             surface,
             touch_1st_pn[0],
             &srf_domain,
@@ -1088,6 +1263,7 @@ impl<O: ClassObject> CurveClassification<O> {
         let neg_last_pn = -touch_last_pn[1];
         let touch_last_uv0 = drop_uv(
             k,
+            geometry,
             surface,
             touch_last_pn[0],
             &srf_domain,
@@ -1161,6 +1337,7 @@ impl<O: ClassObject> CurveClassification<O> {
             {
                 touch_1st_on_seam = end_on_seams(
                     k,
+                    geometry,
                     surface,
                     props,
                     touch_1st_on_pole,
@@ -1172,6 +1349,7 @@ impl<O: ClassObject> CurveClassification<O> {
                 )?;
                 touch_last_on_seam = end_on_seams(
                     k,
+                    geometry,
                     surface,
                     props,
                     touch_last_on_pole,
@@ -1222,14 +1400,15 @@ impl<O: ClassObject> CurveClassification<O> {
         // for every ClassifyCrv/rLoop Touch - calculate eArriveTypes and eDepartTypes
         let ctx = TouchContext {
             k,
-            geometry,
-            surface,
             face,
             upper_faceuse,
-            classify_crv,
+            classify_crv: classify_crv_handle.ok_or_else(|| SolidError::null_pointer(OP_CROSS))?,
             crv_classification_interval,
             ivl_cnt: crv_classification_ivl_cnt,
         };
+        // Neither a geometry view nor a pointer into the arena survives a
+        // mutable sector/binormal call. Subsequent reads resolve the same handles.
+        drop(view);
         let mut i1 = 1;
         while i1 < raw.len() {
             let i0 = i1 - 1;
@@ -1237,6 +1416,7 @@ impl<O: ClassObject> CurveClassification<O> {
             let depart_touch = touch_at(&raw, i1)?;
             let (arrive, depart) = self.classify_touch(
                 &ctx,
+                execution,
                 &arrive_touch,
                 arrive_touch.loop_dir,
                 depart_touch.loop_dir,
@@ -1364,9 +1544,10 @@ impl<O: ClassObject> CurveClassification<O> {
     /// The arrive and depart directions of one raw touch pair (the body of
     /// `GetLoopCrossings`' touch loop; a `continue` returns the directions so far).
     #[allow(clippy::too_many_lines)] // one upstream loop body
-    fn classify_touch<G: ClassGeometry<O>>(
+    fn classify_touch<E: LoopCrossingsExecution<O>>(
         &self,
-        c: &TouchContext<'_, O, G>,
+        c: &TouchContext<'_, O>,
+        execution: &mut E,
         arrive_touch: &TouchData<O>,
         mut arrive_type: CrvDirOnFaceType,
         mut depart_type: CrvDirOnFaceType,
@@ -1377,17 +1558,22 @@ impl<O: ClassObject> CurveClassification<O> {
         let this_param = arrive_touch.param;
 
         // ThisTouch->ClassifyCrv(dThisTouch_Param) geometry properties
-        let classify_crv_pn = eval_pn(c.classify_crv, this_param)?;
+        let classify_crv_pn = eval_pn(c.curve(&execution.geometry())?, this_param)?;
         let classify_crv_uv = drop_uv(
             c.k,
-            c.surface,
+            &execution.geometry(),
+            c.surface(&execution.geometry())?,
             classify_crv_pn[0],
-            &c.surface.natural_uv_domain(),
+            &c.surface(&execution.geometry())?.natural_uv_domain(),
             None,
             None,
             Vec2::UNDEF,
         )?;
-        let classify_crv_uv_1st_dir = drop_vector(c.surface, classify_crv_uv, classify_crv_pn[1])?;
+        let classify_crv_uv_1st_dir = drop_vector(
+            c.surface(&execution.geometry())?,
+            classify_crv_uv,
+            classify_crv_pn[1],
+        )?;
         // a failed Unitize leaves the vector unchanged
         let classify_crv_uv_tan =
             ignored(classify_crv_uv_1st_dir.unitize())?.unwrap_or(classify_crv_uv_1st_dir);
@@ -1413,7 +1599,7 @@ impl<O: ClassObject> CurveClassification<O> {
         if let Some(vertex) = this_vertex {
             // ---- VertexTouch branch
             let mut vertexuses =
-                vertex_vertexuses_of_face(c.geometry, vertex, c.face, c.upper_faceuse)?;
+                vertex_vertexuses_of_face(&execution.geometry(), vertex, c.face, c.upper_faceuse)?;
 
             // no work - no Vertexuses connected to Face->TgtLoop
             if vertexuses.is_empty() {
@@ -1423,7 +1609,7 @@ impl<O: ClassObject> CurveClassification<O> {
             // Vertex-loop vertexuses are not two-arm face sectors: zero-length cracks
             let mut kept = Vec::with_capacity(vertexuses.len());
             for &vu in &vertexuses {
-                if vertexuse_is_loop_vertexuse(c.geometry, vu)? {
+                if vertexuse_is_loop_vertexuse(&execution.geometry(), vu)? {
                     continue;
                 }
                 kept.push(vu);
@@ -1443,7 +1629,7 @@ impl<O: ClassObject> CurveClassification<O> {
             let mut sectors = Vec::with_capacity(vertexuses.len());
             let mut sector_ivl_rad = Vec::with_capacity(vertexuses.len());
             for &vu in &vertexuses {
-                let sector = vertexuse_compute_uv_sector(c.k, c.geometry, vu)?;
+                let sector = execution.vertexuse_sector(c.k, vu)?;
                 let beg_rad = ccw_angle(sector.beg_edge_uv_tan)?;
                 let end_rad = ccw_angle(sector.end_edge_uv_tan)?;
                 let mut ivl = PeriodicExtent1d::full(TWO_PI);
@@ -1455,8 +1641,18 @@ impl<O: ClassObject> CurveClassification<O> {
             // for every VertexSector - check arrival/departure SectorIvl-AngRad containment
             for (sector, ivl_rad) in sectors.iter().zip(&sector_ivl_rad) {
                 let vertex_uv = sector.beg_edge_uv_point;
-                let beg_pn = Self::directional_pn(c, vertex_uv, sector.beg_edge_uv_tan)?;
-                let end_pn = Self::directional_pn(c, vertex_uv, sector.end_edge_uv_tan)?;
+                let beg_pn = Self::directional_pn(
+                    c,
+                    &execution.geometry(),
+                    vertex_uv,
+                    sector.beg_edge_uv_tan,
+                )?;
+                let end_pn = Self::directional_pn(
+                    c,
+                    &execution.geometry(),
+                    vertex_uv,
+                    sector.end_edge_uv_tan,
+                )?;
 
                 // tangent ClassifyCrv Arrivals/Departures in 3d with SM_ANG_TOL_DEG
                 let t1 = classify_crv_pn[1];
@@ -1483,21 +1679,27 @@ impl<O: ClassObject> CurveClassification<O> {
                             SurfParamType::U
                         };
                     let system_zone = zone_tol_3d(c.k, SmallTopoType::NormalSize);
-                    let depart_uv = ignored(c.surface.find_degen_param_for_direction(
-                        classify_crv_uv,
-                        t1,
-                        true,
-                        free_param,
-                        system_zone,
-                    ))?
+                    let depart_uv = ignored(
+                        c.surface(&execution.geometry())?
+                            .find_degen_param_for_direction(
+                                classify_crv_uv,
+                                t1,
+                                true,
+                                free_param,
+                                system_zone,
+                            ),
+                    )?
                     .map_or(classify_crv_uv, |d| d.uv);
-                    let arrive_uv = ignored(c.surface.find_degen_param_for_direction(
-                        classify_crv_uv,
-                        -t1,
-                        true,
-                        free_param,
-                        system_zone,
-                    ))?
+                    let arrive_uv = ignored(
+                        c.surface(&execution.geometry())?
+                            .find_degen_param_for_direction(
+                                classify_crv_uv,
+                                -t1,
+                                true,
+                                free_param,
+                                system_zone,
+                            ),
+                    )?
                     .map_or(classify_crv_uv, |d| d.uv);
                     let beg = uv_coord(sector.beg_edge_uv_point, free_param);
                     let end = uv_coord(sector.end_edge_uv_point, free_param);
@@ -1569,8 +1771,10 @@ impl<O: ClassObject> CurveClassification<O> {
                         let tgt_edgeuse =
                             tgt_edgeuse.ok_or_else(|| SolidError::null_pointer(OP_CROSS))?;
                         let speed_ratio = classify_crv_uv_1st_dir.length() / end_speed;
-                        let tgt_ivl =
-                            edge_interval(c.geometry, edgeuse_edge(c.geometry, tgt_edgeuse)?)?;
+                        let tgt_ivl = edge_interval(
+                            &execution.geometry(),
+                            edgeuse_edge(&execution.geometry(), tgt_edgeuse)?,
+                        )?;
                         let ivl_beg = are_same(end_param, tgt_ivl.min());
                         let mut smp_edgeuse_param = if ivl_beg {
                             tgt_ivl.min()
@@ -1598,10 +1802,13 @@ impl<O: ClassObject> CurveClassification<O> {
                         let mut bn_point = Vec3::UNDEF;
                         let mut bn_binormal = Vec3::UNDEF;
                         for _ in 0..10 {
-                            eval_pn_into(c.classify_crv, smp_classify_crv_param, &mut smp_pn)?;
-                            edgeuse_evaluate_binormal(
+                            eval_pn_into(
+                                c.curve(&execution.geometry())?,
+                                smp_classify_crv_param,
+                                &mut smp_pn,
+                            )?;
+                            execution.edgeuse_binormal(
                                 c.k,
-                                c.geometry,
                                 tgt_edgeuse,
                                 smp_edgeuse_param,
                                 &mut bn_point,
@@ -1644,18 +1851,18 @@ impl<O: ClassObject> CurveClassification<O> {
             }
         } else if let Some(edge) = this_edge {
             // ---- EdgeTouch branch
-            let edge_crv = edge_curve(c.geometry, edge)?;
-            let edge_ivl = edge_interval(c.geometry, edge)?;
+            let edge_ivl = edge_interval(&execution.geometry(), edge)?;
             let edge_param = pt_classify.t_param();
 
             // Edge->Edgeuses connected to the face's upper faceuse, Edge Pt/1stDer
-            let edgeuses = edge_edgeuses(c.geometry, edge, c.upper_faceuse, OP_CROSS)?;
-            let edge_pn = eval_pn(edge_crv, edge_param)?;
+            let edgeuses = edge_edgeuses(&execution.geometry(), edge, c.upper_faceuse, OP_CROSS)?;
+            let edge_pn = eval_pn(edge_curve(&execution.geometry(), edge)?, edge_param)?;
             let _edge_uv = drop_uv(
                 c.k,
-                c.surface,
+                &execution.geometry(),
+                c.surface(&execution.geometry())?,
                 edge_pn[0],
-                &c.surface.natural_uv_domain(),
+                &c.surface(&execution.geometry())?.natural_uv_domain(),
                 None,
                 None,
                 Vec2::UNDEF,
@@ -1665,13 +1872,13 @@ impl<O: ClassObject> CurveClassification<O> {
             let are_tangent = edge_pn[1].is_parallel_to(classify_crv_pn[1], ANG_TOL_DEG);
 
             for &edgeuse in &edgeuses {
-                let orient = edgeuse_orientation(c.geometry, edgeuse, OP_CROSS)?;
+                let orient = edgeuse_orientation(&execution.geometry(), edgeuse, OP_CROSS)?;
                 let edgeuse_tan = if orient == OrientType::Same {
                     edge_pn[1]
                 } else {
                     -edge_pn[1]
                 };
-                let surf_norm = ignored(c.surface.evaluate_normal(
+                let surf_norm = ignored(c.surface(&execution.geometry())?.evaluate_normal(
                     classify_crv_uv,
                     Side::Left,
                     Side::Left,
@@ -1761,12 +1968,12 @@ impl<O: ClassObject> CurveClassification<O> {
                             // `EvaluateBinormal` leaves `UNDEF` for the binormal and for the
                             // point too, unless it failed after initialising its outputs, when
                             // the point is `(0,0,0)` (`edgeuse_evaluate_binormal`).
-                            let smp_pn = eval_pn(c.classify_crv, smp_classify_crv_param)?;
+                            let smp_pn =
+                                eval_pn(c.curve(&execution.geometry())?, smp_classify_crv_param)?;
                             let mut bn_point = Vec3::UNDEF;
                             let mut bn_binormal = Vec3::UNDEF;
-                            edgeuse_evaluate_binormal(
+                            execution.edgeuse_binormal(
                                 c.k,
-                                c.geometry,
                                 edgeuse,
                                 smp_edgeuse_param,
                                 &mut bn_point,
@@ -1807,13 +2014,14 @@ impl<O: ClassObject> CurveClassification<O> {
 
     /// `pSurface->EvaluateDirectionalDerivs(uv, dir, 1, pn)` with the status ignored.
     fn directional_pn<G: ClassGeometry<O>>(
-        c: &TouchContext<'_, O, G>,
+        c: &TouchContext<'_, O>,
+        geometry: &G,
         uv: Point2,
         dir: Vec2,
     ) -> Result<[Vec3; 2]> {
         let mut pn = [Vec3::UNDEF; 2];
         if let Some(d) = ignored(
-            c.surface
+            c.surface(geometry)?
                 .evaluate_directional_derivs(uv, dir, 1, true, true),
         )? {
             for (o, v) in pn.iter_mut().zip(d) {
@@ -1825,21 +2033,34 @@ impl<O: ClassObject> CurveClassification<O> {
 }
 
 /// The face and curve state `GetLoopCrossings` shares with its touch loop body.
-struct TouchContext<'a, O, G> {
+struct TouchContext<'a, O> {
     /// The kernel.
     k: &'a Kernel,
-    /// The geometry behind the handles.
-    geometry: &'a G,
-    /// `pSurface`: the face's surface.
-    surface: &'a Surface,
     /// `pFace`.
     face: Option<O>,
     /// `pUpperFaceuse`.
     upper_faceuse: Option<O>,
     /// `pClassifyCrv`.
-    classify_crv: &'a Curve,
+    classify_crv: O,
     /// `sCrvClassification_Interval`.
     crv_classification_interval: Extent1d,
     /// `lCrvClassification_IvlCnt`.
     ivl_cnt: usize,
+}
+
+impl<O: ClassObject> TouchContext<'_, O> {
+    fn surface<'g>(&self, geometry: &'g impl ClassGeometry<O>) -> Result<&'g Surface> {
+        face_surface(
+            geometry,
+            self.face
+                .ok_or_else(|| SolidError::null_pointer(OP_CROSS))?,
+            OP_CROSS,
+        )?
+        .ok_or_else(|| SolidError::null_pointer(OP_CROSS))
+    }
+    fn curve<'g>(&self, geometry: &'g impl ClassGeometry<O>) -> Result<&'g Curve> {
+        geometry
+            .curve(self.classify_crv)
+            .ok_or_else(|| SolidError::null_pointer(OP_CROSS))
+    }
 }

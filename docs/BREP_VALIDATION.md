@@ -747,3 +747,21 @@ representation; conflicting external owner metadata is rejected. This does not
 represent C++ independently corruptible generator/context backlinks. The public
 SDK control comparison covers four actual geometry kinds with and without a
 face owner; it does not qualify every malformed primitive or failure-label path.
+
+The owning periodic seam path now shares its ordered controller with the borrowed
+entrypoint. Vertex/edge intersections, lazy gaps, UV sectors and binormals use the
+actual mutable BRep at their native call positions. Short geometry borrows end
+before mutations; the owning path does not clone the BRep. The legacy borrowed
+adapter retains its separate snapshot behavior. Source Stage2 partial outputs and
+the truthy `SM_SUCCESS` boolean convention remain distinct from the seam enums.
+Actual curve domains resolve CCI duplicate comparisons; typed edge intervals and
+connectivity retain foreign-arena/error guards. Missing two-surface refinement and
+tolerance mutation still refuse at their actual execution points.
+
+Circle and Ellipse assertions run the owning B-spline parent and their original
+concrete/polar rules, preserving Circle's GIVEN parent-skip convention. Tight face
+bounds have a mutable-owner entry sharing the original extrema/classification
+algorithm; directed global and local solver constructors receive the real face
+tolerance before their reference-plane bounding-box queries. Numerical native
+validity and finite material measurements still do not establish general source
+equivalence or a continuous error bound.

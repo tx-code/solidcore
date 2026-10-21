@@ -1041,6 +1041,29 @@ impl Ellipse {
         Ok(rtn)
     }
 
+    /// Concrete assertion chain after the owning caller has run the actual
+    /// B-spline parent. `given` retains Circle's native parent-skip rule.
+    /// The contained polar converter has a separate stable report identity.
+    pub(crate) fn assert_own_definition_valid(
+        &mut self,
+        k: &Kernel,
+        mut list: Option<&mut AssertArray>,
+        given: bool,
+        key: ObjectKey,
+        polar_key: ObjectKey,
+    ) -> Result<bool> {
+        // SmCircle.cpp:422--432 skips the entire Ellipse parent for GIVEN;
+        // ordinary levels run Ellipse's own rules after the B-spline parent.
+        let mut valid = true;
+        if !self.circle || !given {
+            valid &= self.ellipse_assert_valid(k, list.as_deref_mut(), true, key, polar_key)?;
+        }
+        if self.circle {
+            valid &= self.assert_valid(k, list, true, key, polar_key)?;
+        }
+        Ok(valid)
+    }
+
     /// `SmEllipse::AssertValid` (see [`Self::assert_valid`]).
     fn ellipse_assert_valid(
         &mut self,

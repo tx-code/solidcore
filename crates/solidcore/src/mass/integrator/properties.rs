@@ -7,7 +7,7 @@
 //! | Rust | Upstream |
 //! |------|----------|
 //! | [`edge_properties`] | `SmEdge::ComputePreciseProperties` |
-//! | [`face_properties`], [`boundary_properties`] | `SmFace::ComputePreciseProperties` |
+//! | [`face_properties`], [`boundary_properties`], [`face_properties_with_origins`], [`boundary_properties_with_origins`] | `SmFace::ComputePreciseProperties` |
 //! | [`brep_properties`] | `SmBrep::ComputePreciseProperties` |
 //! | [`MassPropertyBehavior`] | `SmMassPropertyBehavior` |
 //! | [`edge_length`], [`face_area`], [`face_centroid`] | `SmApiEdgeComputeLength`, `SmApiFaceComputeArea`, `SmApiFaceComputeCentroid` |
@@ -18,7 +18,11 @@
 //! B-rep enumeration, bounding boxes, and region classification remain calls into
 //! their unported units. `boundary_properties` exposes the integration after trim
 //! construction for callers already holding oriented trim curves. Nested integration
-//! has a fixed two-level call structure, not input-driven recursion.
+//! has a fixed two-level call structure, not input-driven recursion. The current
+//! double-origin and exact knot-span integration follow maintained `SmFace.cpp`,
+//! SHA256 `6f68ced6cffc0cf235644b17b071423294d6ac5a601750fad0c65adb0d30c3e1`.
+//! Span subdivisions change numerical stopping control, never source geometry or
+//! tolerance; completed integrals are observations, not certified error bounds.
 use super::{OdeIntegrator, OdeOptions};
 use crate::curve::curve::Curve;
 use crate::geom::attribute::{ids, AttributeStore, AttributeValue, ObjectKey};
@@ -34,6 +38,10 @@ use crate::topology::face::p2::{
 };
 use crate::topology::{edge, vertex, Brep, EdgeId, FaceId, RegionId, VertexId};
 use crate::{EntityRef, Result, SolidError};
+
+pub(crate) mod spans;
+
+use spans::{span_accuracy, Partition, INITIAL_STEP_DIVISORS};
 
 const OP: &str = "mass::integrator::properties";
 
@@ -211,6 +219,37 @@ pub fn face_properties(
     thickness: f64,
     flags: u64,
 ) -> Result<PreciseProperties> {
+    face_properties_with_origins(
+        k,
+        b,
+        f,
+        orientation,
+        accuracy,
+        origin,
+        origin,
+        estimated_area,
+        thickness,
+        flags,
+    )
+}
+
+/// Precise face integration with independent frames for area and volume moments.
+/// Area moments `[0..4]` are formed directly relative to `area_origin`; geometric
+/// volume moments `[4..8]` use `volume_origin`. The stopping control is applied
+/// directly, without the public `SM_API` area/mass wrappers' accuracy clamps.
+/// This is the maintained `SmFace::ComputePreciseProperties` double-origin overload.
+pub fn face_properties_with_origins(
+    k: &Kernel,
+    b: &Brep,
+    f: FaceId,
+    orientation: OrientType,
+    accuracy: f64,
+    volume_origin: Point3,
+    area_origin: Point3,
+    estimated_area: f64,
+    thickness: f64,
+    flags: u64,
+) -> Result<PreciseProperties> {
     valid_flags(flags)?;
     let trims = boundary(k, b, f)?;
     let surface = b
@@ -218,14 +257,15 @@ pub fn face_properties(
         .surface
         .as_ref()
         .ok_or_else(|| SolidError::null_pointer(OP))?;
-    boundary_properties(
+    boundary_properties_with_origins(
         k,
         surface,
         &trims,
         &b.face(f)?.uv_domain,
         orientation,
         accuracy,
-        origin,
+        volume_origin,
+        area_origin,
         estimated_area,
         thickness,
         flags,
@@ -246,8 +286,41 @@ pub fn boundary_properties(
     trims: &[Curve],
     domain: &Extent2d,
     orientation: OrientType,
-    mut accuracy: f64,
+    accuracy: f64,
     origin: Point3,
+    estimated_area: f64,
+    thickness: f64,
+    flags: u64,
+) -> Result<PreciseProperties> {
+    boundary_properties_with_origins(
+        k,
+        surface,
+        trims,
+        domain,
+        orientation,
+        accuracy,
+        origin,
+        origin,
+        estimated_area,
+        thickness,
+        flags,
+    )
+}
+
+/// The same ordered oriented-trim integration with distinct area/volume frames.
+/// Concrete clamped B-splines are partitioned at every positive native knot span;
+/// other evaluators keep their original parameter interval. Per-span numerical
+/// controls and native one-sided derivatives follow `SmFaceIntegralSpans.h`.
+/// All spans of every trim must succeed before this value can be returned.
+pub fn boundary_properties_with_origins(
+    k: &Kernel,
+    surface: &Surface,
+    trims: &[Curve],
+    domain: &Extent2d,
+    orientation: OrientType,
+    mut accuracy: f64,
+    volume_origin: Point3,
+    area_origin: Point3,
     estimated_area: f64,
     thickness: f64,
     flags: u64,
@@ -268,61 +341,87 @@ pub fn boundary_properties(
         if let Some(s) = scale.first_mut() {
             *s = estimated_area / 10.0;
         }
-        let eval = OdeArea {
-            kernel: k,
-            surface,
-            uv_curve: trim,
-            min_v: domain.min().y,
-            iso_curve_accuracy: accuracy / 10.0,
-            y_scale: &scale,
-            origin,
-            face_thickness: thickness,
-            layout: &layout,
-        };
         let ivl = trim.natural_interval();
-        let span = ivl.max() - ivl.min();
+        let partition = Partition::make(trim, &ivl)?;
+        let span_accuracy = span_accuracy(accuracy / 10.0, partition.size());
+        if span_accuracy.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+            || !span_accuracy.is_finite()
+        {
+            return Err(SolidError::invalid_input(
+                OP,
+                "nonpositive or nonfinite span accuracy",
+            ));
+        }
         let mut y = vec![0.0; layout.num_components];
-        let mut scratch = vec![0.0; layout.num_components + 1];
-        let mut status = Err(SolidError::sm_err(OP));
-        for divisor in [2.0, 8.0, 64.0, 512.0, 4096.0] {
-            y.fill(0.0);
-            status = OdeIntegrator::default()
-                .integrate(
-                    &mut y,
-                    ivl.min(),
-                    ivl.max(),
-                    OdeOptions {
-                        accuracy: accuracy / 10.0,
-                        initial_step: span / divisor,
-                        minimum_step: 0.0,
-                        scale: Some(&scale),
-                    },
-                    |t, _, dy| {
-                        // A zero U tangent leaves the caller's derivative array
-                        // untouched upstream. Preserve this particular stage's
-                        // values, rather than another stage's shared scratch.
-                        if let Some(unused) = scratch.first_mut() {
-                            *unused = 0.0;
-                        }
-                        for (s, d) in scratch.iter_mut().skip(1).zip(dy.iter()) {
-                            *s = *d;
-                        }
-                        eval.evaluate(t, &mut scratch)?;
-                        for (d, v) in dy.iter_mut().zip(scratch.iter().skip(1)) {
-                            *d = *v;
-                        }
-                        Ok(())
-                    },
-                )
-                .map(|_| ());
-            if status.is_ok() {
-                break;
+        for segment in 0..partition.size() {
+            let span = partition.span(segment, &ivl)?;
+            let native_span = partition.is_split().then_some(span);
+            let eval = OdeArea {
+                kernel: k,
+                surface,
+                uv_curve: trim,
+                min_v: domain.min().y,
+                iso_curve_accuracy: span_accuracy,
+                y_scale: &scale,
+                origin: volume_origin,
+                face_thickness: thickness,
+                layout: &layout,
+            };
+            let (min, max) = if native_span.is_some() {
+                (0.0, 1.0)
+            } else {
+                (span.min, span.max)
+            };
+            let integrator = OdeIntegrator::default();
+            let mut partial = vec![0.0; layout.num_components];
+            let mut scratch = vec![0.0; layout.num_components + 1];
+            let mut status = Err(SolidError::sm_err(OP));
+            for divisor in INITIAL_STEP_DIVISORS {
+                // Retain all five initial-step retries and discard every failed
+                // partial. Do not commit a trim until all native spans succeed.
+                partial.fill(0.0);
+                status = integrator
+                    .integrate(
+                        &mut partial,
+                        min,
+                        max,
+                        OdeOptions {
+                            accuracy: span_accuracy,
+                            initial_step: (max - min) / divisor,
+                            minimum_step: 0.0,
+                            scale: Some(&scale),
+                        },
+                        |t, _, dy| {
+                            // Legacy non-split vertical stages leave the derivative
+                            // untouched. The split evaluator explicitly zeros them.
+                            if let Some(unused) = scratch.first_mut() {
+                                *unused = 0.0;
+                            }
+                            for (s, d) in scratch.iter_mut().skip(1).zip(dy.iter()) {
+                                *s = *d;
+                            }
+                            eval.evaluate_in_frame_and_span(
+                                t,
+                                &mut scratch,
+                                area_origin,
+                                native_span,
+                            )?;
+                            for (d, v) in dy.iter_mut().zip(scratch.iter().skip(1)) {
+                                *d = *v;
+                            }
+                            Ok(())
+                        },
+                    )
+                    .map(|_| ());
+                if status.is_ok() || status.as_ref().is_err_and(SolidError::is_unported) {
+                    break;
+                }
             }
-            if status.as_ref().is_err_and(SolidError::is_unported) {
-                break;
+            status?;
+            for (total, value) in y.iter_mut().zip(partial) {
+                *total += value;
             }
         }
-        status?;
         let value = |index: usize| y.get(index.wrapping_sub(1)).copied().unwrap_or(0.0);
         if layout.area != 0 {
             result.area += value(layout.area);
@@ -727,6 +826,342 @@ mod tests {
                     .unwrap(),
                 value
             );
+        }
+    }
+
+    fn rectangle(origin: Point3) -> (Surface, Vec<Curve>, Extent2d) {
+        use crate::curve::line::Line;
+        use crate::math::Vec2;
+        use crate::surface::plane::Plane;
+        let domain = Extent2d::from_bounds(0., 0., 1., 1.);
+        let surface = Surface::from(Plane::new(
+            origin,
+            Vec3::X,
+            Vec3::Y,
+            Vec2::new(2., 3.),
+            &domain,
+        ));
+        let corners = [
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::new(1., 1., 0.),
+            Vec3::Y,
+            Vec3::ZERO,
+        ];
+        let curves = corners
+            .windows(2)
+            .map(|p| {
+                Line::create_line_segment(2, p[0], p[1], None)
+                    .unwrap()
+                    .into()
+            })
+            .collect();
+        (surface, curves, domain)
+    }
+
+    #[test]
+    fn independent_area_and_volume_origins_follow_the_translated_plane_equations() {
+        use crate::topology::face::p2::{PPF_VOLUME, PPF_VOLUME_FIRST_MOMENTS};
+        let k = Kernel::default();
+        let area_origin = Vec3::new(10., -20., 2.);
+        let volume_origin = Vec3::new(-1e9, 2e9, 0.);
+        let (surface, trims, domain) = rectangle(area_origin);
+        let groups = PPF_AREA | PPF_AREA_FIRST_MOMENTS | PPF_VOLUME | PPF_VOLUME_FIRST_MOMENTS;
+        let actual = boundary_properties_with_origins(
+            &k,
+            &surface,
+            &trims,
+            &domain,
+            OrientType::Opposite,
+            1e-7,
+            volume_origin,
+            area_origin,
+            6.,
+            0.,
+            groups,
+        )
+        .unwrap();
+        // S(u,v)=(10+2u,-20+3v,2), Jacobian=6. Direct integration
+        // gives A=6, local area first=(6,9,0), V=12 and the stated dV moments.
+        // The volume frame is far away, while the physical face remains small:
+        // shifting a completed volume-frame area moment back is not equivalent.
+        // This isolated sheet's signed integral is not a material-solid claim.
+        assert!((actual.area - 6.).abs() < 1e-10);
+        assert!((actual.volume - 12.).abs() < 1e-10);
+        assert!((actual.moments[0] - Vec3::new(6., 9., 0.)).length() < 1e-8);
+        let expected = Vec3::new((1e9 + 11.) * 12., (-2e9 - 18.5) * 12., 12.);
+        assert!((actual.moments[4] - expected).length() < 1e-4);
+        let local = boundary_properties(
+            &k,
+            &surface,
+            &trims,
+            &domain,
+            OrientType::Opposite,
+            1e-7,
+            area_origin,
+            6.,
+            0.,
+            PPF_AREA | PPF_AREA_FIRST_MOMENTS,
+        )
+        .unwrap();
+        assert_eq!(actual.area, local.area);
+        assert_eq!(actual.moments[0], local.moments[0]);
+        let common = boundary_properties(
+            &k,
+            &surface,
+            &trims,
+            &domain,
+            OrientType::Opposite,
+            1e-7,
+            volume_origin,
+            6.,
+            0.,
+            PPF_VOLUME | PPF_VOLUME_FIRST_MOMENTS,
+        )
+        .unwrap();
+        assert_eq!(actual.volume, common.volume);
+        assert_eq!(actual.moments[4], common.moments[4]);
+    }
+
+    fn polygon_curve(knots: &[f64]) -> Curve {
+        use crate::nurbs::b_spline_curve::{
+            BSplineCurve, BSplineCurveForm, CanonicalData, KnotType,
+        };
+        // The first top edge carries the whole Green-area contribution. Its
+        // very short native interval must not disappear as a zero integral.
+        let points = [
+            Vec3::new(1., 1., 0.),
+            Vec3::Y,
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::new(1., 1., 0.),
+        ];
+        BSplineCurve::create_canonical(&CanonicalData {
+            dim: 2,
+            degree: 1,
+            control_points: &points,
+            form: BSplineCurveForm::Unspecified,
+            knot_multiplicities: &[2, 1, 1, 1, 2],
+            knots,
+            knot_type: KnotType::Unspecified,
+            weights: None,
+            trim: None,
+        })
+        .unwrap()
+        .into()
+    }
+
+    #[test]
+    fn actual_positive_knot_spans_measure_the_same_polygon_in_small_and_shifted_domains() {
+        use crate::math::Vec2;
+        use crate::surface::plane::Plane;
+        let k = Kernel::default();
+        let domain = Extent2d::from_bounds(0., 0., 1., 1.);
+        let surface = Surface::from(Plane::new(
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            Vec2::new(1., 1.),
+            &domain,
+        ));
+        for knots in [
+            [0., 1e-10, 1., 2., 3.],
+            [1e6, 1e6 + 0.25, 1e6 + 1., 1e6 + 2., 1e6 + 3.],
+        ] {
+            let trim = polygon_curve(&knots);
+            let saved = trim.natural_interval();
+            let actual = boundary_properties(
+                &k,
+                &surface,
+                std::slice::from_ref(&trim),
+                &domain,
+                OrientType::Same,
+                1e-7,
+                Vec3::ZERO,
+                1.,
+                0.,
+                PPF_AREA | PPF_AREA_FIRST_MOMENTS,
+            )
+            .unwrap();
+            assert!((actual.area - 1.).abs() < 1e-10);
+            assert!((actual.moments[0] - Vec3::new(0.5, 0.5, 0.)).length() < 1e-10);
+            assert_eq!(trim.natural_interval(), saved);
+        }
+    }
+
+    fn circle_trim(radius: f64, clockwise: bool) -> Curve {
+        use crate::nurbs::b_spline_curve::{
+            BSplineCurve, BSplineCurveForm, CanonicalData, KnotType,
+        };
+        let sign = if clockwise { -1. } else { 1. };
+        let points = [
+            (1., 0.),
+            (1., 1.),
+            (0., 1.),
+            (-1., 1.),
+            (-1., 0.),
+            (-1., -1.),
+            (0., -1.),
+            (1., -1.),
+            (1., 0.),
+        ]
+        .map(|(x, y)| Vec3::new(radius * x, radius * y * sign, 0.));
+        let q = 0.5_f64.sqrt();
+        let weights = [1., q, 1., q, 1., q, 1., q, 1.];
+        BSplineCurve::create_canonical(&CanonicalData {
+            dim: 2,
+            degree: 2,
+            control_points: &points,
+            form: BSplineCurveForm::CircularArc,
+            knot_multiplicities: &[3, 2, 2, 2, 3],
+            knots: &[0., 0.25, 0.5, 0.75, 1.],
+            knot_type: KnotType::Unspecified,
+            weights: Some(&weights),
+            trim: None,
+        })
+        .unwrap()
+        .into()
+    }
+
+    #[test]
+    fn rational_annulus_with_clockwise_hole_matches_independent_area_without_parameter_edits() {
+        use crate::math::Vec2;
+        use crate::surface::plane::Plane;
+        let k = Kernel::default();
+        // Same public analytic truth and 1e-4 comparison screen as maintained
+        // tests/face_property_integration/tests.cpp::CheckAnnuli. This numerical
+        // agreement is not a continuous approximation/error certificate.
+        for (outer, inner) in [(1., 0.9), (10., 9.)] {
+            let domain = Extent2d::from_bounds(-outer, -outer, outer, outer);
+            let surface = Surface::from(Plane::new(
+                Vec3::ZERO,
+                Vec3::X,
+                Vec3::Y,
+                Vec2::new(1., 1.),
+                &domain,
+            ));
+            let actual = boundary_properties(
+                &k,
+                &surface,
+                &[circle_trim(outer, false), circle_trim(inner, true)],
+                &domain,
+                OrientType::Same,
+                1e-4,
+                Vec3::ZERO,
+                outer * outer,
+                0.,
+                PPF_AREA | PPF_AREA_FIRST_MOMENTS,
+            )
+            .unwrap();
+            let expected = PI * (outer * outer - inner * inner);
+            assert!((actual.area - expected).abs() <= expected * 1e-4);
+            assert!((actual.moments[0] / actual.area).length() <= outer * 1e-4);
+        }
+    }
+
+    #[test]
+    fn actual_owned_face_api_uses_the_shared_frames_and_preserves_legacy_equal_origin_entry() {
+        use crate::curve::line::Line;
+        use crate::topology::brep_constructor::{BrepConstructor, VertexNode};
+        let k = Kernel::default();
+        let origin = Vec3::new(10., -20., 2.);
+        let (surface, _, domain) = rectangle(origin);
+        let mut builder = BrepConstructor::new().unwrap();
+        builder.start_shell().unwrap();
+        let face = builder.start_face(OrientType::Same).unwrap();
+        builder.set_face_surface(surface, domain).unwrap();
+        builder.start_loop(OrientType::Same).unwrap();
+        let corners = [
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::new(1., 1., 0.),
+            Vec3::Y,
+            Vec3::ZERO,
+        ];
+        for pair in corners.windows(2) {
+            builder
+                .start_edge(&k, OrientType::Same, None, None, None)
+                .unwrap();
+            let physical = |uv: Vec3| origin + Vec3::new(2. * uv.x, 3. * uv.y, 0.);
+            builder
+                .set_edge_curve(
+                    &k,
+                    Line::from_points(physical(pair[0]), physical(pair[1]), 3).into(),
+                    false,
+                )
+                .unwrap();
+            builder
+                .set_limits(&k, VertexNode::Parameter(0.), VertexNode::Parameter(1.))
+                .unwrap();
+            builder
+                .set_edge_curve(
+                    &k,
+                    Line::create_line_segment(2, pair[0], pair[1], None)
+                        .unwrap()
+                        .into(),
+                    true,
+                )
+                .unwrap();
+            builder.end_edge().unwrap();
+        }
+        builder.end_loop().unwrap();
+        builder.end_face().unwrap();
+        let flags = PPF_AREA | PPF_AREA_FIRST_MOMENTS;
+        let actual = face_properties_with_origins(
+            &k,
+            builder.brep(),
+            face,
+            OrientType::Same,
+            1e-7,
+            Vec3::ZERO,
+            origin,
+            6.,
+            0.,
+            flags,
+        )
+        .unwrap();
+        assert!((actual.area - 6.).abs() < 1e-10);
+        assert!((actual.moments[0] - Vec3::new(6., 9., 0.)).length() < 1e-10);
+        let old = face_properties(
+            &k,
+            builder.brep(),
+            face,
+            OrientType::Same,
+            1e-7,
+            origin,
+            6.,
+            0.,
+            flags,
+        )
+        .unwrap();
+        let equal = face_properties_with_origins(
+            &k,
+            builder.brep(),
+            face,
+            OrientType::Same,
+            1e-7,
+            origin,
+            origin,
+            6.,
+            0.,
+            flags,
+        )
+        .unwrap();
+        assert_eq!(old, equal);
+        for flags in [0, PPF_ALL | 0x40] {
+            assert!(face_properties_with_origins(
+                &k,
+                builder.brep(),
+                face,
+                OrientType::Same,
+                1e-7,
+                Vec3::ZERO,
+                origin,
+                6.,
+                0.,
+                flags
+            )
+            .is_err());
         }
     }
 }

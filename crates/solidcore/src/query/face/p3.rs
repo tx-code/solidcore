@@ -245,7 +245,11 @@ fn step_off(
 fn has_b_spline_box(s: &Surface) -> bool {
     matches!(
         s.kind(),
-        SurfaceKind::BSpline(_) | SurfaceKind::Plane(_) | SurfaceKind::SurfOfRevolution(_)
+        SurfaceKind::BSpline(_)
+            | SurfaceKind::Plane(_)
+            | SurfaceKind::SurfOfRevolution(_)
+            | SurfaceKind::Cone(_)
+            | SurfaceKind::Torus(_)
     )
 }
 
@@ -265,6 +269,8 @@ fn surface_is_planar(k: &Kernel, b: &Brep, f: FaceId, s: &Surface, tol_3d: f64) 
     let base = match s.kind() {
         SurfaceKind::BSpline(bs) => Some(bs),
         SurfaceKind::SurfOfRevolution(r) => Some(r.base()),
+        SurfaceKind::Cone(c) => Some(c.rev().base()),
+        SurfaceKind::Torus(t) => Some(t.base().base()),
         _ => None,
     };
     if let (Some(bs), Some(face_tol)) = (base, owning_face_tolerance(b, f, s)?) {
@@ -322,10 +328,138 @@ fn surface_bounding_box(
 /// the planarity test and the surface's loose box; [`SolidError::Unported`] from the
 /// global solves and point classifications.
 pub fn calculate_tight_bounding_box(k: &Kernel, b: &Brep, f: FaceId) -> Result<Extent3d> {
+    tight_box_using(
+        k,
+        &mut BorrowedTightBox {
+            original: b,
+            snapshot: b.clone(),
+        },
+        f,
+    )
+}
+
+/// Tight bounds through the actual mutable owner. Lazy trim/classification state
+/// remains in this model. Callers must refresh earlier derived-UV evidence after
+/// the query; no cloned B-rep or boundary-only extrema substitute is used.
+pub fn calculate_tight_bounding_box_in(k: &Kernel, b: &mut Brep, f: FaceId) -> Result<Extent3d> {
+    tight_box_using(k, &mut OwningTightBox { brep: b, face: f }, f)
+}
+
+trait TightBoxExecution {
+    fn brep(&self) -> &Brep;
+    fn global_starts(
+        &mut self,
+        k: &Kernel,
+        surface: &Surface,
+        domain: &Extent2d,
+        op: SolverOperation,
+        point: Point3,
+        tolerance: f64,
+        requested: SolutionRequested,
+    ) -> Result<Vec<crate::geom::solution_array::SolutionEnd>>;
+    fn classify(
+        &mut self,
+        k: &Kernel,
+        face: FaceId,
+        uv: Point2,
+        output: &mut PointClassification<EntityRef>,
+        options: PointClassifyOptions,
+    ) -> Result<()>;
+}
+struct BorrowedTightBox<'a> {
+    original: &'a Brep,
+    snapshot: Brep,
+}
+impl TightBoxExecution for BorrowedTightBox<'_> {
+    fn brep(&self) -> &Brep {
+        self.original
+    }
+    fn global_starts(
+        &mut self,
+        k: &Kernel,
+        surface: &Surface,
+        domain: &Extent2d,
+        op: SolverOperation,
+        point: Point3,
+        tolerance: f64,
+        requested: SolutionRequested,
+    ) -> Result<Vec<crate::geom::solution_array::SolutionEnd>> {
+        global_point_solve_starts(k, surface, domain, op, point, tolerance, requested)
+    }
+    fn classify(
+        &mut self,
+        k: &Kernel,
+        face: FaceId,
+        uv: Point2,
+        output: &mut PointClassification<EntityRef>,
+        options: PointClassifyOptions,
+    ) -> Result<()> {
+        point_classify(k, &mut self.snapshot, face, uv, output, options)
+    }
+}
+struct OwningTightBox<'a> {
+    brep: &'a mut Brep,
+    face: FaceId,
+}
+impl TightBoxExecution for OwningTightBox<'_> {
+    fn brep(&self) -> &Brep {
+        self.brep
+    }
+    fn global_starts(
+        &mut self,
+        k: &Kernel,
+        surface: &Surface,
+        domain: &Extent2d,
+        op: SolverOperation,
+        point: Point3,
+        tolerance: f64,
+        requested: SolutionRequested,
+    ) -> Result<Vec<crate::geom::solution_array::SolutionEnd>> {
+        let mut solutions = crate::geom::solution_array::SolutionArray::<EntityRef>::new();
+        surface.global_point_solve_into_with_surface_cache(
+            k,
+            Some(EntityRef::Face(self.face)),
+            domain,
+            op,
+            point,
+            tolerance,
+            None,
+            requested,
+            &mut solutions,
+            None,
+            &mut crate::topology::surface_cache::BrepSurfaceContext {
+                brep: self.brep,
+                face: self.face,
+            },
+        )?;
+        Ok(solutions
+            .as_slice()
+            .iter()
+            .map(|value| value.start)
+            .collect())
+    }
+    fn classify(
+        &mut self,
+        k: &Kernel,
+        face: FaceId,
+        uv: Point2,
+        output: &mut PointClassification<EntityRef>,
+        options: PointClassifyOptions,
+    ) -> Result<()> {
+        point_classify(k, self.brep, face, uv, output, options)
+    }
+}
+
+fn tight_box_using(
+    k: &Kernel,
+    execution: &mut impl TightBoxExecution,
+    f: FaceId,
+) -> Result<Extent3d> {
     let mut face_bbox = Extent3d::new();
 
-    let surface = face_surface(b, f, OP_TIGHT)?;
-    let face_zone_tol_3d = zone_tol3d(k, b.face(f)?.tolerance);
+    let evaluation_surface = face_surface(execution.brep(), f, OP_TIGHT)?.clone_for_evaluation()?;
+    let surface = &evaluation_surface;
+    let face_zone_tol_3d = zone_tol3d(k, execution.brep().face(f)?.tolerance);
 
     // Method: get the bounding box of the Vertices.
     // Then get the tight box of each Edge and union it in.
@@ -334,26 +468,26 @@ pub fn calculate_tight_bounding_box(k: &Kernel, b: &Brep, f: FaceId) -> Result<E
     // calculate its tight box and union it in.
 
     // Vertices:
-    for v in face_vertices(b, f, false, None)? {
-        face_bbox.add_point(b.vertex(v)?.point);
+    for v in face_vertices(execution.brep(), f, false, None)? {
+        face_bbox.add_point(execution.brep().vertex(v)?.point);
     } // end loop on Vertices
 
     // Edges:
-    for e in face_edges(b, f)? {
+    for e in face_edges(execution.brep(), f)? {
         // Get this Edge's tight box
-        let e_bbox = qe::calculate_tight_bounding_box(k, b, e)?.unwrap_or_default();
+        let e_bbox = qe::calculate_tight_bounding_box(k, execution.brep(), e)?.unwrap_or_default();
         face_bbox = face_bbox.union(&e_bbox);
     } // end loop on Edges
 
     // Now the surface.
     // If it's a plane, then we're done.
-    if surface_is_planar(k, b, f, surface, EFF_ZERO)? {
+    if surface_is_planar(k, execution.brep(), f, surface, EFF_ZERO)? {
         return Ok(face_bbox);
     }
 
     // First check the approximate box.
-    let uv_domain = b.face(f)?.uv_domain;
-    let srf_bbox = surface_bounding_box(k, b, f, surface, &uv_domain)?;
+    let uv_domain = execution.brep().face(f)?.uv_domain;
+    let srf_bbox = surface_bounding_box(k, execution.brep(), f, surface, &uv_domain)?;
     if srf_bbox.is_contained_by(&face_bbox, 0.0) {
         return Ok(face_bbox);
     }
@@ -369,7 +503,6 @@ pub fn calculate_tight_bounding_box(k: &Kernel, b: &Brep, f: FaceId) -> Result<E
 
     let mut dir_vec = Vec3::new(1.0, 0.0, 0.0); // +/- x
                                                 // (PointClassify may attach missing UV trim curves: a private snapshot of the B-rep)
-    let mut snapshot = b.clone();
     for idx in 0..3 {
         if idx == 1 {
             dir_vec = Vec3::new(0.0, 1.0, 0.0); // +/- y
@@ -383,7 +516,7 @@ pub fn calculate_tight_bounding_box(k: &Kernel, b: &Brep, f: FaceId) -> Result<E
             if pass == 1 {
                 dir_vec = -dir_vec;
             }
-            let solutions = ignored(global_point_solve_starts(
+            let solutions = ignored(execution.global_starts(
                 k,
                 surface,
                 &uv_domain,
@@ -401,9 +534,8 @@ pub fn calculate_tight_bounding_box(k: &Kernel, b: &Brep, f: FaceId) -> Result<E
                 );
                 let mut eval = SurfaceEval::with_uv(Some(surface), uv.x, uv.y);
                 // (status ignored upstream)
-                ignored(point_classify(
+                ignored(execution.classify(
                     k,
-                    &mut snapshot,
                     f,
                     uv,
                     &mut pt_class,

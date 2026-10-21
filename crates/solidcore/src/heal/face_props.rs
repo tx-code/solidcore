@@ -1143,6 +1143,14 @@ pub type SeamProblemFn<'f, O> = dyn FnMut(
     ) -> Result<SeamProblem>
     + 'f;
 
+/// Owning stage state at the exact seam-callback position; no topology or
+/// geometry is copied into this state.
+pub(crate) struct Stage2Classifications<O> {
+    pub(crate) face: FaceId,
+    pub(crate) class_u: CurveClassification<O>,
+    pub(crate) class_v: CurveClassification<O>,
+}
+
 /// `m_pFace->HasSeamProblem(*m_pCrvClassU, *m_pCrvClassV, crossed, missing, nearMiss,
 /// FALSE, &m_bClosedU, &m_bClosedV, this)` for the callers of
 /// [`FaceProps::set_props_stage2`], which have no classification objects for
@@ -1717,9 +1725,39 @@ impl<O: LoopObject> FaceProps<O> {
         exe_heal_op: HealerOpType,
         seam: &mut SeamProblemFn<'_, O>,
     ) -> Result<()> {
+        let Some(mut classes) = self.prepare_props_stage2(k, b, face, face_index, exe_heal_op)?
+        else {
+            return Ok(());
+        };
+        let result = if self.closed_u.is_true() || self.closed_v.is_true() {
+            seam(
+                k,
+                b,
+                classes.face,
+                &mut classes.class_u,
+                &mut classes.class_v,
+                self,
+            )
+            .map(Some)
+        } else {
+            Ok(None)
+        };
+        self.finish_props_stage2(classes, result)
+    }
+
+    /// Original stage-2 prefix through flat-corner classification. The owning
+    /// caller releases this read borrow before the original seam callback.
+    pub(crate) fn prepare_props_stage2(
+        &mut self,
+        k: &Kernel,
+        b: &Brep,
+        face: FaceId,
+        face_index: u64,
+        exe_heal_op: HealerOpType,
+    ) -> Result<Option<Stage2Classifications<O>>> {
         // no work - already done or being done
         if self.prop_stage >= PropStage::Stage2A {
-            return Ok(());
+            return Ok(None);
         }
 
         // no work - called before SmHealData::Fix_TolSizes() has run on this Brep
@@ -1873,13 +1911,23 @@ impl<O: LoopObject> FaceProps<O> {
         self.bad_flat_corners = u64::from(flat.flags);
         self.flat_corner_points = flat.points.map_or_else(Vec::new, |p| p.to_vec());
 
-        // when pFace->Surface is closed the seam classifications, touch lists and the
-        // bad seam directions are set by this SmFace::HasSeamProblem call
-        if self.closed_u.is_true() || self.closed_v.is_true() {
-            let seam = seam(k, b, m_face, &mut class_u, &mut class_v, self);
-            self.crv_class_u = Some(class_u);
-            self.crv_class_v = Some(class_v);
-            let seam = seam?;
+        Ok(Some(Stage2Classifications {
+            face: m_face,
+            class_u,
+            class_v,
+        }))
+    }
+
+    /// Commit the original out-parameters before testing seam status. An error
+    /// retains partial classifications and `Stage2A` exactly as the native stage.
+    pub(crate) fn finish_props_stage2(
+        &mut self,
+        classes: Stage2Classifications<O>,
+        seam: Result<Option<SeamProblem>>,
+    ) -> Result<()> {
+        self.crv_class_u = Some(classes.class_u);
+        self.crv_class_v = Some(classes.class_v);
+        if let Some(seam) = seam? {
             self.bad_crossed_seam_dir = seam.crossed;
             self.bad_missing_seam_dir = seam.missing;
             self.bad_near_miss_seam_dir = seam.near_miss;
@@ -1889,12 +1937,7 @@ impl<O: LoopObject> FaceProps<O> {
             self.bad_crossed_seam = Tri::from(self.bad_crossed_seam_dir != SurfParamType::Neither);
             self.bad_near_miss_seam =
                 Tri::from(self.bad_near_miss_seam_dir != SurfParamType::Neither);
-        } else {
-            self.crv_class_u = Some(class_u);
-            self.crv_class_v = Some(class_v);
         }
-
-        // all done
         self.prop_stage = PropStage::Stage2;
         Ok(())
     }

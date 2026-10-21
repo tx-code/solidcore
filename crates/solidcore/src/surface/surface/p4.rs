@@ -37,9 +37,6 @@
 //!   built. In the `sN2U` fallback `SmSSINormalizeENFO` evaluates the
 //!   second point's normal on the *first* surface, as upstream does (kept, since the difftest
 //!   compares it); the small-gap branch uses the other surface.
-//! - **Seam curves of planes.** `SmPlane` is an `SmBSplineSurface` upstream, so with
-//!   `known_closed` the C++ builds a seam curve for it; [`Surface::create_seam_curve`]
-//!   returns `InvalidInput` for a plane (its base is not a stored B-spline surface here).
 //! - **Owner checks.** Only an owner of type `SmFace` (surface) or `SmEdge` (curve) takes
 //!   the topology path, as upstream's `SM_CAST_PTR`.
 //! - **Co-ported callees.** `smsurf_IsPointOnNormal` and `SmSurfaceEval::EvalNormal` are
@@ -50,9 +47,9 @@
 //! - **Statuses.** `smsurf_IsPointOnNormal` returns its `SmStatus` reasons as
 //!   [`NormalTestReason`] and always succeeds, as upstream; its deviation output is `0` when
 //!   the surface could not be evaluated (upstream leaves it unset).
-//! - **`CreateSeamCurve`** returns `None` for a surface that is not closed and fails with
-//!   [`SolidError::InvalidInput`] for a closed one that is not a B-spline surface
-//!   ([`CrvOnSurf`] is built on a [`BSplineSurface`](crate::nurbs::b_spline_surface::BSplineSurface)).
+//! - **`CreateSeamCurve`** returns `None` for a surface that is not closed. The
+//!   native owner flag 2 copies the actual concrete receiver through its virtual
+//!   `Copy`; the original surface and its topology owner remain unchanged.
 //! - **Classification** (`sm_ClassifyCurveSurfaceXSectPoint`) returns the outputs as
 //!   [`XsectClassification`]; an out-of-domain guess keeps its unclamped values, as
 //!   upstream. `SmCurve::EvaluateGeometric` failing with `SM_ERR` marks the point touching
@@ -104,7 +101,7 @@ use super::p1::{
 use super::p2::{
     convert_to_parameter_delta, evaluate_geometric, LocalSurfaceType, SurfaceEval, TsectCurveType,
 };
-use super::{Surface, SurfaceKind};
+use super::Surface;
 
 const OP_CS_INTERSECT: &str = "surface::surface::p4::CsIntersectEnfo::evaluate";
 const OP_CS_NORMALIZE: &str = "surface::surface::p4::CsNormalizeEnfo::evaluate";
@@ -112,7 +109,6 @@ const OP_SSP_INTERSECT: &str = "surface::surface::p4::SspIntersectEnfo::evaluate
 const OP_SSI_NORMALIZE: &str = "surface::surface::p4::SsiNormalizeEnfo::evaluate";
 const OP_SS_NORMALIZE: &str = "surface::surface::p4::SsNormalizeEnfo::evaluate";
 const OP_EVAL_NORMAL: &str = "surface::surface::p4::SurfaceEval::eval_normal";
-const OP_SEAM: &str = "surface::surface::p4::Surface::create_seam_curve";
 const OP_CLASSIFY: &str = "surface::surface::p4::classify_curve_surface_xsect_point";
 
 /// Entry `i` of an evaluation result.
@@ -1107,9 +1103,8 @@ impl Surface {
     ///
     /// # Errors
     ///
-    /// Those of [`Surface::is_closed`] and of the curve construction;
-    /// [`SolidError::InvalidInput`] for a closed surface that is not a B-spline
-    /// surface (a [`CrvOnSurf`] lives on a [`BSplineSurface`]).
+    /// Those of [`Surface::is_closed`], curve construction, the concrete
+    /// receiver's virtual copy and the UV curve copy.
     pub fn create_seam_curve(
         &self,
         kernel: &Kernel,
@@ -1139,14 +1134,14 @@ impl Surface {
                 Point3::new(uv_max.x, uv_min.y, 0.0),
             )
         };
-        let SurfaceKind::BSpline(base) = self.kind() else {
-            return Err(SolidError::invalid_input(
-                OP_SEAM,
-                "a curve on a surface needs a B-spline surface",
-            ));
-        };
-        let line = Line::from_points(start, end, 2); // Line Ivl:[0, 1]
-        let seam = CrvOnSurf::new(kernel, Curve::from(line), base.clone(), Some(uv_domain), 2)?;
+        // Line Ivl:[0, 1]
+        let line = Line::from_points(start, end, 2);
+        // SmSurface.cpp:15130--15168 passes the complete virtual receiver to
+        // SmCrvOnSurf with owner flag 2. The exact view is only Rust borrow
+        // transport; CrvOnSurf::new performs the one required virtual Copy of
+        // each input. A cylinder/cone/torus must keep its actual definition.
+        let receiver = self.clone_for_evaluation()?;
+        let seam = CrvOnSurf::new(kernel, Curve::from(line), receiver, Some(uv_domain), 2)?;
         Ok(Some(seam))
     }
 
@@ -2171,6 +2166,67 @@ mod tests {
             .create_seam_curve(&k, SurfParamType::U, false)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn seam_curve_copies_the_concrete_cylinder_and_preserves_the_original_owner() {
+        use crate::geom::attribute::ObjectKey;
+        use crate::geom::object::ObjectRef;
+        use crate::surface::cone::Cone;
+        use crate::surface::surface::SurfaceKind;
+        use crate::topology::Brep;
+
+        let mut kernel = Kernel::default();
+        kernel.tolerances.zone_tol_3d = 3e-5;
+        let mut cylinder = Cone::new_cylinder_bounded(
+            Point3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            2.,
+            0.,
+            360.,
+            3.,
+            false,
+            false,
+            false,
+        );
+        cylinder.make_nurb(&kernel).unwrap();
+        let mut original = Surface::from(cylinder);
+        original.bind_evaluation_context(&kernel);
+        let mut brep = Brep::new_with_infinite_region().unwrap();
+        let shell = brep.add_shell().unwrap();
+        let face = brep.add_face(shell).unwrap();
+        let owner = ObjectRef {
+            type_code: FACE_TYPE,
+            key: ObjectKey(u64::from(face.index())),
+        };
+        original.set_owner(Some(owner));
+        brep.face_mut(face).unwrap().surface = Some(original);
+        let original = brep.face(face).unwrap().surface.as_ref().unwrap();
+        let domain = original.natural_uv_domain();
+        let seam = original
+            .create_seam_curve(&kernel, SurfParamType::U, true)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(seam.surface().kind(), SurfaceKind::Cone(c) if c.is_cylinder_class()));
+        assert_eq!(original.owner(), Some(owner));
+        assert_eq!(original.natural_uv_domain(), domain);
+        // Source flag 2's surface is a separate owned definition, with no edge
+        // or face on the new standalone seam curve's owner chain.
+        assert_eq!(seam.surface().face().unwrap(), None);
+        let interval = seam.natural_interval();
+        assert!(
+            seam.evaluate_point(interval.min())
+                .unwrap()
+                .distance(Point3::new(2., 0., 0.))
+                < 1e-12
+        );
+        assert!(
+            seam.evaluate_point(interval.max())
+                .unwrap()
+                .distance(Point3::new(2., 0., 3.))
+                < 1e-12
+        );
     }
 
     #[test]

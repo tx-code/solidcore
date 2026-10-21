@@ -821,7 +821,7 @@ impl SurfPtGlobalSolver<'_> {
         let mut other_sol = *sol;
 
         // Make two steppers, to evaluate and compare.
-        let mut this_eval = SurfPtSolveStepper::new(
+        let mut this_eval = SurfPtSolveStepper::new_for_face(
             k,
             surface,
             &domain,
@@ -830,6 +830,7 @@ impl SurfPtGlobalSolver<'_> {
             b.tight_tol(),
             b.loose_tol(),
             b.solver_op(),
+            self.face_tolerance,
         )?;
         let mut other_eval = SurfPtSolveStepper::copy_of(&this_eval);
         let tight_tol = b.tight_tol();

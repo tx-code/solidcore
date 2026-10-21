@@ -138,10 +138,13 @@ in [LICENSES/Microsoft-STL.txt](LICENSES/Microsoft-STL.txt), obtained from the
 The helper is a safe Rust translation; no Microsoft binary or private CAD input
 is included in this repository.
 
-The final-trim sampler's `finite_lerp` follows MSVC 14.50.35717
+The final-trim sampler's `finite_lerp` and the native face integrator's
+`mass/integrator/properties/spans.rs::finite_lerp` follow MSVC 14.50.35717
 `include/cmath:1562–1627` (`_Common_lerp` / `_Linear_for_lerp`), including its
 explicit same-sign runtime FMA and monotonic endpoint rules. It is covered by
 the same Microsoft copyright and Apache-2.0 WITH LLVM-exception license above.
+The material measurement checkpoint's `finite_midpoint` follows the same
+installation's overflow-safe finite `std::midpoint` arithmetic under that license.
 
 ### d3-force
 

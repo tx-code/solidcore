@@ -1418,32 +1418,41 @@ mod tests {
     }
 
     #[test]
-    fn drop_and_trim_reaches_classification_after_real_plane_iso_curves() {
+    fn drop_and_trim_retains_the_exact_planar_iso_curve_and_paired_parameters() {
         let s = plane();
         let c = Curve::from(crate::curve::line::Line::from_points(
             Vec3::new(0.0, 0.5, 0.0),
             Vec3::new(1.0, 0.5, 0.0),
             3,
         ));
-        let r = s.drop_and_trim_curve::<crate::topology::ObjectHandle>(
-            &Kernel::default(),
-            &Extent2d::from_bounds(0.0, 0.0, 1.0, 1.0),
-            &c,
-            &Extent1d::from_min_max(0.0, 1.0),
-            1e-6,
-            true,
-            false,
-            None,
-        );
-        assert!(
-            matches!(
-                r,
-                Err(SolidError::Unported {
-                    upstream: "SmCurveClassification::ReSet",
-                    unit: "intersect.curve_class_p2"
-                })
-            ),
-            "{r:?}"
-        );
+        let r = s
+            .drop_and_trim_curve::<crate::topology::ObjectHandle>(
+                &Kernel::default(),
+                &Extent2d::from_bounds(0.0, 0.0, 1.0, 1.0),
+                &c,
+                &Extent1d::from_min_max(0.0, 1.0),
+                1e-6,
+                true,
+                false,
+                None,
+            )
+            .unwrap();
+        // SmSurfaceDropLib.cpp::DropAndTrimCurve delegates to the real trace.
+        // Independently, S(u,v)=(u,v,0) and C(t)=(t,1/2,0), so the complete
+        // projected curve is UV(t)=(t,1/2), with no split or measured gap.
+        assert_eq!(r.max_drop_to_surf, 0.);
+        assert_eq!(r.max_approx_dev, 0.);
+        assert_eq!(r.uv_curves.len(), 1);
+        let uv = &r.uv_curves[0];
+        assert_eq!(uv.dim(), 2);
+        assert_eq!(uv.degree().unwrap(), 1);
+        assert_eq!(uv.natural_interval(), Extent1d::from_min_max(0., 1.));
+        for t in [0., 0.25, 0.5, 0.75, 1.] {
+            let point = uv.evaluate_point(t).unwrap();
+            assert_eq!(point.x, t);
+            assert_eq!(point.y, 0.5);
+            let lifted = s.evaluate_point(Point2::new(point.x, point.y)).unwrap();
+            assert_eq!(lifted, c.evaluate_point(t).unwrap());
+        }
     }
 }

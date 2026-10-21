@@ -19,7 +19,6 @@ use crate::geom::point_set::PointContainment;
 use crate::geom::solution_array::SolutionType;
 use crate::kernel::Kernel;
 use crate::math::{Point2, EFF_ZERO_SQ};
-use crate::nurbs::b_spline_surface::SurfParamType;
 use crate::surface::surface::p1::map_to_2d;
 use crate::topology::{
     edge,
@@ -292,28 +291,6 @@ pub(super) fn distinct_loop_vertices(b: &Brep, f: FaceId) -> Result<bool> {
     Ok(true)
 }
 
-pub(super) fn seam_problem(b: &Brep, f: FaceId) -> Result<face::p1::SeamProblem> {
-    let unknown = face::p1::SeamProblem {
-        crossed: SurfParamType::Unknown,
-        missing: SurfParamType::Unknown,
-        near_miss: SurfParamType::Unknown,
-    };
-    let Some(surface) = b.face(f)?.surface.as_ref() else {
-        return Ok(unknown);
-    };
-    let domain = surface.natural_uv_domain();
-    let periodic_u = surface.is_periodic(&domain, SurfParamType::U)?;
-    let periodic_v = surface.is_periodic(&domain, SurfParamType::V)?;
-    if !periodic_u && !periodic_v {
-        return Ok(face::p1::SeamProblem {
-            crossed: SurfParamType::Neither,
-            missing: SurfParamType::Neither,
-            near_miss: SurfParamType::Neither,
-        });
-    }
-    // UNPORTED(topology.face_p4): actual periodic FaceProps/classification path.
-    Err(SolidError::unported(
-        "SmFace::HasSeamProblem periodic classification",
-        "topology.face_p4",
-    ))
+pub(super) fn seam_problem(k: &Kernel, b: &mut Brep, f: FaceId) -> Result<face::p1::SeamProblem> {
+    face::p4::owning_seam_problem(k, b, f)
 }

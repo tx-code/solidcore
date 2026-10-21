@@ -102,6 +102,30 @@ fn assertions(
             Ok(valid)
         }
         CurveKind::BSpline(_) => bspline(k, b, slot, options, &mut r),
+        CurveKind::Ellipse(_) => {
+            // SmCircle/SmEllipse retain the concrete analytic definition and
+            // run the same owning B-spline parent before their additional rules.
+            let given = matches!(options.level, CheckLevel::Given(_));
+            let mut valid = true;
+            if !given {
+                valid &= bspline(k, b, slot, options, &mut r)?;
+            }
+            let key = object(b, slot)?.key();
+            // Bit 60 reserves the contained converter identity within each
+            // existing defining-edge/UV-owner namespace; no address is hashed.
+            let polar_key = crate::geom::assert_array::ObjectKey(key.0 | (1_u64 << 60));
+            let CurveKind::Ellipse(ellipse) = curve_mut(b, slot)?.kind_mut() else {
+                return Err(missing());
+            };
+            valid &= ellipse.assert_own_definition_valid(
+                k,
+                r.reports.as_deref_mut(),
+                given,
+                key,
+                polar_key,
+            )?;
+            Ok(valid)
+        }
         _ => Err(SolidError::unported(
             "concrete curve subclass AssertValid",
             "fork.topology_validation",
@@ -526,4 +550,100 @@ fn line(b: &Brep, slot: Slot, r: &mut Reporter<'_>) -> Result<bool> {
         )?;
     }
     Ok(valid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::curve::ellipse::{Ellipse, EllipseOptions};
+    use crate::geom::extent1d::Extent1d;
+
+    #[test]
+    fn actual_owned_circle_and_ellipse_run_parent_and_concrete_rules() {
+        let mut kernel = Kernel::default();
+        for circle in [false, true] {
+            let domain = Extent1d::from_min_max(0., 360.);
+            let value = if circle {
+                Ellipse::new_circle(
+                    &kernel,
+                    Vec3::ZERO,
+                    Vec3::X,
+                    Vec3::Y,
+                    domain,
+                    3.,
+                    &EllipseOptions::default(),
+                )
+                .unwrap()
+            } else {
+                Ellipse::new(
+                    &kernel,
+                    Vec3::ZERO,
+                    Vec3::X,
+                    Vec3::Y,
+                    domain,
+                    3.,
+                    2.,
+                    &EllipseOptions::default(),
+                )
+                .unwrap()
+            };
+            let mut brep = Brep::new();
+            let vertex = brep.add_vertex(Vec3::new(3., 0., 0.)).unwrap();
+            let edge = brep.add_edge(vertex, vertex).unwrap();
+            let mut curve = Curve::from(value);
+            curve.set_owner(Some(arena_identity(CacheObject::Edge(edge))), None);
+            brep.edge_mut(edge).unwrap().curve = Some(curve);
+            for level in [CheckLevel::Zero, CheckLevel::Two, CheckLevel::Given(&[])] {
+                let mut reports = AssertArray::new();
+                assert!(assert_edge_curve(
+                    &mut kernel,
+                    &mut brep,
+                    edge,
+                    AssertValidOptions { level, walk: false },
+                    Some(&mut reports)
+                )
+                .unwrap());
+                assert!(reports.is_empty());
+                assert!(
+                    matches!(brep.edge(edge).unwrap().curve.as_ref().unwrap().kind(), CurveKind::Ellipse(e) if e.is_circle_class() == circle)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ellipse_given_still_checks_the_original_inside_out_restriction() {
+        let mut kernel = Kernel::default();
+        let value = Ellipse::new(
+            &kernel,
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            Extent1d::from_min_max(0., 360.),
+            3.,
+            2.,
+            &EllipseOptions {
+                inside_out: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut brep = Brep::new();
+        let vertex = brep.add_vertex(Vec3::new(3., 0., 0.)).unwrap();
+        let edge = brep.add_edge(vertex, vertex).unwrap();
+        brep.edge_mut(edge).unwrap().curve = Some(value.into());
+        let mut reports = AssertArray::new();
+        assert!(!assert_edge_curve(
+            &mut kernel,
+            &mut brep,
+            edge,
+            AssertValidOptions {
+                level: CheckLevel::Given(&[]),
+                walk: false
+            },
+            Some(&mut reports)
+        )
+        .unwrap());
+        assert!(!reports.is_empty());
+    }
 }

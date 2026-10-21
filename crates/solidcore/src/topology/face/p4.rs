@@ -1196,6 +1196,11 @@ pub fn find_vertex_sector(
 
 // ---- seam check ------------------------------------------------------------------------
 
+#[path = "p4/seam_owner.rs"]
+mod seam_owner;
+
+pub(crate) use seam_owner::owning_seam_problem;
+
 /// Indices of the U seam curve's and its UV curve's temporary handles
 /// ([`ClassObject::temporary`]).
 const SEAM_U_TEMPS: (usize, usize) = (0, 1);
@@ -1204,7 +1209,7 @@ const SEAM_V_TEMPS: (usize, usize) = (2, 3);
 
 /// The caller's classification objects with the seam curve `HasSeamProblem` builds
 /// (and its UV curve) as temporary curves.
-struct WithSeam<'a, M, O> {
+pub(crate) struct WithSeam<'a, M, O> {
     inner: &'a M,
     seam: Option<(O, &'a Curve)>,
     seam_uv: Option<(O, &'a Curve)>,
@@ -1397,11 +1402,10 @@ fn mark_in_face<O: ClassObject>(c: &mut CurveClassification<O>, face: O) -> Resu
 /// face, the touch lists filled, false seam edge end classifications cleared;
 /// `(classification, crossed, missing, near_miss)`.
 #[allow(clippy::too_many_arguments)]
-fn classify_seam<O: LoopObject, M: CurveOnClassifyObjects<O>>(
+fn classify_seam_into<O: LoopObject, E: SeamExecution<O>>(
     k: &Kernel,
-    b: &Brep,
+    execution: &mut E,
     f: FaceId,
-    objects: &M,
     surface: &Surface,
     dir: SurfParamType,
     periodic: bool,
@@ -1409,66 +1413,48 @@ fn classify_seam<O: LoopObject, M: CurveOnClassifyObjects<O>>(
     outer_loop_only: bool,
     loops: &[LoopId],
     props: &mut FaceProps<O>,
-) -> Result<(CurveClassification<O>, bool, bool, bool, SeamCurves)> {
-    // Build SeamConst curve
+    class: &mut CurveClassification<O>,
+    stored_curves: &mut Option<SeamCurves>,
+) -> Result<(bool, bool, bool)> {
     let seam = surface
         .create_seam_curve(k, dir, periodic)?
         .ok_or_else(|| null("HasSeamProblem: periodic surface without seam curve"))?;
     let seam_uv = seam.uv_curve().clone();
     let interval = seam.natural_interval();
     let seam = Curve::from(seam);
-    let temp = |i: usize| -> Result<O> {
-        O::temporary(i, ClassObjectKind::Curve).ok_or_else(|| {
-            null("HasSeamProblem: classification handles cannot name the seam curve")
-        })
-    };
-    let (ci, ui) = if dir == SurfParamType::V {
-        SEAM_V_TEMPS
-    } else {
-        SEAM_U_TEMPS
-    };
-    let (seam_h, seam_uv_h) = (temp(ci)?, temp(ui)?);
-    let objects = WithSeam {
-        inner: objects,
-        seam: Some((seam_h, &seam)),
-        seam_uv: Some((seam_uv_h, &seam_uv)),
-    };
-
-    // build Seam classification object (owning the curve, edge not modified)
-    let mut class =
-        CurveClassification::with_curve_interval(k, seam_h, interval, surface_zone_tol_3d);
+    let (seam_h, seam_uv_h) = seam_handles::<O>(dir)?;
+    *class = CurveClassification::with_curve_interval(k, seam_h, interval, surface_zone_tol_3d);
     class.set_uv_curve1(Some(seam_uv_h));
-    class.set_surface1(objects.face_surface(f));
+    {
+        let objects = execution.geometry(f, dir, None)?;
+        class.set_surface1(objects.face_surface(f));
+    }
     class.set_is_curve_owned(true);
-
-    // inform the public - DoingSeams - user requested OuterSeamOnly value
     class.set_tgt_loops_only(outer_loop_only);
     class.set_ok_to_set_tolerance(false);
-
-    // classify the SeamCurve3d against this face (status ignored)
-    match curve_on_classify(k, b, f, &objects, false, &mut class, true, false, false) {
-        Err(e) if must_propagate(&e) => return Err(e),
-        _ => {}
-    }
-
-    // How many times is the Seam crossed by loop
-    get_loop_crossings(k, &objects, &class, loops, props, dir)?;
-
-    // Find and Fix False SeamEdge EndPoint Classifications (status ignored)
-    match review_start_and_stop_on_seam_crv_classifies(&objects, &mut class) {
-        Err(e) if must_propagate(&e) => return Err(e),
-        _ => {}
-    }
-
-    // analyze the classification for problems (Crossing or Missing)
-    let crossed = class.is_crossed_by_edge()?; // only count seam crossings by an Edge
-    let missing = class.is_crossing_face(Some(objects.face(f))); // segments in Face but not on an Edge
-    let near_miss = class.has_near_misses(k, &objects, false)?;
-    let curves = SeamCurves {
+    // The output owns these source temporaries before classification starts,
+    // retaining them and the partial classification if a callee is unavailable.
+    *stored_curves = Some(SeamCurves {
         curve: seam,
         uv_curve: seam_uv,
-    };
-    Ok((class, crossed, missing, near_miss, curves))
+    });
+    let curves = stored_curves
+        .as_ref()
+        .ok_or_else(|| null("missing seam curves"))?;
+    match execution.classify_curve(k, f, dir, curves, class) {
+        Err(e) if must_propagate(&e) => return Err(e),
+        _ => {}
+    }
+    execution.loop_crossings(k, f, dir, curves, class, loops, props)?;
+    let objects = execution.geometry(f, dir, Some(curves))?;
+    match review_start_and_stop_on_seam_crv_classifies(&objects, class) {
+        Err(e) if must_propagate(&e) => return Err(e),
+        _ => {}
+    }
+    let crossed = class.is_crossed_by_edge_with_geometry(&objects)?;
+    let missing = class.is_crossing_face(Some(objects.face(f)));
+    let near_miss = class.has_near_misses(k, &objects, false)?;
+    Ok((crossed, missing, near_miss))
 }
 
 /// `HasSeamProblem`: whether the seams of the face's periodic surface are badly
@@ -1500,15 +1486,20 @@ pub fn has_seam_problem<O: LoopObject, M: CurveOnClassifyObjects<O>>(
     objects: &M,
     opts: HasSeamProblemOptions<'_, O>,
 ) -> Result<SeamCheck<O>> {
-    let HasSeamProblemOptions {
-        outer_loop_only,
-        periodic_u: opt_periodic_u,
-        periodic_v: opt_periodic_v,
-        face_props,
-    } = opts;
+    let mut out = new_seam_check(k);
+    has_seam_problem_into(
+        k,
+        &mut BorrowedSeamExecution { b, objects },
+        f,
+        opts,
+        &mut out,
+    )?;
+    Ok(out)
+}
 
+fn new_seam_check<O: LoopObject>(k: &Kernel) -> SeamCheck<O> {
     // Init outputs
-    let mut out = SeamCheck {
+    SeamCheck {
         has_problem: false,
         class_u: CurveClassification::new(k),
         class_v: CurveClassification::new(k),
@@ -1519,11 +1510,148 @@ pub fn has_seam_problem<O: LoopObject, M: CurveOnClassifyObjects<O>>(
         },
         seam_u: None,
         seam_v: None,
+    }
+}
+
+/// One source controller. Mutation-sensitive operations are supplied at their
+/// original call positions by two actual borrowed/owning adapters.
+trait SeamExecution<O: LoopObject> {
+    type Geometry<'a>: CurveOnClassifyObjects<O>
+    where
+        Self: 'a;
+    fn brep(&self) -> &Brep;
+    fn surface_for_evaluation(&self, face: FaceId) -> Result<Option<Surface>>;
+    fn geometry<'a>(
+        &'a self,
+        face: FaceId,
+        direction: SurfParamType,
+        curves: Option<&'a SeamCurves>,
+    ) -> Result<Self::Geometry<'a>>;
+    fn classify_curve(
+        &mut self,
+        k: &Kernel,
+        face: FaceId,
+        direction: SurfParamType,
+        curves: &SeamCurves,
+        classification: &mut CurveClassification<O>,
+    ) -> Result<()>;
+    fn loop_crossings(
+        &mut self,
+        k: &Kernel,
+        face: FaceId,
+        direction: SurfParamType,
+        curves: &SeamCurves,
+        classification: &CurveClassification<O>,
+        loops: &[LoopId],
+        props: &mut FaceProps<O>,
+    ) -> Result<()>;
+}
+
+fn seam_handles<O: ClassObject>(dir: SurfParamType) -> Result<(O, O)> {
+    let (curve, uv) = if dir == SurfParamType::V {
+        SEAM_V_TEMPS
+    } else {
+        SEAM_U_TEMPS
     };
+    let handle = |index| {
+        O::temporary(index, ClassObjectKind::Curve).ok_or_else(|| {
+            null("HasSeamProblem: classification handles cannot name the seam curve")
+        })
+    };
+    Ok((handle(curve)?, handle(uv)?))
+}
+
+struct BorrowedSeamExecution<'a, M> {
+    b: &'a Brep,
+    objects: &'a M,
+}
+
+impl<O: LoopObject, M: CurveOnClassifyObjects<O>> SeamExecution<O>
+    for BorrowedSeamExecution<'_, M>
+{
+    type Geometry<'a>
+        = WithSeam<'a, M, O>
+    where
+        Self: 'a;
+    fn brep(&self) -> &Brep {
+        self.b
+    }
+    fn surface_for_evaluation(&self, face: FaceId) -> Result<Option<Surface>> {
+        // Preserve the existing borrowed API's definition-copy behavior. The
+        // owning adapter instead retains exact representation and the live owner.
+        Ok(self.b.face(face)?.surface.clone())
+    }
+    fn geometry<'a>(
+        &'a self,
+        _face: FaceId,
+        dir: SurfParamType,
+        curves: Option<&'a SeamCurves>,
+    ) -> Result<Self::Geometry<'a>> {
+        let handles = curves.map(|_| seam_handles::<O>(dir)).transpose()?;
+        Ok(WithSeam {
+            inner: self.objects,
+            seam: handles
+                .zip(curves)
+                .map(|((curve, _), curves)| (curve, &curves.curve)),
+            seam_uv: handles
+                .zip(curves)
+                .map(|((_, uv), curves)| (uv, &curves.uv_curve)),
+        })
+    }
+    fn classify_curve(
+        &mut self,
+        k: &Kernel,
+        face: FaceId,
+        dir: SurfParamType,
+        curves: &SeamCurves,
+        classification: &mut CurveClassification<O>,
+    ) -> Result<()> {
+        let objects = self.geometry(face, dir, Some(curves))?;
+        curve_on_classify(
+            k,
+            self.b,
+            face,
+            &objects,
+            false,
+            classification,
+            true,
+            false,
+            false,
+        )
+        .map(|_| ())
+    }
+    fn loop_crossings(
+        &mut self,
+        k: &Kernel,
+        face: FaceId,
+        direction: SurfParamType,
+        curves: &SeamCurves,
+        classification: &CurveClassification<O>,
+        loops: &[LoopId],
+        props: &mut FaceProps<O>,
+    ) -> Result<()> {
+        let objects = self.geometry(face, direction, Some(curves))?;
+        get_loop_crossings(k, &objects, classification, loops, props, direction)
+    }
+}
+
+fn has_seam_problem_into<O: LoopObject>(
+    k: &Kernel,
+    execution: &mut impl SeamExecution<O>,
+    f: FaceId,
+    opts: HasSeamProblemOptions<'_, O>,
+    out: &mut SeamCheck<O>,
+) -> Result<()> {
+    let HasSeamProblemOptions {
+        outer_loop_only,
+        periodic_u: opt_periodic_u,
+        periodic_v: opt_periodic_v,
+        face_props,
+    } = opts;
 
     // no work - no surface - return Okay
-    let Some(surface) = b.face(f)?.surface.clone() else {
-        return Ok(out);
+    let Some(surface) = execution.surface_for_evaluation(f)? else {
+        return Ok(());
     };
 
     // classify periodic surface and prepare for upcoming classifications
@@ -1549,18 +1677,18 @@ pub fn has_seam_problem<O: LoopObject, M: CurveOnClassifyObjects<O>>(
             missing: SurfParamType::Neither,
             near_miss: SurfParamType::Neither,
         };
-        return Ok(out);
+        return Ok(());
     }
 
     // locals
-    let surface_zone_tol_3d = surface_zone_tol_3d(k, b, f, &surface)?;
+    let surface_zone_tol_3d = surface_zone_tol_3d(k, execution.brep(), f, &surface)?;
     let mut crossed_u = false;
     let mut crossed_v = false;
     let mut missing_u = false;
     let mut missing_v = false;
     let mut near_miss_u = false;
     let mut near_miss_v = false;
-    let loops = super::p2::loops(b, f, false, None)?;
+    let loops = super::p2::loops(execution.brep(), f, false, None)?;
 
     // make sure there is a FaceProps that's at least running SmFaceProps::SetProps_Stage2
     let mut local_props;
@@ -1578,37 +1706,40 @@ pub fn has_seam_problem<O: LoopObject, M: CurveOnClassifyObjects<O>>(
         } else {
             props.face_index
         };
-        props.set_props_stage2_with(
-            k,
-            b,
-            f,
-            index,
-            HealerOpType::All,
-            &mut |k, b, f, cu, cv, p| {
-                // HasSeamProblem(*m_pCrvClassU, *m_pCrvClassV, .., FALSE, &m_bClosedU,
-                // &m_bClosedV, this): an UNSURE closed flag reads as TRUE
-                let (closed_u, closed_v) = (p.closed_u != Tri::False, p.closed_v != Tri::False);
-                let check = has_seam_problem(
+        if let Some(mut classes) =
+            props.prepare_props_stage2(k, execution.brep(), f, index, HealerOpType::All)?
+        {
+            let result = if props.closed_u.is_true() || props.closed_v.is_true() {
+                let (closed_u, closed_v) =
+                    (props.closed_u != Tri::False, props.closed_v != Tri::False);
+                let mut nested = new_seam_check(k);
+                let result = has_seam_problem_into(
                     k,
-                    b,
-                    f,
-                    objects,
+                    execution,
+                    classes.face,
                     HasSeamProblemOptions {
                         outer_loop_only: false,
                         periodic_u: Some(closed_u),
                         periodic_v: Some(closed_v),
-                        face_props: Some(p),
+                        face_props: Some(&mut *props),
                     },
-                )?;
-                *cu = check.class_u;
-                *cv = check.class_v;
-                Ok(crate::heal::face_props::SeamProblem {
-                    crossed: check.problem.crossed,
-                    missing: check.problem.missing,
-                    near_miss: check.problem.near_miss,
-                })
-            },
-        )?;
+                    &mut nested,
+                );
+                let problem = crate::heal::face_props::SeamProblem {
+                    crossed: nested.problem.crossed,
+                    missing: nested.problem.missing,
+                    near_miss: nested.problem.near_miss,
+                };
+                classes.class_u = nested.class_u;
+                classes.class_v = nested.class_v;
+                out.seam_u = nested.seam_u;
+                out.seam_v = nested.seam_v;
+                result.map(|()| Some(problem))
+            } else {
+                Ok(None)
+            };
+            props.finish_props_stage2(classes, result)?;
+        }
 
         // set output and return
         out.class_u = props
@@ -1627,18 +1758,17 @@ pub fn has_seam_problem<O: LoopObject, M: CurveOnClassifyObjects<O>>(
 
         // all done: upstream returns SM_SUCCESS (1000) as the SmBoolean result
         out.has_problem = true;
-        return Ok(out);
+        return Ok(());
     }
 
     // arrive here when HasSeamProblems() is called from SetProps_Stage2
 
     // periodic in U
     if periodic_u {
-        let (class, crossed, missing, near_miss, curves) = classify_seam(
+        (crossed_u, missing_u, near_miss_u) = classify_seam_into(
             k,
-            b,
+            execution,
             f,
-            objects,
             &surface,
             SurfParamType::U,
             periodic_u,
@@ -1646,19 +1776,17 @@ pub fn has_seam_problem<O: LoopObject, M: CurveOnClassifyObjects<O>>(
             outer_loop_only,
             &loops,
             props,
+            &mut out.class_u,
+            &mut out.seam_u,
         )?;
-        out.class_u = class;
-        out.seam_u = Some(curves);
-        (crossed_u, missing_u, near_miss_u) = (crossed, missing, near_miss);
     }
 
     // periodic in V
     if periodic_v {
-        let (class, crossed, missing, near_miss, curves) = classify_seam(
+        (crossed_v, missing_v, near_miss_v) = classify_seam_into(
             k,
-            b,
+            execution,
             f,
-            objects,
             &surface,
             SurfParamType::V,
             periodic_v,
@@ -1666,10 +1794,9 @@ pub fn has_seam_problem<O: LoopObject, M: CurveOnClassifyObjects<O>>(
             outer_loop_only,
             &loops,
             props,
+            &mut out.class_v,
+            &mut out.seam_v,
         )?;
-        out.class_v = class;
-        out.seam_v = Some(curves);
-        (crossed_v, missing_v, near_miss_v) = (crossed, missing, near_miss);
     }
 
     // remember when SeamCrvU / SeamCrvV has no FaceLoop Bndry XSects
@@ -1679,7 +1806,7 @@ pub fn has_seam_problem<O: LoopObject, M: CurveOnClassifyObjects<O>>(
     // If Surface is doubly periodic, handle special torus case: an entire
     // NonIntersecting Seam may be Missing
     if periodic_u && periodic_v {
-        let this = objects.face(f);
+        let this = execution.geometry(f, SurfParamType::Neither, None)?.face(f);
         if no_xsect_seam_u
             && props
                 .done_touch_list_v
@@ -1710,5 +1837,5 @@ pub fn has_seam_problem<O: LoopObject, M: CurveOnClassifyObjects<O>>(
         near_miss: sp_of(near_miss_u, near_miss_v),
     };
     out.has_problem = crossed_u || crossed_v || missing_u || missing_v;
-    Ok(out)
+    Ok(())
 }

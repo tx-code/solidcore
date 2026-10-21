@@ -63,6 +63,10 @@
 //!   approximation caches through a `const_cast`: here they take `&mut self`. The
 //!   [`Curve`] dispatch only has `&self`: it runs them on a copy of the object
 //!   (same answer as upstream's call, the cache update is lost; the `*_ref` methods).
+//!   Uncached breaks use the existing curve-classification reset and UV knot-line
+//!   algorithm. Its local context follows `SmCrvOnSurf.cpp:1209--1220`; the two
+//!   actual parts are borrowed and their owners stay intact. Unsupported deeper
+//!   dependencies remain explicit errors.
 //! - **Base-class calls.** `SmCurve::ApproximateCurve`, `SmCurve::DropPoint` and
 //!   `SmCurve::CalculateBoundingBox` on `this` run on a [`Curve`] wrapping a copy of
 //!   this object ([`Curve::approximate_curve_base`], [`Curve::drop_point_base`],
@@ -116,6 +120,9 @@ use crate::geom::global_solver::SolverOperation;
 use crate::geom::tol::are_same;
 use crate::geom::vector2d::Point2;
 use crate::geom::vector3d::{Point3, Vec3};
+use crate::intersect::curve_class::p4::ClassificationInit;
+use crate::intersect::curve_class::CurveClassification;
+use crate::intersect::point_class::{ClassGeometry, ClassObject, ClassObjectKind};
 use crate::kernel::Kernel;
 use crate::math::{BIG_DOUBLE, EFF_ZERO, UNDEF_DOUBLE};
 use crate::nurbs::b_spline_curve::{BSplineCurve, BoundingBoxRequest, BoundingBoxes};
@@ -176,21 +183,79 @@ fn surface_read_from_db(
 /// (tolerance `tol`) against the knot iso-parameter lines of `surface`
 /// (`IntersectUVDiscontinuties`), in order.
 fn classify_against_surface(
-    _curve: &Curve,
-    _interval: &Extent1d,
-    _tol: f64,
-    _surface: &Surface,
+    curve: &Curve,
+    interval: &Extent1d,
+    tol: f64,
+    surface: &Surface,
 ) -> Result<Vec<Extent1d>> {
-    // The constructor (CurveClassification::with_curve) needs a Kernel, which the Curve::knots
-    // virtual does not carry (plan/findings.md "intersect.curve_class_p4"); it defers on ReSet.
-    // UNPORTED(intersect.curve_class_p2): SmCurveClassification::ReSet
-    // `SmCurveClassification::IntersectUVDiscontinuties` follows ReSet upstream; it is ported
-    // (CurveClassification::intersect_uv_discontinuities) and runs once ReSet and the Kernel are available.
-    // (then the intervals: intersect::curve_class::CurveClassification::size / at)
-    Err(SolidError::unported(
-        "SmCurveClassification::ReSet",
-        "intersect.curve_class_p2",
-    ))
+    // SmCrvOnSurf.cpp:1209--1220 explicitly creates a local SmContext for this
+    // UV-only classification. This is the source algorithm's own context, not
+    // a substitute for an unavailable owner context; the actual parts are borrowed.
+    let context = Kernel::default();
+    let geometry = KnotClassGeometry { curve, surface };
+    let mut class = CurveClassification::with_curve(
+        &context,
+        &ClassificationInit {
+            curve: Some(KnotClassObject::Curve),
+            interval: *interval,
+            uv_curve: None,
+            src_zone_tol_3d: tol,
+            opt_data_size: 0,
+            is_curve_owned: false,
+            is_curve_current: true,
+            surface1: Some(KnotClassObject::Surface),
+            surface2: None,
+            uv_curve2: None,
+            ti: None,
+        },
+    )?;
+    class.intersect_uv_discontinuities(&context, &geometry, surface, KnotClassObject::Surface)?;
+    Ok(class
+        .intervals()
+        .iter()
+        .map(|ivl| *ivl.interval())
+        .collect())
+}
+
+/// The two borrowed parts and the numerical classifier's local boundary curves.
+#[derive(Clone, Copy, PartialEq)]
+enum KnotClassObject {
+    Curve,
+    Surface,
+    Temporary(usize, ClassObjectKind),
+}
+
+impl ClassObject for KnotClassObject {
+    fn class_kind(&self) -> ClassObjectKind {
+        match self {
+            Self::Curve => ClassObjectKind::Curve,
+            Self::Surface => ClassObjectKind::Surface,
+            Self::Temporary(_, kind) => *kind,
+        }
+    }
+    fn temporary(index: usize, kind: ClassObjectKind) -> Option<Self> {
+        Some(Self::Temporary(index, kind))
+    }
+}
+
+struct KnotClassGeometry<'a> {
+    curve: &'a Curve,
+    surface: &'a Surface,
+}
+
+impl ClassGeometry<KnotClassObject> for KnotClassGeometry<'_> {
+    fn curve(&self, object: KnotClassObject) -> Option<&Curve> {
+        (object == KnotClassObject::Curve).then_some(self.curve)
+    }
+    fn surface(&self, object: KnotClassObject) -> Option<&Surface> {
+        (object == KnotClassObject::Surface).then_some(self.surface)
+    }
+    fn volume(&self, _: KnotClassObject) -> Option<&crate::surface::volume::Volume> {
+        None
+    }
+    fn point(&self, _: KnotClassObject) -> Option<Point3> {
+        None
+    }
 }
 
 /// `smsurf_LiftSecondDerivative(Cs, Css, DU, DV, DUU, DUV, DVV)`: the second
@@ -779,9 +844,9 @@ impl CrvOnSurf {
     ///
     /// # Errors
     ///
-    /// Those of the UV curve's degree; [`SolidError::Unported`] from the curve
-    /// classification; [`SolidError::InvalidInput`] where upstream would read
-    /// outside its arrays.
+    /// Those of the UV curve's degree and the real surface knot-line classification
+    /// (including unsupported deeper dependencies); [`SolidError::InvalidInput`]
+    /// where upstream would read outside its arrays.
     pub fn knots(&mut self, interval: Option<&Extent1d>) -> Result<(Vec<f64>, Vec<usize>)> {
         // low work
         if !self.need_breaks {
@@ -1799,7 +1864,10 @@ mod tests {
     fn cached_knots_and_edits() {
         let k = Kernel::default();
         let mut c = CrvOnSurf::new(&Kernel::default(), uv(), patch(), None, 0).unwrap();
-        assert!(matches!(c.knots(None), Err(SolidError::Unported { .. })));
+        // The UV quadratic stays inside the bilinear patch, which has no
+        // interior knot lines: only the two cubic endpoint breaks remain.
+        assert_eq!(c.knots(None).unwrap(), (vec![0., 1.], vec![4, 4]));
+        assert!(!c.need_breaks());
         c.set_breaks_cache(false, vec![0.0, 0.25, 1.0]);
         let (kn, m) = c.knots(None).unwrap();
         assert_eq!(kn, vec![0.0, 0.25, 1.0]);

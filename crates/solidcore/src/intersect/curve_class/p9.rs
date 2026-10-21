@@ -191,6 +191,45 @@ fn named<O: Copy>(s: &Solution<Side>, source: O, target: O) -> Solution<O> {
     out
 }
 
+/// The mutable edge-gap query occupies its source position between edges.
+pub(crate) trait EdgeIntersectionExecution<O: ClassObject, T> {
+    fn intersect_edge(
+        &mut self,
+        k: &Kernel,
+        classification: &mut CurveClassification<O>,
+        edge: T,
+    ) -> Result<()>;
+}
+
+struct BorrowedEdgeExecution<'a, G, O> {
+    geometry: &'a G,
+    working: &'a Curve,
+    source_handle: O,
+    source_zone: f64,
+    has_big_gaps: bool,
+}
+
+impl<O: ClassObject, G: ClassGeometry<O>> EdgeIntersectionExecution<O, BoundaryEdge<O>>
+    for BorrowedEdgeExecution<'_, G, O>
+{
+    fn intersect_edge(
+        &mut self,
+        k: &Kernel,
+        classification: &mut CurveClassification<O>,
+        edge: BoundaryEdge<O>,
+    ) -> Result<()> {
+        classification.intersect_prepared_edge(
+            k,
+            self.geometry,
+            self.working,
+            edge,
+            self.source_handle,
+            self.source_zone,
+            self.has_big_gaps,
+        )
+    }
+}
+
 impl<O: ClassObject> CurveClassification<O> {
     /// Intersects the source curve with each edge, appending classifications in order.
     /// A shared curve uses the exact interval-overlap shortcut before insertion.
@@ -218,64 +257,99 @@ impl<O: ClassObject> CurveClassification<O> {
             source
         };
         let source_zone = src_zone_tol_3d_of(k, Some(self));
-        for edge in edges {
-            let target = curve(geometry, edge.curve)?;
-            let edge_zone = edge.zone_tol_3d;
-            let mut tolerance = xsect_tol_3d_from_zones(k, edge_zone, source_zone);
-            if options.has_big_gaps {
-                if let Some(gap) = edge.face_gap {
-                    if gap > tolerance {
-                        tolerance = gap * 1.1;
-                    }
+        self.intersect_edges_using(
+            k,
+            edges,
+            &mut BorrowedEdgeExecution {
+                geometry,
+                working,
+                source_handle,
+                source_zone,
+                has_big_gaps: options.has_big_gaps,
+            },
+        )
+    }
+
+    /// Source edge order shared by the borrowed and actual owning adapters.
+    pub(crate) fn intersect_edges_using<T: Copy>(
+        &mut self,
+        k: &Kernel,
+        edges: &[T],
+        execution: &mut impl EdgeIntersectionExecution<O, T>,
+    ) -> Result<()> {
+        for &edge in edges {
+            execution.intersect_edge(k, self, edge)?;
+        }
+        Ok(())
+    }
+
+    /// Native numerical/insertion body after this edge's original gap query.
+    pub(crate) fn intersect_prepared_edge(
+        &mut self,
+        k: &Kernel,
+        geometry: &impl ClassGeometry<O>,
+        working: &Curve,
+        edge: BoundaryEdge<O>,
+        source_handle: O,
+        source_zone: f64,
+        has_big_gaps: bool,
+    ) -> Result<()> {
+        let target = curve(geometry, edge.curve)?;
+        let edge_zone = edge.zone_tol_3d;
+        let mut tolerance = xsect_tol_3d_from_zones(k, edge_zone, source_zone);
+        if has_big_gaps {
+            if let Some(gap) = edge.face_gap {
+                if gap > tolerance {
+                    tolerance = gap * 1.1;
                 }
             }
-            let mut solutions = Vec::new();
-            if core::ptr::eq(target, working) {
-                let lo = max2(edge.interval.min(), self.interval().min());
-                let hi = min2(edge.interval.max(), self.interval().max());
-                if lo < hi {
-                    let mut sol = Solution::new();
-                    sol.solution_type = SolutionType::RangeOfValues;
-                    sol.num_variables = 2;
-                    sol.num_objects = 2;
-                    for slot in sol.objects.iter_mut().take(2) {
-                        *slot = Some(edge.curve);
-                    }
-                    for i in 0..2 {
-                        *sol.start.param_mut(i)? = lo;
-                        *sol.end.param_mut(i)? = hi;
-                    }
-                    solutions.push(sol);
+        }
+        let mut solutions = Vec::new();
+        if core::ptr::eq(target, working) {
+            let lo = max2(edge.interval.min(), self.interval().min());
+            let hi = min2(edge.interval.max(), self.interval().max());
+            if lo < hi {
+                let mut sol = Solution::new();
+                sol.solution_type = SolutionType::RangeOfValues;
+                sol.num_variables = 2;
+                sol.num_objects = 2;
+                for slot in sol.objects.iter_mut().take(2) {
+                    *slot = Some(edge.curve);
                 }
-            } else {
-                let found = working.global_curve_intersect(
-                    k,
-                    &self.interval(),
-                    target,
-                    &edge.interval,
-                    tolerance,
-                    &CurveIntersectOptions {
-                        handles: [Some(Side::Source), Some(Side::Target)],
-                        ..CurveIntersectOptions::default()
-                    },
-                )?;
-                solutions.extend(
-                    found
-                        .as_slice()
-                        .iter()
-                        .map(|s| named(s, source_handle, edge.curve)),
-                );
+                for i in 0..2 {
+                    *sol.start.param_mut(i)? = lo;
+                    *sol.end.param_mut(i)? = hi;
+                }
+                solutions.push(sol);
             }
-            if !solutions.is_empty() {
-                insert_solutions(
-                    k,
-                    geometry,
-                    self,
-                    &mut solutions,
-                    edge.edge,
-                    Some(tolerance),
-                )?;
-            }
+        } else {
+            let found = working.global_curve_intersect(
+                k,
+                &self.interval(),
+                target,
+                &edge.interval,
+                tolerance,
+                &CurveIntersectOptions {
+                    handles: [Some(Side::Source), Some(Side::Target)],
+                    ..CurveIntersectOptions::default()
+                },
+            )?;
+            solutions.extend(
+                found
+                    .as_slice()
+                    .iter()
+                    .map(|s| named(s, source_handle, edge.curve)),
+            );
+        }
+        if !solutions.is_empty() {
+            insert_solutions(
+                k,
+                geometry,
+                self,
+                &mut solutions,
+                edge.edge,
+                Some(tolerance),
+            )?;
         }
         Ok(())
     }

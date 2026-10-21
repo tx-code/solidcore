@@ -264,7 +264,7 @@ pub fn assert_face(
         tests::distinct_loop_vertices(b, id)?,
     )?;
     // HasSeamProblem is an unconditional call, even when LEVEL2 reports skip.
-    let seams = tests::seam_problem(b, id)?;
+    let seams = tests::seam_problem(k, b, id)?;
     valid &= report.class_predicate(
         labels::FACE_TYPE,
         29,

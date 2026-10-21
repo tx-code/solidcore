@@ -331,6 +331,7 @@ impl Candidate {
                 // one charged work block includes all this use's finite samples.
                 execution.step()?;
                 let observation = trim_measurement::measure(
+                    &self.kernel,
                     curve,
                     uv,
                     surface,
@@ -787,7 +788,6 @@ pub fn construct_general(
         plan.mappings.extend(built.mappings);
         let seam = built.seam;
         let mut surface = built.surface;
-        surface.bind_evaluation_context(&kernel);
         // Borrowed natural-domain queries must see the original receiver's lazy
         // representation, not a default or a sliced B-spline stand-in.
         solidcore::surface::validity::materialize_bspline(&kernel, &mut surface)?;
@@ -858,7 +858,7 @@ pub fn construct_general(
                 native.work_tolerance_mm,
             )?;
             execution.step()?;
-            builder.end_loop()?;
+            builder.end_loop(&kernel)?;
             plan.normalizations.push((face.record, derived));
         } else {
             for bound in &face.loops {
@@ -924,7 +924,7 @@ pub fn construct_general(
                     builder.end_edge()?;
                 }
                 execution.step()?;
-                builder.end_loop()?;
+                builder.end_loop(&kernel)?;
             }
         }
         execution.step()?;
@@ -1355,8 +1355,8 @@ mod final_trim_tests {
         let interval = model.brep.edge(edge).unwrap().interval;
         let (uv, owner) = eu::uv_trim_curve(&model.brep, incidence).unwrap();
         let uv = uv.unwrap();
-        let a = uv.evaluate_point(interval.min()).unwrap();
-        let b = uv.evaluate_point(interval.max()).unwrap();
+        let a = uv.evaluate_point(&model.kernel, interval.min()).unwrap();
+        let b = uv.evaluate_point(&model.kernel, interval.max()).unwrap();
         let replacement = Curve::from(
             BSplineCurve::create_canonical(&CanonicalData {
                 dim: 2,

@@ -89,11 +89,8 @@ pub(super) fn assert_primitive(
     options: AssertValidOptions<'_>,
     reports: Option<&mut AssertArray>,
 ) -> Result<bool> {
-    b.face_mut(f)?
-        .surface
-        .as_mut()
-        .ok_or_else(missing)?
-        .bind_evaluation_context(k);
+    // The dispatch below resolves the actual face and required surface before
+    // any assertion body. Each evaluator receives the executing Kernel directly.
     let mut report = Reporter { reports };
     match surface(b, f)?.kind() {
         SurfaceKind::Cone(c) if c.is_cylinder_class() => {
@@ -171,8 +168,8 @@ fn revolution_assertions(
                 let step = rev.step_uv_domain().evaluate(0., 0.4567);
                 let uv =
                     ignored(s.convert_uv_from_step_to_nurbs(k, step))?.unwrap_or(Point2::UNDEF);
-                let a = evaluated_point(s.evaluate_step_point(step))?;
-                let n = evaluated_point(s.evaluate_point(uv))?;
+                let a = evaluated_point(s.evaluate_step_point(k, step))?;
+                let n = evaluated_point(s.evaluate_point(k, uv))?;
                 let tolerance = EFF_ZERO * (1. + a.max_dimension());
                 valid &= report.class_value(
                     class,
@@ -235,8 +232,8 @@ fn revolution_assertions(
                 let step = rev.step_uv_domain().evaluate(0.4567, 0.7654);
                 let uv =
                     ignored(s.convert_uv_from_step_to_nurbs(k, step))?.unwrap_or(Point2::UNDEF);
-                let a = evaluated_point(s.evaluate_step_point(step))?;
-                let n = evaluated_point(s.evaluate_point(uv))?;
+                let a = evaluated_point(s.evaluate_step_point(k, step))?;
+                let n = evaluated_point(s.evaluate_point(k, uv))?;
                 let tolerance = EFF_ZERO * 10. * (1. + a.max_dimension());
                 let distance = a.distance(n);
                 valid &=
@@ -305,6 +302,7 @@ fn revolution_assertions(
         15,
         who,
         !generator.is_degenerate(
+            k,
             tol::xsect_tol_3d_from_zones(k, zone, zone),
             Some(&generator.natural_interval()),
         )?,
@@ -393,6 +391,7 @@ fn cone_assertions(
     let z = rev.position().z_axis();
     let uv = s.natural_uv_domain().evaluate(0.45678, 0.45678);
     let derivatives = ignored(s.evaluate(
+        k,
         uv,
         1,
         1,

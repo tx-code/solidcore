@@ -217,7 +217,7 @@ pub fn assert_face(
         labels::FACE_TYPE,
         27,
         who,
-        !surface.is_degenerate_point(face_tol / 4., Some(&domain))?,
+        !surface.is_degenerate_point(k, face_tol / 4., Some(&domain))?,
         face_tol / 4.,
         UNDEF_DOUBLE,
     )?;
@@ -225,7 +225,7 @@ pub fn assert_face(
         labels::FACE_TYPE,
         28,
         who,
-        !surface.is_degenerate_curve(EFF_ZERO_DEG, Some(&domain), face_tol / 4.)?,
+        !surface.is_degenerate_curve(k, EFF_ZERO_DEG, Some(&domain), face_tol / 4.)?,
         face_tol / 4.,
         UNDEF_DOUBLE,
     )?;

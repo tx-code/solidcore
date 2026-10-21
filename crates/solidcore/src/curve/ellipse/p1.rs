@@ -221,6 +221,7 @@ impl PolarConversion {
         nurbs_param: f64,
     ) -> Result<(f64, bool)> {
         self.convert_to_polar_parameter_with_zone(
+            k,
             Some(crate::geom::tol::context_zone_tol_3d(
                 k,
                 None,
@@ -233,8 +234,11 @@ impl PolarConversion {
 
     /// Original polar conversion with the caller's resolved context zone. Only
     /// the closed-ellipse seam inversion uses that context scalar.
+    /// The actual executing context also reaches the native closure predicate;
+    /// a scalar zone value never stands in for that context.
     pub(crate) fn convert_to_polar_parameter_with_zone(
         &self,
+        k: &Kernel,
         context_zone: Option<f64>,
         curve: &Ellipse,
         nurbs_param: f64,
@@ -290,7 +294,7 @@ impl PolarConversion {
         let exact = true;
 
         // make sure to return the proper end value for closed curve seam conversions
-        if is_closed_base(&curve.base, &curve.base.natural_interval(), 0.0)? {
+        if is_closed_base(k, &curve.base, &curve.base.natural_interval(), 0.0)? {
             let inside_out = curve.inside_out;
             let knots = &self.natural_knots;
             let angles = &self.angles;
@@ -906,11 +910,12 @@ impl Ellipse {
     /// # Errors
     ///
     /// Those of [`crate::curve::curve::p5::is_arc_base`].
-    pub fn is_arc(&self, num_samples: u64, tol: f64) -> Result<Option<ArcData>> {
+    pub fn is_arc(&self, k: &Kernel, num_samples: u64, tol: f64) -> Result<Option<ArcData>> {
         if self.circle {
             return Ok(Some(self.arc_data()));
         }
         crate::curve::curve::p5::is_arc_base(
+            k,
             &self.base,
             |_, tol| Ok(self.is_degenerate(tol)),
             num_samples,
@@ -1127,7 +1132,7 @@ impl Ellipse {
             // (status ignored: a failed conversion leaves the polar table's guess)
             let Some(nurb_t) = self
                 .polar
-                .convert_to_nurbs_parameter_or_written(self, step_t, 0.0)?
+                .convert_to_nurbs_parameter_or_written(k, self, step_t, 0.0)?
             else {
                 return Err(SolidError::invalid_input(
                     OP_ASSERT,
@@ -1630,8 +1635,14 @@ impl Ellipse {
         let step_t1 = new_interval.max();
 
         // After these calls, the conversion may not be reciprocal.
-        let nurbs_t0 = self.polar.convert_to_nurbs_parameter(self, step_t0, 0.0)?.0;
-        let nurbs_t1 = self.polar.convert_to_nurbs_parameter(self, step_t1, 0.0)?.0;
+        let nurbs_t0 = self
+            .polar
+            .convert_to_nurbs_parameter(k, self, step_t0, 0.0)?
+            .0;
+        let nurbs_t1 = self
+            .polar
+            .convert_to_nurbs_parameter(k, self, step_t1, 0.0)?
+            .0;
         let new_nurbs_ivl = Extent1d::from_min_max(nurbs_t0, nurbs_t1);
 
         // save the input
@@ -1980,7 +1991,7 @@ mod tests {
         assert_eq!(c.class_string(), "SmCircle");
         assert_eq!(c.base().form, BSplineCurveForm::CircularArc);
         assert_eq!(c.radius(), 2.0);
-        let (_, r, a, b) = c.is_arc(5, 0.0).unwrap().unwrap();
+        let (_, r, a, b) = c.is_arc(&k, 5, 0.0).unwrap().unwrap();
         assert_eq!((r, a, b), (2.0, 0.0, 90.0));
     }
 
@@ -1992,7 +2003,7 @@ mod tests {
         let s = c
             .convert_t_from_nurbs_to_step(&k, ivl.evaluate(0.3))
             .unwrap();
-        let t = c.convert_t_from_step_to_nurbs(s).unwrap();
+        let t = c.convert_t_from_step_to_nurbs(&k, s).unwrap();
         assert!((t - ivl.evaluate(0.3)).abs() < 1e-9);
         let mut l = AssertArray::new();
         assert!(c

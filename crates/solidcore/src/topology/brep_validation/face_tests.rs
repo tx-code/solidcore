@@ -195,7 +195,7 @@ pub(super) fn nested_loops(k: &Kernel, b: &mut Brep, f: FaceId) -> Result<bool> 
             continue;
         }; // Native inconclusive, not proof.
         let surface = b.face(f)?.surface.as_ref().ok_or_else(missing)?;
-        let uv_tol = map_to_2d(tol, sample, surface)?;
+        let uv_tol = map_to_2d(k, tol, sample, surface)?;
         let containment = ignore_native_status(crate::query::r#loop::contains_uv_point(
             k, b, first, None, sample, uv_tol,
         ))?;
@@ -234,7 +234,7 @@ pub(super) fn disjoint_loops(k: &Kernel, b: &mut Brep, f: FaceId) -> Result<bool
             let second_uses = loopuse::loop_edgeuses(b, second)?;
             let surface = b.face(f)?.surface.as_ref().ok_or_else(missing)?;
             let tol = crate::topology::surface_cache::working_surface_tolerance(k, b, surface)?;
-            let uv_tol = map_to_2d(tol, surface.natural_uv_domain().mid(), surface)?;
+            let uv_tol = map_to_2d(k, tol, surface.natural_uv_domain().mid(), surface)?;
             for u0 in first_uses.iter().copied() {
                 let fetched = eu3::get_or_create_uv_trim_curve(k, b, u0, false, false, true)?;
                 if ignore_native_status(fetched.status)?.is_none()

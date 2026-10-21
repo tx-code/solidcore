@@ -101,7 +101,7 @@ fn coincident_edge(
         let edge = b.edge(*other)?;
         let curve = edge.curve.as_ref().ok_or_else(invalid)?;
         let tolerance = tol + edge.tolerance;
-        let middle = curve.evaluate_point(edge.interval.evaluate(0.5))?;
+        let middle = curve.evaluate_point(k, edge.interval.evaluate(0.5))?;
         let drop = target.drop_point(
             k,
             &interval,
@@ -114,8 +114,8 @@ fn coincident_edge(
         if !drop.success || drop.distance > tolerance {
             continue;
         }
-        let c = curve.evaluate(edge.interval.evaluate(0.5), 1, true, true)?;
-        let a = target.evaluate(drop.parameter, 1, true, true)?;
+        let c = curve.evaluate(k, edge.interval.evaluate(0.5), 1, true, true)?;
+        let a = target.evaluate(k, drop.parameter, 1, true, true)?;
         let same = a
             .get(1)
             .ok_or_else(invalid)?
@@ -179,7 +179,7 @@ fn coincident_face(
             .surface
             .as_ref()
             .ok_or_else(invalid)?
-            .evaluate_point(domain.evaluate(0.5, 0.5))?;
+            .evaluate_point(k, domain.evaluate(0.5, 0.5))?;
         let domain = trim_domain(k, b, face)?;
         let Some(drop) = ignored(crate::topology::surface_cache::drop_face_point(
             k,

@@ -208,7 +208,7 @@ fn run() -> Result<Value> {
         builder.end_edge()?;
         edges.push(e);
     }
-    builder.end_loop()?;
+    builder.end_loop(&k)?;
     if mode.contains("_hole") {
         let mut holes = if mode.contains("_outside") {
             vec![vec![(0.8, 0.8), (0.8, 0.9), (0.9, 0.9), (0.9, 0.8)]]
@@ -255,7 +255,7 @@ fn run() -> Result<Value> {
                 builder.set_limits(&k, VertexNode::Parameter(0.), VertexNode::Parameter(1.))?;
                 builder.end_edge()?;
             }
-            builder.end_loop()?;
+            builder.end_loop(&k)?;
         }
     }
     let vertex_loop = if mode.contains("vertexloop") {
@@ -324,7 +324,7 @@ fn run() -> Result<Value> {
                 }
                 builder.end_edge()?;
             }
-            builder.end_loop()?;
+            builder.end_loop(&k)?;
             builder.end_face()?;
         }
     }
@@ -364,7 +364,7 @@ fn run() -> Result<Value> {
                 }
                 builder.end_edge()?;
             }
-            builder.end_loop()?;
+            builder.end_loop(&k)?;
             builder.end_face()?;
         }
     }
@@ -1049,6 +1049,7 @@ fn run() -> Result<Value> {
                     let mut samples = Vec::new();
                     for n in 0..3 {
                         let p = c.evaluate_point(
+                            &k,
                             ivl.min() + (ivl.max() - ivl.min()) * f64::from(n) / 2.,
                         )?;
                         samples.push([p.x, p.y, p.z]);

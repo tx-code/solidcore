@@ -279,6 +279,7 @@ impl<O: ClassObject> CurveClassification<O> {
             .ok_or(SolidError::invalid_input(OP, "unresolved curve"))?;
         let zone = src_zone_tol_3d_of(k, Some(self));
         curve.is_closed(
+            k,
             &curve.natural_interval(),
             xsect_tol_3d_from_zones(k, zone, zone),
         )
@@ -293,11 +294,12 @@ impl<O: ClassObject> CurveClassification<O> {
     }
 
     fn p5_classify_crv_loc_by_index(
+        k: &Kernel,
         classification: &Self,
         geometry: &impl ClassGeometry<O>,
         index: usize,
     ) -> Result<(Point3, f64)> {
-        classification.classify_crv_loc_by_index(geometry, index)
+        classification.classify_crv_loc_by_index(k, geometry, index)
     }
 
     fn p5_merge_interval(
@@ -372,13 +374,13 @@ impl<O: ClassObject> CurveClassification<O> {
             {
                 // Upstream computes a tolerance-weighted point, then overwrites it with
                 // GetClassifyCrvLoc(j). Retain the fallible lookups before that overwrite.
-                let p1 = Self::p5_classify_crv_loc_by_index(self, geometry, j)?.0;
-                let p2 = Self::p5_classify_crv_loc_by_index(other, geometry, j)?.0;
+                let p1 = Self::p5_classify_crv_loc_by_index(k, self, geometry, j)?.0;
+                let p2 = Self::p5_classify_crv_loc_by_index(k, other, geometry, j)?.0;
                 if (p2 - p1).length() > EFF_ZERO {
                     object_zone_tol_3d(k, geometry, this.object())?;
                     object_zone_tol_3d(k, geometry, that.object())?;
                 }
-                let point = Self::p5_classify_crv_loc_by_index(self, geometry, j)?.0;
+                let point = Self::p5_classify_crv_loc_by_index(k, self, geometry, j)?.0;
                 if options.points_3d {
                     out.points_3d.push(point);
                 }
@@ -405,8 +407,8 @@ impl<O: ClassObject> CurveClassification<O> {
                 }
                 let curve = self.curve_geometry(geometry)?;
                 let interval = self.at(i)?.interval;
-                let start = curve.evaluate_point(interval.min())?;
-                let end = curve.evaluate_point(interval.max())?;
+                let start = curve.evaluate_point(k, interval.min())?;
+                let end = curve.evaluate_point(k, interval.max())?;
                 if self.fix_end_point_class(k, geometry, i, start)?
                     || self.fix_end_point_class(k, geometry, i + 1, end)?
                 {
@@ -649,11 +651,11 @@ impl<O: ClassObject> CurveClassification<O> {
                 let Some(projected) = vertex_solutions.as_slice().first() else {
                     continue;
                 };
-                let vertex_on_surface = surface.evaluate_point(crate::math::Vec2::new(
-                    projected.start.param(0)?,
-                    projected.start.param(1)?,
-                ))?;
-                let curve_point = curve.evaluate_point(solution.start.param(0)?)?;
+                let vertex_on_surface = surface.evaluate_point(
+                    k,
+                    crate::math::Vec2::new(projected.start.param(0)?, projected.start.param(1)?),
+                )?;
+                let curve_point = curve.evaluate_point(k, solution.start.param(0)?)?;
                 let curve_solutions = surface.global_point_solve::<NoObject>(
                     k,
                     None,
@@ -667,10 +669,10 @@ impl<O: ClassObject> CurveClassification<O> {
                 let Some(projected) = curve_solutions.as_slice().first() else {
                     continue;
                 };
-                let curve_on_surface = surface.evaluate_point(crate::math::Vec2::new(
-                    projected.start.param(0)?,
-                    projected.start.param(1)?,
-                ))?;
+                let curve_on_surface = surface.evaluate_point(
+                    k,
+                    crate::math::Vec2::new(projected.start.param(0)?, projected.start.param(1)?),
+                )?;
                 if curve_on_surface.distance(vertex_on_surface) > tolerance {
                     continue;
                 }
@@ -871,7 +873,7 @@ pub fn insert_solutions<O: ClassObject>(
         return Err(SolidError::sm_err(OP));
     }
     for sol in solutions {
-        collapse_short_range(geometry, sol, tol)?;
+        collapse_short_range(k, geometry, sol, tol)?;
         if sol.solution_type == SolutionType::SingleValue {
             if let Some((brep, edge_id)) = edge {
                 if insert_edge_endpoint(
@@ -928,8 +930,8 @@ pub fn insert_solutions<O: ClassObject>(
             let mut do_insertion = true;
             if classification.ignore_tangency() {
                 if let Some(target) = target {
-                    let a = source.evaluate(sol.start.param(0)?, 1, true, true)?;
-                    let b = target.evaluate(sol.start.param(1)?, 1, true, true)?;
+                    let a = source.evaluate(k, sol.start.param(0)?, 1, true, true)?;
+                    let b = target.evaluate(k, sol.start.param(1)?, 1, true, true)?;
                     let ta = a.get(1).copied().ok_or(SolidError::sm_err(OP))?;
                     let tb = b.get(1).copied().ok_or(SolidError::sm_err(OP))?;
                     let mut angle = tb.angle_between(ta).unwrap_or(1.0);
@@ -997,7 +999,7 @@ pub fn insert_solutions<O: ClassObject>(
                     (&ivl.start, sol.start.param(0)?),
                     (&ivl.end, sol.end.param(0)?),
                 ] {
-                    let parameter_tol = curve_parameter_tolerance(tol, parameter, curve)?;
+                    let parameter_tol = curve_parameter_tolerance(k, tol, parameter, curve)?;
                     if classification
                         .interval()
                         .is_value_on_boundary(parameter, parameter_tol)
@@ -1017,8 +1019,13 @@ pub fn insert_solutions<O: ClassObject>(
 
 /// `SmTol::MapTo1d(tol, parameter, curve)`: the evaluation status is ignored by
 /// SmTol.cpp:1151--1170; an unavailable dependency still propagates.
-fn curve_parameter_tolerance(tolerance: f64, parameter: f64, curve: &Curve) -> Result<f64> {
-    let derivative = ignored(curve.evaluate(parameter, 1, true, true))?
+fn curve_parameter_tolerance(
+    k: &Kernel,
+    tolerance: f64,
+    parameter: f64,
+    curve: &Curve,
+) -> Result<f64> {
+    let derivative = ignored(curve.evaluate(k, parameter, 1, true, true))?
         .and_then(|v| v.get(1).copied())
         .unwrap_or(crate::math::Vec3::UNDEF);
     Ok(map_to_1d(tolerance, derivative, &curve.natural_interval()))
@@ -1045,7 +1052,7 @@ fn insert_edge_endpoint<O: ClassObject>(
         .ok_or(SolidError::invalid_input(OP, "edge without curve"))?;
     let start_vertex = edge_query::start_vertex(brep, edge)?;
     let edge_zone = edge_query::tolerance(brep, edge)?;
-    let parameter_tol = curve_parameter_tolerance(tolerance, domain.min(), curve)?;
+    let parameter_tol = curve_parameter_tolerance(k, tolerance, domain.min(), curve)?;
     let start_distance = (parameter - domain.min()).abs();
     let end_distance = (parameter - domain.max()).abs();
     for at_start in [true, false] {
@@ -1086,7 +1093,7 @@ fn insert_edge_endpoint<O: ClassObject>(
         } else {
             xsect_tol_3d_from_zones(k, vertex_zone, source_zone)
         };
-        let point = ignored(curve.evaluate_point(parameter))?.unwrap_or(Point3::UNDEF);
+        let point = ignored(curve.evaluate_point(k, parameter))?.unwrap_or(Point3::UNDEF);
         if point.distance(record.point).partial_cmp(&vertex_tolerance)
             != Some(core::cmp::Ordering::Less)
         {
@@ -1105,7 +1112,7 @@ fn insert_edge_endpoint<O: ClassObject>(
             } else {
                 Extent1d::from_min_max(parameter, touch.param)
             };
-            if source.approximate_length(&interval, 3, false)?.0 < same_vertex_tolerance {
+            if source.approximate_length(k, &interval, 3, false)?.0 < same_vertex_tolerance {
                 return Ok(true);
             }
         }
@@ -1128,6 +1135,7 @@ fn insert_edge_endpoint<O: ClassObject>(
 }
 
 fn collapse_short_range<O: ClassObject>(
+    k: &Kernel,
     geometry: &impl ClassGeometry<O>,
     sol: &mut Solution<O>,
     tolerance: f64,
@@ -1144,8 +1152,8 @@ fn collapse_short_range<O: ClassObject>(
         return Ok(());
     };
     let (Some(start), Some(end)) = (
-        ignored(curve.evaluate_point(sol.start.param(0)?))?,
-        ignored(curve.evaluate_point(sol.end.param(0)?))?,
+        ignored(curve.evaluate_point(k, sol.start.param(0)?))?,
+        ignored(curve.evaluate_point(k, sol.end.param(0)?))?,
     ) else {
         return Ok(());
     };
@@ -1154,7 +1162,7 @@ fn collapse_short_range<O: ClassObject>(
     }
     let mut interval = Extent1d::from_value(sol.start.param(0)?);
     interval.add_value(sol.end.param(0)?);
-    if curve.approximate_length(&interval, 6, false)?.0 < tolerance {
+    if curve.approximate_length(k, &interval, 6, false)?.0 < tolerance {
         sol.solution_type = SolutionType::SingleValue;
         if sol.end.solution_value < sol.start.solution_value * 0.8 {
             sol.start.solution_value = sol.end.solution_value;
@@ -1333,7 +1341,7 @@ mod tests {
                 .unwrap();
             builder.end_edge().unwrap();
         }
-        builder.end_loop().unwrap();
+        builder.end_loop(&k).unwrap();
         builder.end_face().unwrap();
         builder.end_shell(&mut k, false).unwrap();
         let mut brep = builder.finish().unwrap();
@@ -1429,7 +1437,7 @@ mod tests {
         *later.end.param_mut(0).unwrap() += 1e-12;
         *later.end.param_mut(1).unwrap() += 2e-12;
         let mut visited_later = later;
-        collapse_short_range(&geometry, &mut visited_later, 1e-6).unwrap();
+        collapse_short_range(&k, &geometry, &mut visited_later, 1e-6).unwrap();
         assert_eq!(visited_later.solution_type, SolutionType::SingleValue);
         for completed_prefix in [false, true] {
             let mut expected = endpoint_classification(&k);
@@ -1699,6 +1707,7 @@ mod tests {
 
     #[test]
     fn collapsed_range_keeps_end_and_unrelated_parameters() {
+        let k = &Kernel::default();
         let g = geometry();
         for (ratio, expected) in [(0.79, 0.6e-6), (0.8, 0.55e-6), (1.2, 0.5e-6)] {
             let mut sol = Solution::new();
@@ -1714,7 +1723,7 @@ mod tests {
             sol.start.solution_value = 1.;
             sol.end.solution_value = ratio;
             let end = sol.end;
-            collapse_short_range(&g, &mut sol, 1e-6).unwrap();
+            collapse_short_range(k, &g, &mut sol, 1e-6).unwrap();
             assert_eq!(sol.solution_type, SolutionType::SingleValue);
             assert_eq!(sol.start.param(0).unwrap(), expected);
             assert_eq!(sol.start.param(2).unwrap(), 42.);

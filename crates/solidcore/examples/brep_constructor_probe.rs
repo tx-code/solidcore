@@ -45,7 +45,12 @@ fn point(p: Point3) -> [f64; 3] {
     [p.x, p.y, p.z]
 }
 
-fn observe(b: &Brep, manifold: bool, validation: Option<&(i32, AssertArray)>) -> Result<Value> {
+fn observe(
+    k: &Kernel,
+    b: &Brep,
+    manifold: bool,
+    validation: Option<&(i32, AssertArray)>,
+) -> Result<Value> {
     let regions: Vec<_> = b.regions().ids().collect();
     let shells: Vec<_> = b.shells().ids().collect();
     let faces: Vec<_> = b.faces().ids().collect();
@@ -100,7 +105,7 @@ fn observe(b: &Brep, manifold: bool, validation: Option<&(i32, AssertArray)>) ->
             index(&shells, required(mate.shell)?)?,
             surface.owner() == Some(arena_identity(CacheObject::Face(*f))),
             [d.min().x, d.min().y, d.max().x, d.max().y],
-            point(surface.evaluate_point(Point2::new(0.25, 0.75))?)
+            point(surface.evaluate_point(k, Point2::new(0.25, 0.75))?)
         ]));
     }
     let mut ls = Vec::new();
@@ -147,6 +152,7 @@ fn observe(b: &Brep, manifold: bool, validation: Option<&(i32, AssertArray)>) ->
         let mut ps = Vec::new();
         for i in 0..3 {
             ps.push(point(c.evaluate_point(
+                k,
                 d.min() + (d.max() - d.min()) * f64::from(i) / 2.,
             )?));
         }
@@ -171,6 +177,7 @@ fn observe(b: &Brep, manifold: bool, validation: Option<&(i32, AssertArray)>) ->
             let mut ps = Vec::new();
             for i in 0..3 {
                 ps.push(point(c.evaluate_point(
+                    k,
                     d.min() + (d.max() - d.min()) * f64::from(i) / 2.,
                 )?));
             }
@@ -432,7 +439,7 @@ fn run() -> Result<Value> {
                     }
                     builder.end_edge()?;
                 }
-                builder.end_loop()?;
+                builder.end_loop(&k)?;
             }
         }
         builder.end_face()?;
@@ -462,7 +469,7 @@ fn run() -> Result<Value> {
     } else {
         None
     };
-    observe(&b, manifold, validation.as_ref())
+    observe(&k, &b, manifold, validation.as_ref())
 }
 fn main() -> Result<()> {
     match run() {

@@ -45,7 +45,7 @@ pub(crate) fn fixture() -> (Brep, FaceId, LoopId, EdgeuseId) {
             .unwrap();
         builder.end_edge().unwrap();
     }
-    builder.end_loop().unwrap();
+    builder.end_loop(&k).unwrap();
     builder.end_face().unwrap();
     builder.end_shell(&mut k, false).unwrap();
     let b = builder.finish().unwrap();

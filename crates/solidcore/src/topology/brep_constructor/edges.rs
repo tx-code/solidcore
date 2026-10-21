@@ -229,7 +229,9 @@ impl BrepConstructor {
     /// Close a loop by vertex identity. Missing vertices are obtained from the
     /// defining 3D curve, preserving the original mate/radial preference order.
     /// Coincident coordinates are never an instruction to delete or weld vertices.
-    pub fn end_loop(&mut self) -> Result<()> {
+    /// `k` is the executing context for those lazy geometry queries; constructor
+    /// state does not manufacture a replacement context or infer one from a curve.
+    pub fn end_loop(&mut self, k: &Kernel) -> Result<()> {
         let lu = self.primary_loop()?;
         let vertexuses = crate::topology::loopuse::vertexuses(&self.brep, lu, None)?;
         for optional in vertexuses {
@@ -270,7 +272,7 @@ impl BrepConstructor {
                             .curve
                             .as_ref()
                             .ok_or_else(|| invalid("unresolved edge has no curve"))?;
-                        if curve.is_closed(&record.interval, record.tolerance)? {
+                        if curve.is_closed(k, &record.interval, record.tolerance)? {
                             found = Some(vertex);
                         }
                     }
@@ -289,7 +291,7 @@ impl BrepConstructor {
                     } else {
                         record.interval.min()
                     };
-                    let point = curve.evaluate_point(parameter)?;
+                    let point = curve.evaluate_point(k, parameter)?;
                     self.start_vertex_of_loop(point)?
                 };
                 self.attach_vertexuse(vertex, vu)?;

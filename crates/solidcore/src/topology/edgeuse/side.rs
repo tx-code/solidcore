@@ -86,10 +86,10 @@ pub fn edgeuse_side(
     let domain = surface.natural_uv_domain();
     let periodic_u = options
         .periodic_u
-        .map_or_else(|| surface.is_periodic(&domain, SurfParamType::U), Ok)?;
+        .map_or_else(|| surface.is_periodic(k, &domain, SurfParamType::U), Ok)?;
     let periodic_v = options
         .periodic_v
-        .map_or_else(|| surface.is_periodic(&domain, SurfParamType::V), Ok)?;
+        .map_or_else(|| surface.is_periodic(k, &domain, SurfParamType::V), Ok)?;
     let owner_lookup = |owner| crate::topology::surface_cache::owning_face_tolerance(b, owner);
     let surface_tol = crate::topology::surface_cache::working_surface_tolerance(k, b, surface)?;
     let uv_curve = eu::uv_trim_curve(b, id)?.0;
@@ -120,7 +120,7 @@ pub fn edgeuse_side(
             1. - i as f64 / (options.samples - 1) as f64
         };
         let param = edge_record.interval.evaluate(t);
-        match curve.evaluate_point(param) {
+        match curve.evaluate_point(k, param) {
             Ok(point) => edge_point = point,
             Err(error) if error.is_unported() => return Err(error),
             Err(_) => {}
@@ -128,7 +128,7 @@ pub fn edgeuse_side(
         // Source evaluates an existing UV curve at the 3D EDGE parameter, not
         // its natural-interval fraction. Do not normalize this convention.
         let guess = if let Some(uv) = uv_curve {
-            match uv.evaluate_point(param) {
+            match uv.evaluate_point(k, param) {
                 Ok(point) => uv_guess_point = point,
                 Err(error) if error.is_unported() => return Err(error),
                 Err(_) => {}
@@ -162,8 +162,8 @@ pub fn edgeuse_side(
             Err(error) => return Err(error),
         };
         let uv = dropped.result_uv; // Source deliberately does not test success.
-        let tol_u = map_to_2d_dir(surface_tol, uv, Vec2::new(1., 0.), surface)?;
-        let tol_v = map_to_2d_dir(surface_tol, uv, Vec2::new(0., 1.), surface)?;
+        let tol_u = map_to_2d_dir(k, surface_tol, uv, Vec2::new(1., 0.), surface)?;
+        let tol_v = map_to_2d_dir(k, surface_tol, uv, Vec2::new(0., 1.), surface)?;
         let location = (domain.point_boundaries(uv, 2. * tol_u) & (SS_UMIN | SS_UMAX))
             | (domain.point_boundaries(uv, 2. * tol_v) & (SS_VMIN | SS_VMAX));
         bounds.add_point(edge_point);

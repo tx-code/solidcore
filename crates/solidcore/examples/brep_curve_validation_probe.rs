@@ -209,6 +209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for guess in [0., 0.3, 0.5, 0.8, 1.] {
                     let mut sol = Solution::<solidcore::error::EntityRef>::new();
                     let result = local_property_analysis(
+                        &k,
                         c,
                         &c.natural_interval(),
                         prop,

@@ -158,8 +158,8 @@ impl BrepConstructor {
         };
         // Upstream ignores these two evaluation statuses. Unported remains an
         // explicit gap; other errors retain an undefined point and do not snap.
-        let a = crate::error::ignored(curve.evaluate_point(found.parameter))?;
-        let b = crate::error::ignored(curve.evaluate_point(endpoint))?;
+        let a = crate::error::ignored(curve.evaluate_point(k, found.parameter))?;
+        let b = crate::error::ignored(curve.evaluate_point(k, endpoint))?;
         if let (Some(a), Some(b)) = (a, b) {
             if a.distance_squared(b) < tolerance * tolerance {
                 return Ok(endpoint);

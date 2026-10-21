@@ -894,7 +894,7 @@ impl Geometry<'_> {
         execution: &mut Execution,
     ) -> Result<f64> {
         execution.step()?;
-        let actual = curve.evaluate_point(endpoint)?;
+        let actual = curve.evaluate_point(self.kernel, endpoint)?;
         if norm(actual - point) <= self.consistency_mm {
             return Ok(endpoint);
         }
@@ -1167,7 +1167,7 @@ impl Geometry<'_> {
         mappings.push(mapping);
         let evaluate = |parameter: f64, point: Vec3, execution: &mut Execution| -> Result<Vec3> {
             execution.step()?;
-            let actual = native.evaluate_point(parameter)?;
+            let actual = native.evaluate_point(self.kernel, parameter)?;
             let gap = norm(actual - point);
             need(
                 gap.is_finite() && gap <= self.consistency_mm,
@@ -1487,7 +1487,12 @@ mod tests {
         assert_eq!(execution.used, 6);
         assert_eq!(built.interval.min(), 2.);
         assert_eq!(built.interval.max(), 5.);
-        let point = built.native.as_ref().unwrap().evaluate_point(3.5).unwrap();
+        let point = built
+            .native
+            .as_ref()
+            .unwrap()
+            .evaluate_point(&kernel, 3.5)
+            .unwrap();
         assert!(norm(point - Vec3::new(1., 2. / 3., 0.)) < 1e-12);
         let solidcore::curve::curve::CurveKind::BSpline(curve) =
             built.native.as_ref().unwrap().kind()

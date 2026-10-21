@@ -546,7 +546,7 @@ pub fn construct_planar(checked: &p::Outcome, options: Options) -> Result<Candid
                 }
                 builder.end_edge()?;
             }
-            builder.end_loop()?;
+            builder.end_loop(&kernel)?;
         }
         builder.end_face()?;
     }

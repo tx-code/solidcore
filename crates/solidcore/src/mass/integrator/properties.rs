@@ -129,6 +129,7 @@ impl PropertyAttributes<'_> {
 
 /// `SmEdge::ComputePreciseProperties` on a live edge.
 pub fn edge_properties(
+    k: &Kernel,
     b: &Brep,
     e: EdgeId,
     accuracy: f64,
@@ -136,10 +137,11 @@ pub fn edge_properties(
     radius: f64,
 ) -> Result<EdgeProperties> {
     let curve = edge::curve(b, e)?.ok_or_else(|| SolidError::null_pointer(OP))?;
-    curve_properties(curve, &edge::interval(b, e)?, accuracy, origin, radius)
+    curve_properties(k, curve, &edge::interval(b, e)?, accuracy, origin, radius)
 }
 /// The precise edge integration on an already-bound curve and interval.
 pub fn curve_properties(
+    k: &Kernel,
     curve: &Curve,
     interval: &Extent1d,
     accuracy: f64,
@@ -147,7 +149,7 @@ pub fn curve_properties(
     radius: f64,
 ) -> Result<EdgeProperties> {
     let eval = edge::OdeEdgeLength::new(curve, origin, radius);
-    let approx = curve.approximate_length(interval, 10, false)?.0;
+    let approx = curve.approximate_length(k, interval, 10, false)?.0;
     let mut y = [0.0; 27];
     let mut scale = [BIG_DOUBLE; 27];
     if let Some(s) = scale.first_mut() {
@@ -165,7 +167,7 @@ pub fn curve_properties(
             scale: Some(&scale),
         },
         |t, _, dy| {
-            eval.evaluate(t, &mut scratch)?;
+            eval.evaluate(k, t, &mut scratch)?;
             for (d, v) in dy.iter_mut().zip(scratch.iter().skip(1)) {
                 *d = *v;
             }
@@ -586,7 +588,7 @@ pub fn brep_properties(
             EntityRef::Edge(e),
             Vec3::new(behavior.density, behavior.edge_radius, 0.0),
         )?;
-        let delta = edge_properties(b, e, accuracy, origin, mass.y)?;
+        let delta = edge_properties(k, b, e, accuracy, origin, mass.y)?;
         if mass.x < EFF_ZERO {
             mass.x = 1.0;
         }
@@ -1104,7 +1106,7 @@ mod tests {
                 .unwrap();
             builder.end_edge().unwrap();
         }
-        builder.end_loop().unwrap();
+        builder.end_loop(&k).unwrap();
         builder.end_face().unwrap();
         let flags = PPF_AREA | PPF_AREA_FIRST_MOMENTS;
         let actual = face_properties_with_origins(

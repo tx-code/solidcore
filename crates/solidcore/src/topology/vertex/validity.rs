@@ -134,8 +134,8 @@ pub fn has_parallel_faces(
             continue;
         };
         let s1 = surface(b, f1)?;
-        let p1 = s1.evaluate_point(g1.face_uv)?;
-        let n1 = s1.evaluate_normal(g1.face_uv, Side::Right, Side::Right)?;
+        let p1 = s1.evaluate_point(k, g1.face_uv)?;
+        let n1 = s1.evaluate_normal(k, g1.face_uv, Side::Right, Side::Right)?;
         for second in uses.iter().copied().skip(i + 1) {
             let f2 = required(use_face(b, second)?)?;
             surface(b, f2)?;
@@ -143,8 +143,8 @@ pub fn has_parallel_faces(
                 continue;
             };
             let s2 = surface(b, f2)?;
-            let p2 = s2.evaluate_point(g2.face_uv)?;
-            let n2 = s2.evaluate_normal(g2.face_uv, Side::Right, Side::Right)?;
+            let p2 = s2.evaluate_point(k, g2.face_uv)?;
+            let n2 = s2.evaluate_normal(k, g2.face_uv, Side::Right, Side::Right)?;
             // SmVector3d.cpp442 initializes its angle output to zero before
             // failing on a zero vector; the caller ignores that status.
             let a = rad_to_deg(n1.angle_between(n2).unwrap_or(0.));
@@ -204,8 +204,9 @@ pub fn calc_corner_from_faces(k: &Kernel, b: &mut Brep, v: VertexId) -> Result<C
     if parallel.found && parallel.max_gap > approx {
         let [(f1, uv1), (f2, uv2)] = required(parallel.pair)?;
         out.found = true;
-        out.point =
-            (surface(b, f1)?.evaluate_point(uv1)? + surface(b, f2)?.evaluate_point(uv2)?) / 2.;
+        out.point = (surface(b, f1)?.evaluate_point(k, uv1)?
+            + surface(b, f2)?.evaluate_point(k, uv2)?)
+            / 2.;
         let uses = vertex::vertexuses(b, v)?;
         for use_ in &uses {
             vu::init_vertex_face_gap(b, *use_)?;
@@ -235,11 +236,12 @@ pub fn calc_corner_from_faces(k: &Kernel, b: &mut Brep, v: VertexId) -> Result<C
             continue;
         };
         // EvaluateNormal's explicit status guard skips failed normal evaluations.
-        let Some(normal) = ignored(surface.evaluate_normal(uv, Side::Right, Side::Right))? else {
+        let Some(normal) = ignored(surface.evaluate_normal(k, uv, Side::Right, Side::Right))?
+        else {
             continue;
         };
         if let Some((_, old, _)) = targets.iter().find(|(f, _, _)| *f == face) {
-            let tol = surface1::map_to_2d(b.face(face)?.tolerance, uv, surface)?;
+            let tol = surface1::map_to_2d(k, b.face(face)?.tolerance, uv, surface)?;
             if old.closer_than(tol, uv) {
                 continue;
             }
@@ -285,9 +287,16 @@ pub fn calc_corner_from_faces(k: &Kernel, b: &mut Brep, v: VertexId) -> Result<C
         [_, (second, guess2, _)] => {
             let d1 = surface_cache::natural_domain_owned(k, b, first)?;
             let d2 = surface_cache::natural_domain_owned(k, b, *second)?;
-            let intersector =
-                SurfaceIntersector::new(surface(b, first)?, &d1, surface(b, *second)?, &d2, false)?;
+            let intersector = SurfaceIntersector::new(
+                k,
+                surface(b, first)?,
+                &d1,
+                surface(b, *second)?,
+                &d2,
+                false,
+            )?;
             let Some(uvs) = intersector.refine_point(
+                k,
                 guess,
                 *guess2,
                 IntersectionPointType::Crossing,
@@ -302,6 +311,7 @@ pub fn calc_corner_from_faces(k: &Kernel, b: &mut Brep, v: VertexId) -> Result<C
         }
         [_, (second, guess2, _), (third, guess3, _)] => {
             let solution = surface(b, first)?.local_surface_surface_intersect(
+                k,
                 &b.face(first)?.uv_domain,
                 surface(b, *second)?,
                 &b.face(*second)?.uv_domain,
@@ -319,7 +329,7 @@ pub fn calc_corner_from_faces(k: &Kernel, b: &mut Brep, v: VertexId) -> Result<C
         _ => return Err(SolidError::sm_err(OP)),
     };
     out.found = true;
-    out.point = surface(b, first)?.evaluate_point(uv)?;
+    out.point = surface(b, first)?.evaluate_point(k, uv)?;
     out.max_gap = out.point.distance(b.vertex(v)?.point);
     Ok(out)
 }

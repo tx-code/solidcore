@@ -194,8 +194,13 @@ impl crate::surface::surface::p6::SimpleCoincidenceQuery<EntityRef> for FaceEdge
             )?
             .normal)
     }
-    fn evaluate_curve(&self, parameter: f64, from_left: bool) -> Result<Vec<crate::math::Vec3>> {
-        self.curve()?.evaluate(parameter, 1, from_left, true)
+    fn evaluate_curve(
+        &self,
+        k: &Kernel,
+        parameter: f64,
+        from_left: bool,
+    ) -> Result<Vec<crate::math::Vec3>> {
+        self.curve()?.evaluate(k, parameter, 1, from_left, true)
     }
     fn curve_degree(&self) -> Result<usize> {
         self.curve()?.degree()
@@ -203,8 +208,9 @@ impl crate::surface::surface::p6::SimpleCoincidenceQuery<EntityRef> for FaceEdge
     fn curve_interval(&self) -> Result<crate::geom::extent1d::Extent1d> {
         Ok(self.curve()?.natural_interval())
     }
-    fn normal(&self, uv: Point2) -> Result<crate::math::Vec3> {
+    fn normal(&self, k: &Kernel, uv: Point2) -> Result<crate::math::Vec3> {
         self.surface()?.evaluate_normal(
+            k,
             uv,
             crate::nurbs::knots::Side::Right,
             crate::nurbs::knots::Side::Right,
@@ -612,7 +618,7 @@ mod tests {
                 .unwrap();
             builder.end_edge().unwrap();
         }
-        builder.end_loop().unwrap();
+        builder.end_loop(&k).unwrap();
         builder.end_face().unwrap();
         builder.end_shell(&mut k, false).unwrap();
         (k, builder.finish().unwrap(), face)

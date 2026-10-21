@@ -13,10 +13,10 @@ use solidcore::topology::database_io::{DatabaseReader, FileType, InputStream};
 fn vec(v: Vec3) -> [f64; 3] {
     [v.x, v.y, v.z]
 }
-fn observe(c: &CrvOnSurf, t: f64) -> solidcore::Result<Value> {
-    let d = c.evaluate(t, 3, true, false)?;
-    let (u, v) = c.evaluate_surface_1st_deriv_derivs(t, true)?;
-    let n = c.evaluate_surface_normal(t, true)?;
+fn observe(k: &Kernel, c: &CrvOnSurf, t: f64) -> solidcore::Result<Value> {
+    let d = c.evaluate(k, t, 3, true, false)?;
+    let (u, v) = c.evaluate_surface_1st_deriv_derivs(k, t, true)?;
+    let n = c.evaluate_surface_normal(k, t, true)?;
     let interval = c.natural_interval();
     Ok(
         json!({"surface_type":c.surface().type_code(),"interval":[interval.min(),interval.max()],
@@ -88,7 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if action == "copy_transform" {
             status = transform_status(copied.transform_with_kernel(&k, &transform, scale))?;
         }
-        observe(&copied, t)?
+        observe(&k, &copied, t)?
     } else if action == "binary" || action == "ascii" {
         let hex = args.get(7).ok_or("SDK archive hex")?;
         let bytes = (0..hex.len())
@@ -106,13 +106,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let mut db = DatabaseReader::with_stream(kind, InputStream::new(bytes));
         db.set_version(40);
-        observe(&CrvOnSurf::read_from_db(&k, &mut db, 40)?, t)?
+        observe(&k, &CrvOnSurf::read_from_db(&k, &mut db, 40)?, t)?
     } else {
-        observe(&c, t)?
+        observe(&k, &c, t)?
     };
     println!(
         "{}",
-        json!({"status":status,"result":result,"original":observe(&c,t)?})
+        json!({"status":status,"result":result,"original":observe(&k,&c,t)?})
     );
     Ok(())
 }

@@ -211,8 +211,8 @@ fn param_report(
     }
     Ok(result)
 }
-fn derivatives(c: &Curve, t: f64, left: bool) -> Result<Vec3> {
-    match c.evaluate(t, 1, left, true) {
+fn derivatives(k: &Kernel, c: &Curve, t: f64, left: bool) -> Result<Vec3> {
+    match c.evaluate(k, t, 1, left, true) {
         Ok(v) => v.get(1).copied().ok_or_else(missing),
         Err(SolidError::Upstream { .. } | SolidError::Nlib { .. }) => Err(SolidError::unported(
             "curve AssertValid failed Evaluate outputs",
@@ -284,7 +284,7 @@ fn bspline(
         return Ok(valid);
     }
     let zone = zone(k, b, c)?;
-    let degen = c.is_degenerate(tol::xsect_tol_3d_from_zones(k, zone, zone), None)?;
+    let degen = c.is_degenerate(k, tol::xsect_tol_3d_from_zones(k, zone, zone), None)?;
     if !degen {
         let pts = nurb.cpts();
         let first = *pts.first().ok_or_else(missing)?;
@@ -338,7 +338,7 @@ fn bspline(
             let t = *knots.get(index).ok_or_else(missing)?;
             // Native lower FALSE, upper TRUE; Evaluate's nonzero tangent default
             // is TRUE. Do not swap sides based on their English names.
-            let lower = derivatives(c, t, false)?;
+            let lower = derivatives(k, c, t, false)?;
             let Ok(a) = lower.unitize() else {
                 if dim == 2 || dim == 3 {
                     valid &= param_report(
@@ -354,7 +354,7 @@ fn bspline(
                 }
                 continue;
             };
-            let upper = derivatives(c, t, true)?;
+            let upper = derivatives(k, c, t, true)?;
             let Ok(d) = upper.unitize() else {
                 // Both sides use indices5/6, not the obsolete comments7/8.
                 if dim == 2 || dim == 3 {
@@ -439,7 +439,7 @@ fn bspline(
             {
                 continue;
             }
-            let length = derivatives(c, t, false)?.length();
+            let length = derivatives(k, c, t, false)?.length();
             if length < tolerance {
                 if dim == 2 || dim == 3 {
                     valid &= param_report(
@@ -493,7 +493,7 @@ fn bspline(
         }
     }
     let pole_tol = ZONE_TOL_3D / 10.;
-    let pole = c.has_internal_pole(pole_tol)?;
+    let pole = c.has_internal_pole(k, pole_tol)?;
     valid &= r.class_value(
         labels::B_SPLINE_CURVE_TYPE,
         15,

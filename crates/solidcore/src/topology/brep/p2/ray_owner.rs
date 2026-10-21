@@ -349,7 +349,7 @@ mod tests {
                 .unwrap();
             builder.end_edge().unwrap();
         }
-        builder.end_loop().unwrap();
+        builder.end_loop(&kernel).unwrap();
         builder.end_face().unwrap();
         builder.end_shell(&mut kernel, false).unwrap();
         (kernel, builder.finish().unwrap(), face)

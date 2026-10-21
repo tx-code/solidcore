@@ -93,7 +93,7 @@ fn fixture(k: &mut Kernel) -> Result<(Brep, FaceId, Vec<VertexId>)> {
         c.set_limits(k, VertexNode::Parameter(0.), VertexNode::Parameter(1.))?;
         c.end_edge()?;
     }
-    c.end_loop()?;
+    c.end_loop(k)?;
     c.end_face()?;
     c.end_shell(k, false)?;
     Ok((c.finish()?, f, v))

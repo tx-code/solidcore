@@ -196,6 +196,7 @@ mod tests {
 
     #[test]
     fn positive_actual_spans_keep_native_side_and_jacobian_including_tiny_width() {
+        let k = crate::kernel::Kernel::default();
         // Independent piecewise-linear derivative: each whole piece moves by
         // X then Y, even when its native width is far below SM_EFF_ZERO.
         for (start, knot, end) in [(0., 1., 2.), (1e6, 1e6 + 0.25, 1e6 + 2.), (0., 1e-10, 2.)] {
@@ -210,7 +211,7 @@ mod tests {
                 assert_eq!(span.parameter(1.), span.max);
                 let parameter = if i == 0 { span.max } else { span.min };
                 let values = curve
-                    .evaluate(parameter, 1, span.evaluate_from_left(parameter), false)
+                    .evaluate(&k, parameter, 1, span.evaluate_from_left(parameter), false)
                     .unwrap();
                 let expected = if i == 0 { Vec3::X } else { Vec3::Y };
                 assert!((values[1] * span.length() - expected).length() < 1e-12);
@@ -299,7 +300,7 @@ mod tests {
                 let span = plan.span(i, &interval).unwrap();
                 let parameter = if i == 0 { span.max } else { span.min };
                 let values = curve
-                    .evaluate(parameter, 1, span.evaluate_from_left(parameter), false)
+                    .evaluate(&k, parameter, 1, span.evaluate_from_left(parameter), false)
                     .unwrap();
                 // Rational endpoint derivative on each whole quadratic piece:
                 // 2*w_adjacent/w_endpoint*(P_endpoint-P_adjacent).

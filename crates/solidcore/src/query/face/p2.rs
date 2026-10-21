@@ -350,7 +350,7 @@ pub fn point_classify(
     let surface = &surface;
 
     // Eval Surface at TargetPoint (status ignored)
-    let surf_pt = ignored(surface.evaluate_1st_derivatives(uv, false, false))?
+    let surf_pt = ignored(surface.evaluate_1st_derivatives(k, uv, false, false))?
         .map_or(Vec3::UNDEF, |(p, _, _)| p);
 
     {
@@ -415,7 +415,7 @@ pub fn point_classify(
             }
             // Exit Case: when on outer loop - on a Face->Edge - Get Deviation
             else if type_outer == PointContainment::OnBoundary {
-                return set_on_edge(b, pc, on_edge, edge_param, surf_pt, tol_3d);
+                return set_on_edge(k, b, pc, on_edge, edge_param, surf_pt, tol_3d);
             }
             // arrive here when TargetPoint is 'in' OuterLoop
         } else {
@@ -428,7 +428,7 @@ pub fn point_classify(
             }
             // Exit Case: On an InnerLoop bound = On a Face->Edge - Get Deviation
             else if type_inner == PointContainment::OnBoundary {
-                return set_on_edge(b, pc, on_edge, edge_param, surf_pt, tol_3d);
+                return set_on_edge(k, b, pc, on_edge, edge_param, surf_pt, tol_3d);
             }
             // arrive here when TargetPoint is 'Out' of this InnerLoop
         }
@@ -459,6 +459,7 @@ pub fn point_classify(
 /// The on-boundary exit of [`point_classify`]: the edge, its parameter, the gap from
 /// the edge point to the surface point and the loop tolerance.
 fn set_on_edge(
+    k: &Kernel,
     b: &Brep,
     pc: &mut PointClassification<EntityRef>,
     on_edge: Option<EdgeId>,
@@ -476,7 +477,7 @@ fn set_on_edge(
         .curve
         .as_ref()
         .ok_or_else(|| null(OP_CLASSIFY, "edge without curve"))?;
-    let edge_pt = ignored(curve.evaluate_point(edge_param))?.unwrap_or(Vec3::UNDEF);
+    let edge_pt = ignored(curve.evaluate_point(k, edge_param))?.unwrap_or(Vec3::UNDEF);
     pc.set_deviation(edge_pt.distance(surf_pt));
     pc.set_src_zone_tol_3d(tol_3d);
     pc.set_pre_snap_param(BIG_DOUBLE);
@@ -902,7 +903,7 @@ pub(crate) fn curve_on_classify_using<O: ClassObject>(
     let src_zone_tol_3d = src_zone_tol_3d_of(k, Some(cc));
     let face_handle = execution.face_handle();
     for ii in 0..cc.size() {
-        let degenerate = execution.curve(cc)?.is_degenerate(EFF_ZERO, None)?;
+        let degenerate = execution.curve(cc)?.is_degenerate(k, EFF_ZERO, None)?;
         let ivl = cc.at_mut(ii)?;
 
         // set Face_BackPtr and SrcZoneTol3d values in interval's PointClassifications

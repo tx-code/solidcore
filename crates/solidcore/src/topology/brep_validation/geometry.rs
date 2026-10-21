@@ -57,7 +57,7 @@ pub(super) fn check_edgeuse(k: &Kernel, b: &mut Brep, id: EdgeuseId) -> Result<(
         .surface
         .as_ref()
         .ok_or(SolidError::null_pointer(OP))?;
-    let projected = surface.evaluate_point(Point2::new(start.x, start.y))?;
+    let projected = surface.evaluate_point(k, Point2::new(start.x, start.y))?;
     let _distance = projected.distance(b.vertex(vertex)?.point);
     Ok(())
 }
@@ -94,8 +94,8 @@ pub(super) fn validate_edge(k: &Kernel, b: &mut Brep, id: EdgeId, fix: bool) -> 
         return Err(SolidError::sm_err(OP));
     }
     let interval = b.edge(id)?.interval;
-    let first = curve.evaluate_point(interval.min())?;
-    let last = curve.evaluate_point(interval.max())?;
+    let first = curve.evaluate_point(k, interval.min())?;
+    let last = curve.evaluate_point(k, interval.max())?;
     for (vertex, point) in [(start, first), (end, last)] {
         let v = b.vertex(vertex)?;
         let distance = point.distance(v.point);

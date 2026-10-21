@@ -171,7 +171,7 @@ pub(super) fn check(
                         (71, ivl.max()),
                         (72, (ivl.min() + ivl.max()) / 2.),
                     ] {
-                        if let Some(p) = ignored(curve.evaluate_point(param))? {
+                        if let Some(p) = ignored(curve.evaluate_point(k, param))? {
                             previous = p;
                         }
                         let inside =

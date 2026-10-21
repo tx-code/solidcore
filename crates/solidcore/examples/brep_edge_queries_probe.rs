@@ -134,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let points = uv
         .into_iter()
-        .map(|uv| s.evaluate_point(uv))
+        .map(|uv| s.evaluate_point(&k, uv))
         .collect::<solidcore::Result<Vec<_>>>()?;
     let mut builder = BrepConstructor::new()?;
     builder.start_shell()?;
@@ -167,7 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder.set_limits(&k, VertexNode::Parameter(0.), VertexNode::Parameter(1.))?;
         builder.end_edge()?;
     }
-    builder.end_loop()?;
+    builder.end_loop(&k)?;
     builder.end_face()?;
     builder.end_shell(&mut k, false)?;
     let mut b = builder.finish()?;

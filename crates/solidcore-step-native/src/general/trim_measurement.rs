@@ -15,6 +15,7 @@ use super::{failure, GeneralFailureKind};
 use crate::{Error, Result};
 use solidcore::curve::curve::Curve;
 use solidcore::geom::tol::ScaledZero;
+use solidcore::kernel::Kernel;
 use solidcore::math::{is_infinite_param, Vec2};
 use solidcore::surface::surface::Surface;
 
@@ -96,6 +97,7 @@ fn finite_lerp(a: f64, b: f64, t: f64) -> f64 {
 }
 
 pub(super) fn measure(
+    kernel: &Kernel,
     edge: &Curve,
     uv: &Curve,
     surface: &Surface,
@@ -124,10 +126,14 @@ pub(super) fn measure(
         };
         for i in 0..=8_u32 {
             let t = finite_lerp(*a, *b, f64::from(i) / 8.);
-            let point = native(edge.evaluate_point(t), "FinalTrimEvaluation", record)?;
-            let param = native(uv.evaluate_point(t), "FinalTrimEvaluation", record)?;
+            let point = native(
+                edge.evaluate_point(kernel, t),
+                "FinalTrimEvaluation",
+                record,
+            )?;
+            let param = native(uv.evaluate_point(kernel, t), "FinalTrimEvaluation", record)?;
             let lifted = native(
-                surface.evaluate_point(Vec2::new(param.x, param.y)),
+                surface.evaluate_point(kernel, Vec2::new(param.x, param.y)),
                 "FinalTrimEvaluation",
                 record,
             )?;
@@ -207,11 +213,12 @@ mod tests {
 
     #[test]
     fn same_parameter_straight_control_and_displaced_uv_follow_cpp_measurement_contract() {
+        let kernel = Kernel::default();
         let edge = line(3, 0., None);
-        let exact = measure(&edge, &line(2, 0., None), &plane(), 0., 1., 0).unwrap();
+        let exact = measure(&kernel, &edge, &line(2, 0., None), &plane(), 0., 1., 0).unwrap();
         assert_eq!(exact.samples, 9);
         assert_eq!(exact.maximum_mm, 0.);
-        let displaced = measure(&edge, &line(2, 0.02, None), &plane(), 0., 1., 0).unwrap();
+        let displaced = measure(&kernel, &edge, &line(2, 0.02, None), &plane(), 0., 1., 0).unwrap();
         assert_eq!(displaced.samples, 9);
         assert!((displaced.maximum_mm - 0.02).abs() < 1e-12);
         assert!(displaced.maximum_mm > 0.001);
@@ -219,18 +226,28 @@ mod tests {
 
     #[test]
     fn covering_affinely_remapped_and_outside_domains_are_not_paired_parameters() {
+        let kernel = Kernel::default();
         let edge = line(3, 0., None);
         let wider = Extent1d::from_min_max(-0.25, 1.25);
         let uv = line(2, 0., Some(&wider));
-        domain_failure(&measure(&edge, &uv, &plane(), 0., 1., 0));
-        domain_failure(&measure(&edge, &uv, &plane(), -0.25, 1.25, 0));
+        domain_failure(&measure(&kernel, &edge, &uv, &plane(), 0., 1., 0));
+        domain_failure(&measure(&kernel, &edge, &uv, &plane(), -0.25, 1.25, 0));
         let uv = line(2, 0., None);
-        domain_failure(&measure(&edge, &uv, &plane(), 0.25, 0.75, 0));
-        domain_failure(&measure(&edge, &uv, &plane(), 1., 0., 0));
-        domain_failure(&measure(&edge, &uv, &plane(), 0., f64::INFINITY, 0));
-        domain_failure(&measure(&edge, &uv, &plane(), f64::NAN, 1., 0));
+        domain_failure(&measure(&kernel, &edge, &uv, &plane(), 0.25, 0.75, 0));
+        domain_failure(&measure(&kernel, &edge, &uv, &plane(), 1., 0., 0));
+        domain_failure(&measure(
+            &kernel,
+            &edge,
+            &uv,
+            &plane(),
+            0.,
+            f64::INFINITY,
+            0,
+        ));
+        domain_failure(&measure(&kernel, &edge, &uv, &plane(), f64::NAN, 1., 0));
         let marker = Extent1d::from_min_max(0., INFINITE_PARAMETER);
         domain_failure(&measure(
+            &kernel,
             &line(3, 0., Some(&marker)),
             &line(2, 0., Some(&marker)),
             &plane(),
@@ -242,6 +259,7 @@ mod tests {
 
     #[test]
     fn source_parameter_roundoff_is_allowed_but_actual_physical_gap_is_still_measured() {
+        let kernel = Kernel::default();
         let roundoff = 4. * f64::EPSILON;
         let near = Extent1d::from_min_max(-roundoff, 1. + roundoff);
         // StepImportGeneralTests.cpp::FinalTrimContract uses explicit knots:
@@ -257,7 +275,7 @@ mod tests {
         );
         assert_eq!(uv.natural_interval(), near);
         let edge = line(3, 0., None);
-        let measured = measure(&edge, &uv, &plane(), 0., 1., 0).unwrap();
+        let measured = measure(&kernel, &edge, &uv, &plane(), 0., 1., 0).unwrap();
         assert_eq!(measured.samples, 9);
         assert!(measured.maximum_mm < 1e-12);
 
@@ -272,7 +290,7 @@ mod tests {
             &[2, 2],
         );
         assert_eq!(shifted_uv.natural_interval(), near);
-        let shifted = measure(&edge, &shifted_uv, &plane(), 0., 1., 0).unwrap();
+        let shifted = measure(&kernel, &edge, &shifted_uv, &plane(), 0., 1., 0).unwrap();
         assert_eq!(shifted.samples, 9);
         assert!((shifted.maximum_mm - 0.02).abs() < 1e-12);
         assert!(shifted.maximum_mm > 0.001);
@@ -280,17 +298,19 @@ mod tests {
 
     #[test]
     fn identical_curve_images_with_a_different_parameter_map_do_not_hide_the_lift_gap() {
+        let kernel = Kernel::default();
         // Both curves trace the same x-axis segment with the same domain and
         // endpoints, but x_uv(t)=t^2. Closest-distance geometry would miss this;
         // the independent same-t maximum is t-t^2=1/4 at t=1/2.
         let uv = spline(2, 2, &[Vec3::ZERO, Vec3::ZERO, Vec3::X], &[0., 1.], &[3, 3]);
-        let measured = measure(&line(3, 0., None), &uv, &plane(), 0., 1., 0).unwrap();
+        let measured = measure(&kernel, &line(3, 0., None), &uv, &plane(), 0., 1., 0).unwrap();
         assert_eq!(measured.samples, 9);
         assert_eq!(measured.maximum_mm, 0.25);
     }
 
     #[test]
     fn both_knot_sets_partition_the_actual_used_interval_with_nine_samples_per_span() {
+        let kernel = Kernel::default();
         let edge = spline(
             3,
             1,
@@ -305,7 +325,7 @@ mod tests {
             &[0., 0.5, 1.],
             &[2, 1, 2],
         );
-        let measured = measure(&edge, &uv, &plane(), 0., 1., 0).unwrap();
+        let measured = measure(&kernel, &edge, &uv, &plane(), 0., 1., 0).unwrap();
         assert_eq!(measured.samples, 27);
         assert!(measured.maximum_mm <= f64::EPSILON);
         let interval = Extent1d::from_min_max(0.25, 0.75);
@@ -317,6 +337,7 @@ mod tests {
             &[2, 2],
         );
         let child = measure(
+            &kernel,
             &edge,
             &child_uv,
             &plane(),
@@ -331,10 +352,11 @@ mod tests {
 
     #[test]
     fn native_distance_overflow_is_not_replaced_by_a_finite_hypot_observation() {
+        let kernel = Kernel::default();
         let point = Vec3::new(1e200, 0., 0.);
         let edge = spline(3, 1, &[point, point], &[0., 1.], &[2, 2]);
         assert!(matches!(
-            measure(&edge, &line(2, 0., None), &plane(), 0., 1., 0),
+            measure(&kernel, &edge, &line(2, 0., None), &plane(), 0., 1., 0),
             Err(Error::General {
                 key: "FinalTrimNonfinite",
                 ..

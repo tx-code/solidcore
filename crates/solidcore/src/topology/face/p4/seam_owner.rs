@@ -641,9 +641,6 @@ impl EdgeIntersectionExecution<NativeObject, EdgeId> for OwningEdgePass<'_, '_> 
 }
 
 fn owning_seam_check(k: &Kernel, brep: &mut Brep, face: FaceId) -> Result<SeamCheck<NativeObject>> {
-    if let Some(surface) = brep.face_mut(face)?.surface.as_mut() {
-        surface.bind_evaluation_context(k);
-    }
     let mut out = new_seam_check(k);
     has_seam_problem_into(
         k,
@@ -702,8 +699,7 @@ mod tests {
             false,
         );
         s.make_nurb(&k).unwrap();
-        let mut s = Surface::from(s);
-        s.bind_evaluation_context(&k);
+        let s = Surface::from(s);
         let domain = s.natural_uv_domain();
         builder.set_face_surface(s, domain).unwrap();
         builder.start_loop(OrientType::Same).unwrap();
@@ -762,7 +758,7 @@ mod tests {
             }
             builder.end_edge().unwrap();
         }
-        builder.end_loop().unwrap();
+        builder.end_loop(&k).unwrap();
         builder.end_face().unwrap();
         builder.end_shell(&mut k, false).unwrap();
         let mut b = builder.finish().unwrap();

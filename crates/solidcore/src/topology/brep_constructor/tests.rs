@@ -71,8 +71,8 @@ fn duplicate_definition_does_not_replace_geometry_or_its_owner() {
         )
         .is_err());
     let c = b.brep().edge(edge).unwrap().curve.as_ref().unwrap();
-    assert_eq!(c.evaluate_point(0.).unwrap(), Point3::ZERO);
-    assert_eq!(c.evaluate_point(1.).unwrap(), Vec3::X);
+    assert_eq!(c.evaluate_point(&k, 0.).unwrap(), Point3::ZERO);
+    assert_eq!(c.evaluate_point(&k, 1.).unwrap(), Vec3::X);
     assert_eq!(c.owner(), Some(arena_identity(CacheObject::Edge(edge))));
 }
 
@@ -92,8 +92,8 @@ fn uv_dimension_error_retains_the_face_surface_and_unpublished_candidate() {
 
 #[test]
 fn failed_loop_without_geometry_stays_unpublished() {
-    let (_, mut b, _, _) = one_edge();
-    assert!(b.end_loop().is_err());
+    let (k, mut b, _, _) = one_edge();
+    assert!(b.end_loop(&k).is_err());
     assert!(b.finish().is_err());
 }
 
@@ -165,7 +165,7 @@ fn pre_stitch_delegates_to_actual_pointer_and_geometry_validation() {
             .unwrap();
         b.end_edge().unwrap();
     }
-    b.end_loop().unwrap();
+    b.end_loop(&k).unwrap();
     b.end_face().unwrap();
     let CurveKind::Line(line) = b.brep().edge(first).unwrap().curve.as_ref().unwrap().kind() else {
         panic!()
@@ -247,7 +247,7 @@ fn radial_dependency_error_removes_the_temporary_edge_before_propagating() {
             }
             b.end_edge().unwrap();
         }
-        b.end_loop().unwrap();
+        b.end_loop(&k).unwrap();
         b.end_face().unwrap();
     }
     let shared = defined[&(0, 1)].0;
@@ -319,12 +319,18 @@ fn uv_only_iso_line_lifts_exactly_without_mutating_the_source_curve() {
     ));
     b.set_edge_curve(&k, uv, true).unwrap();
     let curve = b.brep().edge(edge).unwrap().curve.as_ref().unwrap();
-    assert_eq!(curve.evaluate_point(0.).unwrap(), Vec3::new(10.5, 20., 30.));
     assert_eq!(
-        curve.evaluate_point(0.5).unwrap(),
+        curve.evaluate_point(&k, 0.).unwrap(),
+        Vec3::new(10.5, 20., 30.)
+    );
+    assert_eq!(
+        curve.evaluate_point(&k, 0.5).unwrap(),
         Vec3::new(10.5, 21.5, 30.)
     );
-    assert_eq!(curve.evaluate_point(1.).unwrap(), Vec3::new(10.5, 23., 30.));
+    assert_eq!(
+        curve.evaluate_point(&k, 1.).unwrap(),
+        Vec3::new(10.5, 23., 30.)
+    );
     let incidence = b.current_edgeuse().unwrap();
     let source = b
         .brep()

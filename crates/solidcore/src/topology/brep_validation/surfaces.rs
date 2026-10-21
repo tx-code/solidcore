@@ -64,7 +64,7 @@ pub fn assert_surface(
         if !matches!(options.level, CheckLevel::Given(_)) {
             valid &= bspline_assertions(k, b, f, options, report.reports.as_deref_mut())?;
         }
-        valid &= plane_assertions(b, f, &mut report)?;
+        valid &= plane_assertions(k, b, f, &mut report)?;
         return Ok(valid);
     }
     if matches!(surface(b, f)?.kind(), SurfaceKind::BSpline(_)) {
@@ -135,12 +135,12 @@ fn bspline_assertions(
     )?;
     let tol = ZONE_TOL_3D / 10.;
     // Defaults are from SmSurface.h1476--1484, NOT zero or face tolerance.
-    let point = s.is_degenerate_point(ZONE_TOL_3D / 10., None)?;
+    let point = s.is_degenerate_point(k, ZONE_TOL_3D / 10., None)?;
     let mut curve = false;
     let mut internal = false;
     let mut row = false;
     if !point {
-        curve = s.is_degenerate_curve(EFF_ZERO_DEG, None, ZONE_TOL_3D / 10.)?;
+        curve = s.is_degenerate_curve(k, EFF_ZERO_DEG, None, ZONE_TOL_3D / 10.)?;
         if !curve {
             let face_tol = s
                 .face()?
@@ -175,8 +175,12 @@ fn bspline_assertions(
         let domain = s.natural_uv_domain();
         // SmSurface.h1498: third argument is INPUT tolerance. It does not
         // overwrite dTol. U is passed as closed-column, V as closed-row.
-        let closed_u = s.is_closed(&domain, SurfParamType::U, Some(tol), false)?.0;
-        let closed_v = s.is_closed(&domain, SurfParamType::V, Some(tol), false)?.0;
+        let closed_u = s
+            .is_closed(k, &domain, SurfParamType::U, Some(tol), false)?
+            .0;
+        let closed_v = s
+            .is_closed(k, &domain, SurfParamType::V, Some(tol), false)?
+            .0;
         let net = validity::bspline_base(s)?.control_point_net()?;
         let mut grid = PointGrid::new(
             net.points,
@@ -226,7 +230,7 @@ fn base_assertions(k: &Kernel, b: &Brep, f: FaceId, report: &mut Reporter<'_>) -
         labels::SURFACE_TYPE,
         2,
         who,
-        !s.is_degenerate_point(EFF_ZERO_DEG, None)?,
+        !s.is_degenerate_point(k, EFF_ZERO_DEG, None)?,
         EFF_ZERO_DEG,
         UNDEF_DOUBLE,
     )?;
@@ -234,7 +238,7 @@ fn base_assertions(k: &Kernel, b: &Brep, f: FaceId, report: &mut Reporter<'_>) -
         labels::SURFACE_TYPE,
         3,
         who,
-        !s.is_degenerate_curve(EFF_ZERO_DEG, None, ZONE_TOL_3D / 10.)?,
+        !s.is_degenerate_curve(k, EFF_ZERO_DEG, None, ZONE_TOL_3D / 10.)?,
         EFF_ZERO_DEG,
         UNDEF_DOUBLE,
     )?;
@@ -297,7 +301,7 @@ fn opposite_boundaries(k: &Kernel, s: &Surface, face_tol: Option<f64>) -> Result
         |tol| tol / 2.,
     );
     for direction in [SurfParamType::U, SurfParamType::V] {
-        if s.is_closed(&s.natural_uv_domain(), direction, None, false)?
+        if s.is_closed(k, &s.natural_uv_domain(), direction, None, false)?
             .0
         {
             continue;
@@ -307,7 +311,7 @@ fn opposite_boundaries(k: &Kernel, s: &Surface, face_tol: Option<f64>) -> Result
             .ok_or_else(missing)?;
         let first = Curve::from(first);
         let second = Curve::from(second);
-        if first.is_degenerate(EFF_ZERO, None)? || second.is_degenerate(EFF_ZERO, None)? {
+        if first.is_degenerate(k, EFF_ZERO, None)? || second.is_degenerate(k, EFF_ZERO, None)? {
             continue;
         }
         let zone = tol::zone_tol_3d(k, SmallTopoType::NormalSize);
@@ -342,7 +346,7 @@ fn opposite_boundaries(k: &Kernel, s: &Surface, face_tol: Option<f64>) -> Result
     Ok(true)
 }
 
-fn plane_assertions(b: &Brep, f: FaceId, report: &mut Reporter<'_>) -> Result<bool> {
+fn plane_assertions(k: &Kernel, b: &Brep, f: FaceId, report: &mut Reporter<'_>) -> Result<bool> {
     let SurfaceKind::Plane(plane) = surface(b, f)?.kind() else {
         return Err(missing());
     };
@@ -405,8 +409,8 @@ fn plane_assertions(b: &Brep, f: FaceId, report: &mut Reporter<'_>) -> Result<bo
         // Exact evaluation clone preserves knots/weights without Copy's fixup.
         let bspline = Surface::from(plane.base().clone_exact());
         for uv in [natural.min(), natural.max()] {
-            let a = surface(b, f)?.evaluate_point(uv)?;
-            let n = bspline.evaluate_point(uv)?;
+            let a = surface(b, f)?.evaluate_point(k, uv)?;
+            let n = bspline.evaluate_point(k, uv)?;
             let tol = EFF_ZERO * (1. + a.max_dimension());
             valid &= report.class_value(
                 labels::PLANE_TYPE,

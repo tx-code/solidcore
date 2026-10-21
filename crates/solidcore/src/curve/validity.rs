@@ -105,7 +105,7 @@ impl Curve {
     /// Native `SmBSplineCurve::HasInternalPole`: any active degree-plus-one
     /// coincident control-point sequence, except a wholly degenerate curve.
     /// Missing stored NURB returns false; the query never materializes or repairs.
-    pub fn has_internal_pole(&self, tol: f64) -> Result<bool> {
+    pub fn has_internal_pole(&self, k: &Kernel, tol: f64) -> Result<bool> {
         if !matches!(
             self.kind(),
             CurveKind::BSpline(_)
@@ -121,7 +121,7 @@ impl Curve {
         let Some(nurb) = base.gw_nurb() else {
             return Ok(false);
         };
-        if self.is_degenerate(tol, None)? {
+        if self.is_degenerate(k, tol, None)? {
             return Ok(false);
         }
         let (knots, mults) = self.knots(None)?;

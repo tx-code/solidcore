@@ -155,8 +155,8 @@ impl<O: SolutionObject> State<O> {
     }
 }
 
-fn evaluate(curve: &Curve, point: &mut DropPt, nonzero: bool) -> Result<()> {
-    let values = curve.evaluate(point.t, 2, true, nonzero)?;
+fn evaluate(k: &Kernel, curve: &Curve, point: &mut DropPt, nonzero: bool) -> Result<()> {
+    let values = curve.evaluate(k, point.t, 2, true, nonzero)?;
     for (out, value) in point.crv_pd.iter_mut().zip(values) {
         *out = value;
     }
@@ -284,9 +284,9 @@ impl Surface {
         record.fail.un_init();
         let natural = self.natural_uv_domain();
         let curve_natural = curve.natural_interval();
-        let length = curve.approximate_length(&curve_natural, 3, false)?.0;
-        let mid = curve.evaluate_point(curve_natural.evaluate(0.5))?;
-        let degen = curve.is_degenerate(scaled_zero2(&mid, &length), Some(interval))?;
+        let length = curve.approximate_length(k, &curve_natural, 3, false)?.0;
+        let mid = curve.evaluate_point(k, curve_natural.evaluate(0.5))?;
+        let degen = curve.is_degenerate(k, scaled_zero2(&mid, &length), Some(interval))?;
         let input_domain = *domain;
         let domain = if domain.x_length() >= EFF_ZERO && domain.y_length() >= EFF_ZERO {
             *domain
@@ -329,7 +329,7 @@ impl Surface {
             );
             return Err(SolidError::sm_err(OP));
         }
-        let size = approx_derivative_lengths(self, &natural)?;
+        let size = approx_derivative_lengths(k, self, &natural)?;
         let uv_tol = Point2::new(
             approx_tol_3d / (size.x + 1.0),
             approx_tol_3d / (size.y + 1.0),
@@ -378,10 +378,10 @@ fn project<O: SolutionObject>(
     state.poles = Some(poles);
     let mut offset = DropOffset::new(1.0, poles.singular);
     state.closed_u = surface
-        .is_closed(&natural, SurfParamType::U, Some(tol), false)?
+        .is_closed(k, &natural, SurfParamType::U, Some(tol), false)?
         .0;
     state.closed_v = surface
-        .is_closed(&natural, SurfParamType::V, Some(tol), false)?
+        .is_closed(k, &natural, SurfParamType::V, Some(tol), false)?
         .0;
     state.closure = match (state.closed_u, state.closed_v) {
         (true, true) => SurfParamType::Both,
@@ -391,7 +391,7 @@ fn project<O: SolutionObject>(
     };
     let mut start = DropPt::new(state.interval.min(), Some(state.degen_curve));
     let mut end = DropPt::new(state.interval.max(), Some(state.degen_curve));
-    evaluate(curve, &mut start, true)?;
+    evaluate(k, curve, &mut start, true)?;
     surface.global_point_solve_into_with_surface_cache(
         k,
         None,
@@ -457,6 +457,7 @@ fn project<O: SolutionObject>(
         for i in 0..state.solutions.len() {
             start.uv_pd[0] = uv(&state.solutions, i)?;
             let result = ignored(surface.find_degen_param_for_direction(
+                k,
                 start.uv_pd[0],
                 start.crv_pd[1],
                 true,
@@ -479,7 +480,7 @@ fn project<O: SolutionObject>(
         remove_duplicate_drop_point_solutions(&mut state.solutions, uv_tol.x, uv_tol.y);
         start.uv_pd[0] = uv(&state.solutions, 0)?;
     }
-    seam_starts(surface, domain, uv_tol, &mut start, state)?;
+    seam_starts(k, surface, domain, uv_tol, &mut start, state)?;
     let mut curve_cache = None;
     for i in 0..state.solutions.len() {
         start.t = state.interval.min();
@@ -494,6 +495,7 @@ fn project<O: SolutionObject>(
             continue;
         }
         let iso = surface.drop_iso_curve_with_knots(
+            k,
             domain,
             curve,
             &state.interval,
@@ -547,14 +549,14 @@ fn project<O: SolutionObject>(
                 let Some(clipped) = ignored(ivl.intersect(&state.interval))? else {
                     continue;
                 };
-                if curve.approximate_length(&clipped, 5, false)?.0 < tol {
+                if curve.approximate_length(k, &clipped, 5, false)?.0 < tol {
                     continue;
                 }
                 ivl = clipped;
             }
             start.t = ivl.min();
             end.t = ivl.max();
-            evaluate(cc.curve(), &mut start, true)?;
+            evaluate(k, cc.curve(), &mut start, true)?;
             if !have_tangent {
                 let _ = ignored(start.set_properties(
                     k,
@@ -605,8 +607,8 @@ fn project<O: SolutionObject>(
                     && knots.len() > 1
                 {
                     let tail = Extent1d::from_min_max(start.t, state.interval.max());
-                    if curve.approximate_length(&tail, 5, false)?.0 < tol {
-                        let p = curve.evaluate_point(state.interval.max())?;
+                    if curve.approximate_length(k, &tail, 5, false)?.0 < tol {
+                        let p = curve.evaluate_point(k, state.interval.max())?;
                         if (start.pd_3d[0] - p).length() < tol {
                             if let Some(last) = knots.last_mut() {
                                 *last = state.interval.max();
@@ -648,6 +650,7 @@ fn project<O: SolutionObject>(
                 (end.t, end.uv_pd) = stack_look(&stack)?;
                 start.fix_boundary_tangents(domain, &mut end, uv_tol.x, uv_tol.y, tol);
                 let accuracy = start.test_span_accuracy(
+                    k,
                     surface,
                     domain,
                     cc.curve(),
@@ -805,6 +808,7 @@ fn project<O: SolutionObject>(
 }
 
 fn seam_starts<O: SolutionObject>(
+    k: &Kernel,
     surface: &Surface,
     domain: &Extent2d,
     tol: Point2,
@@ -825,6 +829,7 @@ fn seam_starts<O: SolutionObject>(
         let (u, v) = domain.classify_point(start.uv_pd[0], tol.x, Some(tol.y));
         let mut cu = if seam_u {
             start.is_moving_along_boundary(
+                k,
                 surface,
                 &natural,
                 tol.x,
@@ -837,6 +842,7 @@ fn seam_starts<O: SolutionObject>(
         };
         let mut cv = if seam_v {
             start.is_moving_along_boundary(
+                k,
                 surface,
                 &natural,
                 tol.x,
@@ -933,11 +939,12 @@ mod tests {
 
     #[test]
     fn complete_projection_retains_source_parameters_and_geometry() {
+        let k = Kernel::default();
         let s = flat();
         let c = line(Vec3::new(0.1, 0.2, 0.), Vec3::new(0.9, 0.7, 0.));
         let r = s
             .drop_curve::<ObjectHandle>(
-                &Kernel::default(),
+                &k,
                 &s.natural_uv_domain(),
                 &c,
                 &c.natural_interval(),
@@ -951,8 +958,8 @@ mod tests {
         assert_eq!(r.uv_curves[0].natural_interval(), c.natural_interval());
         for i in 0..=8 {
             let t = c.natural_interval().evaluate(f64::from(i) / 8.);
-            let uv = r.uv_curves[0].evaluate_point(t).unwrap();
-            assert!((uv - c.evaluate_point(t).unwrap()).length() < 1e-14);
+            let uv = r.uv_curves[0].evaluate_point(&k, t).unwrap();
+            assert!((uv - c.evaluate_point(&k, t).unwrap()).length() < 1e-14);
         }
         assert!(!matches!(s.kind(), SurfaceKind::BSpline(b) if b.is_out_of_bounds_enabled()));
     }

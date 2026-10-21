@@ -153,7 +153,7 @@ pub fn assert_edge(
         .curve
         .as_ref()
         .ok_or_else(missing)?
-        .approximate_length(&domain, 5, false)?
+        .approximate_length(k, &domain, 5, false)?
         .0;
     valid &= r.class_value(
         labels::EDGE_TYPE,
@@ -183,7 +183,7 @@ pub fn assert_edge(
                 .curve
                 .as_ref()
                 .ok_or_else(missing)?
-                .evaluate_point(domain.min())?;
+                .evaluate_point(k, domain.min())?;
             valid &= r.class_predicate(
                 labels::EDGE_TYPE,
                 16,
@@ -196,7 +196,7 @@ pub fn assert_edge(
                     .curve
                     .as_ref()
                     .ok_or_else(missing)?
-                    .evaluate_point(domain.max())?;
+                    .evaluate_point(k, domain.max())?;
                 valid &= r.class_predicate(
                     labels::EDGE_TYPE,
                     17,
@@ -386,8 +386,8 @@ pub fn assert_edgeuse(
             let s = b.face(face)?.surface.as_ref().ok_or_else(missing)?;
             (
                 d,
-                s.is_closed(&d, SurfParamType::U, None, false)?.0,
-                s.is_closed(&d, SurfParamType::V, None, false)?.0,
+                s.is_closed(k, &d, SurfParamType::U, None, false)?.0,
+                s.is_closed(k, &d, SurfParamType::V, None, false)?.0,
             )
         } else {
             (Extent2d::new(), false, false)
@@ -412,7 +412,7 @@ pub fn assert_edgeuse(
                 .clone_for_evaluation()?;
             let uv = super::geometry::borrowed_uv_copy(uv)?;
             let on_surface = Curve::from(CrvOnSurf::new(k, uv, s, None, 0)?);
-            let length = on_surface.approximate_length(&interval, 5, false)?.0;
+            let length = on_surface.approximate_length(k, &interval, 5, false)?.0;
             valid &= r.class_value(
                 labels::EDGEUSE_TYPE,
                 11,

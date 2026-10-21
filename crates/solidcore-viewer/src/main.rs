@@ -227,7 +227,7 @@ impl App {
                 }
                 if let Some(scene)=&self.scene {
                     ui.add_space(8.);ui.label(format!("Source role: {}",scene.role));
-                    ui.label(format!("{} faces · {} edges · {} vertices",scene.owner.faces().len(),scene.owner.edges().len(),scene.owner.vertices().len()));
+                    ui.label(format!("{} faces · {} edges · {} vertices",scene.owner.brep().face_list().len(),scene.owner.brep().edge_list().len(),scene.owner.brep().vertex_list().len()));
                     ui.label(format!("{} display triangles",scene.triangles.len()/3));
                     ui.label(format!("Radius: {:.6} mm",scene.radius_mm));
                     ui.small(format!("Center mm: {:.5}, {:.5}, {:.5}",scene.center_mm.x,scene.center_mm.y,scene.center_mm.z));
@@ -733,7 +733,7 @@ fn run() -> Result<()> {
             Ok(())
         })?;
         println!("NativeConstructed; accepted_import=false; source_role={}; faces={}; edges={}; vertices={}; display_triangles={}; display_edges={}",
-            scene.role,scene.owner.faces().len(),scene.owner.edges().len(),scene.owner.vertices().len(),scene.triangles.len()/3,scene.lines.len()/2);
+            scene.role,scene.owner.brep().face_list().len(),scene.owner.brep().edge_list().len(),scene.owner.brep().vertex_list().len(),scene.triangles.len()/3,scene.lines.len()/2);
         return Ok(());
     }
     let event_loop = EventLoop::<UserEvent>::with_user_event()

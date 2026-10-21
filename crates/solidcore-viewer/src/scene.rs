@@ -127,7 +127,7 @@ pub(crate) fn from_candidate(owner: Candidate) -> Result<Scene> {
     let mut bounds = Vec::new();
     let mut face_ranges = Vec::new();
     let mut edge_ranges = Vec::new();
-    for id in owner.edges().values() {
+    for id in owner.edges().values().flatten() {
         let edge = brep.edge(*id).map_err(|e| e.to_string())?;
         let curve = edge.curve.as_ref().ok_or("Missing native defining curve")?;
         let CurveKind::Line(line) = curve.kind() else {
@@ -246,7 +246,7 @@ pub(crate) fn from_candidate(owner: Candidate) -> Result<Scene> {
         color,
     };
     let mut vertices = Vec::new();
-    for id in owner.vertices().values() {
+    for id in owner.brep().vertex_list() {
         let point = native_point(owner.brep().vertex(*id).map_err(|e| e.to_string())?.point)?;
         vertices.push((*id, vertex(point, [0.8, 0.8, 0.8])));
     }
@@ -277,7 +277,7 @@ mod tests {
         assert_eq!(scene.role, "OpenSurfaceModel");
         assert_eq!(scene.owner.faces().len(), 1);
         assert_eq!(scene.triangles.len(), 6);
-        assert_eq!(scene.lines.len(), scene.owner.edges().len() * 2);
+        assert_eq!(scene.lines.len(), scene.owner.brep().edge_list().len() * 2);
         assert!(scene
             .triangles
             .iter()

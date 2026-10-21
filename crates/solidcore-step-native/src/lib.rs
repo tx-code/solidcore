@@ -125,6 +125,17 @@ impl From<p::ExactError> for Error {
     }
 }
 
+/// A computational chart vertex on an unchanged source defining curve.
+/// This is not an invented source `VERTEX_POINT` or a moved original vertex.
+#[derive(Clone, Debug)]
+pub struct GeneralDerivedVertex {
+    /// Original source edge whose complete basis curve contains this point.
+    pub source_edge: usize,
+    /// Actual native vertex shared by every incident target piece and chart cut.
+    pub native_vertex: VertexId,
+    /// Parameter on the original complete native defining curve, not an angle.
+    pub native_parameter: f64,
+}
 /// Actual owning Rust candidate with immutable source/native correspondence.
 /// It is deliberately not named Accepted: independent import gates remain unrun.
 pub struct Candidate {
@@ -132,7 +143,7 @@ pub struct Candidate {
     kernel: Kernel,
     plan: SourcePlan,
     vertices: BTreeMap<usize, VertexId>,
-    edges: BTreeMap<usize, EdgeId>,
+    edges: BTreeMap<usize, Vec<EdgeId>>,
     faces: BTreeMap<usize, FaceId>,
     operations: usize,
     operation_limit: usize,
@@ -245,9 +256,19 @@ impl Candidate {
     pub fn vertices(&self) -> &BTreeMap<usize, VertexId> {
         &self.vertices
     }
-    /// Original source-edge indices mapped to actual native defining edges.
-    pub fn edges(&self) -> &BTreeMap<usize, EdgeId> {
+    /// Original source-edge indices mapped to every native piece, in increasing
+    /// defining-curve parameter order. A computational split never hides a piece.
+    pub fn edges(&self) -> &BTreeMap<usize, Vec<EdgeId>> {
         &self.edges
+    }
+    /// Complete provenance of computational vertices added during chart splitting.
+    /// Strict planar construction adds none; original source vertices remain in `vertices()`.
+    pub fn derived_vertices(&self) -> &[GeneralDerivedVertex] {
+        match &self.plan {
+            SourcePlan::Planar(_) => &[],
+            #[cfg(feature = "general-development")]
+            SourcePlan::General(plan) => &plan.derived_vertices,
+        }
     }
     /// Original source-face indices mapped to actual native faces.
     pub fn faces(&self) -> &BTreeMap<usize, FaceId> {
@@ -618,7 +639,10 @@ pub fn construct_planar(checked: &p::Outcome, options: Options) -> Result<Candid
         kernel,
         plan: SourcePlan::Planar(Box::new(plan)),
         vertices,
-        edges,
+        edges: edges
+            .into_iter()
+            .map(|(source, edge)| (source, vec![edge]))
+            .collect(),
         faces,
         operations: execution.used,
         operation_limit: options.operations,

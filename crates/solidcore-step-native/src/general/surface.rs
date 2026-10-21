@@ -11,6 +11,7 @@ use super::{
     edge_bounds, need, scalar, unsupported, GeneralQuality, SourceEdge, SourceFace, SourceVertex,
 };
 use crate::{Error, Execution, Result};
+use solidcore::curve::curve::CurveKind;
 use solidcore::geom::extent2d::Extent2d;
 use solidcore::math::{Vec2, Vec3, EFF_ZERO};
 use solidcore::nurbs::b_spline_curve::KnotType;
@@ -31,6 +32,41 @@ pub(super) struct Seam {
     pub endpoints: [Vec3; 2],
     angle: f64,
 }
+/// A cut in the original second-ring parameter chart, before any curve transfer.
+/// Neither defining coefficients nor the original closed-edge anchor changes.
+#[derive(Clone, Debug)]
+pub(super) struct RingSplit {
+    pub edge: usize,
+    pub native_parameter: f64,
+    pub point: Vec3,
+}
+
+/// Equivalent chart normalization for two closed circular cylinder boundaries.
+/// Edge/vertex indices address the original source plan, in face-loop order.
+#[derive(Clone, Debug)]
+pub(super) struct ImplicitRingPlan {
+    pub ring_edges: [usize; 2],
+    pub source_vertices: [usize; 2],
+    pub seam_endpoints: [Vec3; 2],
+    pub seam_angle_rad: f64,
+    pub split: RingSplit,
+}
+
+struct RingSupport {
+    edge: usize,
+    vertex: usize,
+    frame: Frame,
+    height: f64,
+    radius: f64,
+    point: Vec3,
+}
+
+struct ImplicitRings {
+    rings: [RingSupport; 2],
+    seam: Seam,
+    aligned: bool,
+}
+
 pub(super) struct BuiltSurface {
     pub surface: Surface,
     pub seam: Option<Seam>,
@@ -84,6 +120,135 @@ pub(super) fn prepare_loop_head(face: &mut SourceFace, edges: &[SourceEdge]) -> 
     }
     Ok(())
 }
+fn implicit_rings(
+    g: &Geometry<'_>,
+    face: &SourceFace,
+    edges: &[SourceEdge],
+    vertices: &[SourceVertex],
+    frame: Frame,
+    quality: &GeneralQuality,
+) -> Result<Option<ImplicitRings>> {
+    if !g.is(face.geometry, "CYLINDRICAL_SURFACE") || face.loops.len() != 2 {
+        return Ok(None);
+    }
+    let mut candidates = Vec::new();
+    for l in &face.loops {
+        if l.uses.len() != 1 {
+            return Ok(None);
+        }
+        let index = l.uses.first().ok_or(Error::Invalid("GeneralLoopUse"))?.edge;
+        let e = curve(edges, index)?;
+        let [a, b] = e.vertices;
+        if !g.is(e.geometry, "CIRCLE") || a != b {
+            return Ok(None);
+        }
+        candidates.push((index, a));
+    }
+    let consistency = scalar(quality.consistency_mm);
+    let radius = g.number(face.geometry, "radius")? * g.length_scale();
+    need(
+        radius.is_finite() && radius > 0.,
+        "GeneralImplicitRingSupport",
+        face.record,
+    )?;
+    let mut rings = Vec::new();
+    for (index, vertex) in candidates {
+        let edge = curve(edges, index)?;
+        let cf = g.placement(g.reference(edge.geometry, "position")?)?;
+        let circle_radius = g.number(edge.geometry, "radius")? * g.length_scale();
+        let center = cf.origin - frame.origin;
+        let height = center.dot(frame.z);
+        let center_offset = norm(center - frame.z * height);
+        let tilt = norm(cf.z.cross(frame.z));
+        // Analytic whole-circle support bound: displaced center + possible
+        // out-of-normal-plane excursion + radius mismatch. A pair of matching
+        // anchors alone cannot establish that the complete rings lie on the
+        // cylinder. Antiparallel ring normals remain valid source conventions.
+        let support_gap = center_offset + circle_radius * tilt + (circle_radius - radius).abs();
+        need(
+            height.is_finite()
+                && circle_radius.is_finite()
+                && circle_radius > 0.
+                && tilt.is_finite()
+                && tilt <= 1e-12
+                && support_gap.is_finite()
+                && support_gap <= consistency,
+            "GeneralImplicitRingSupport",
+            edge.record,
+        )?;
+        let anchor = point(vertices, vertex)?;
+        let delta = anchor - cf.origin;
+        let plane_gap = delta.dot(cf.z).abs();
+        let radial_gap = (norm(delta - cf.z * delta.dot(cf.z)) - circle_radius).abs();
+        let built = edge
+            .built
+            .as_ref()
+            .ok_or(Error::Invalid("GeneralDefiningCurveMissing"))?;
+        need(
+            plane_gap.is_finite()
+                && radial_gap.is_finite()
+                && plane_gap + radial_gap <= consistency
+                && built
+                    .endpoints
+                    .iter()
+                    .all(|p| norm(*p - anchor) <= consistency),
+            "GeneralImplicitRingVertexGap",
+            edge.record,
+        )?;
+        rings.push(RingSupport {
+            edge: index,
+            vertex,
+            frame: cf,
+            height,
+            radius: circle_radius,
+            point: anchor,
+        });
+    }
+    let mut rings = rings.into_iter();
+    let first = rings.next().ok_or(Error::Invalid("GeneralSeamVertex"))?;
+    let second = rings.next().ok_or(Error::Invalid("GeneralSeamVertex"))?;
+    need(
+        first.edge != second.edge,
+        "GeneralImplicitRingDistinctEdges",
+        face.record,
+    )?;
+    // Consistency is a residual allowance, not a minimum feature size. The
+    // construction caller separately checks seam length against its selected
+    // native working tolerance, as on the pre-existing aligned-ring path.
+    let height = first.height - second.height;
+    need(
+        height.is_finite() && height != 0.,
+        "GeneralImplicitSeamHeight",
+        face.record,
+    )?;
+    let delta = first.point - frame.origin;
+    let radial = delta - frame.z * delta.dot(frame.z);
+    let length = norm(radial);
+    need(
+        length.is_finite() && length > 0.,
+        "GeneralDegenerateFrame",
+        face.record,
+    )?;
+    let radial = radial * (1. / length);
+    let actual_a = frame.origin + frame.z * first.height + radial * radius;
+    let actual_b = frame.origin + frame.z * second.height + radial * radius;
+    need(
+        norm(actual_a - first.point) <= consistency,
+        "GeneralImplicitRingVertexGap",
+        curve(edges, first.edge)?.record,
+    )?;
+    let aligned = norm(actual_b - second.point) <= consistency;
+    Ok(Some(ImplicitRings {
+        seam: Seam {
+            vertices: [first.vertex, second.vertex],
+            endpoints: [actual_a, actual_b],
+            angle: radial.dot(frame.y).atan2(radial.dot(frame.x)),
+        },
+        rings: [first, second],
+        aligned,
+    }))
+}
+
 fn missing_seam(
     g: &Geometry<'_>,
     face: &SourceFace,
@@ -92,58 +257,119 @@ fn missing_seam(
     frame: Frame,
     quality: &GeneralQuality,
 ) -> Result<Option<Seam>> {
-    if !g.is(face.geometry, "CYLINDRICAL_SURFACE") || face.loops.len() != 2 {
+    let Some(rings) = implicit_rings(g, face, edges, vertices, frame, quality)? else {
         return Ok(None);
-    }
-    let mut indices = Vec::new();
-    for l in &face.loops {
-        if l.uses.len() != 1 {
-            return Ok(None);
-        }
-        let e = curve(
-            edges,
-            l.uses.first().ok_or(Error::Invalid("GeneralLoopUse"))?.edge,
-        )?;
-        let [a, b] = e.vertices;
-        if !g.is(e.geometry, "CIRCLE") || a != b {
-            return Ok(None);
-        }
-        indices.push(a);
-    }
-    let a = *indices.first().ok_or(Error::Invalid("GeneralSeamVertex"))?;
-    let b = *indices.get(1).ok_or(Error::Invalid("GeneralSeamVertex"))?;
-    let pa = point(vertices, a)?;
-    let pb = point(vertices, b)?;
-    let da = pa - frame.origin;
-    let db = pb - frame.origin;
-    let z0 = da.dot(frame.z);
-    let z1 = db.dot(frame.z);
-    let radial = da - frame.z * z0;
-    let length = norm(radial);
-    need(
-        length > 0. && length.is_finite(),
-        "GeneralDegenerateFrame",
-        face.record,
-    )?;
-    let radial = radial * (1. / length);
-    let radius = g.number(face.geometry, "radius")? * g.length_scale();
-    let actual_a = frame.origin + frame.z * z0 + radial * radius;
-    let actual_b = frame.origin + frame.z * z1 + radial * radius;
-    if norm(actual_a - pa) > scalar(quality.consistency_mm)
-        || norm(actual_b - pb) > scalar(quality.consistency_mm)
-    {
+    };
+    if !rings.aligned {
         return Err(unsupported(
             "GeneralImplicitSeamRequiresRingSplit",
             face.record,
         ));
     }
-    // A distinct height is checked again against the caller's native tolerance
-    // before constructing the derived seam, rather than welding source vertices.
-    need(z0 != z1, "GeneralImplicitSeamHeight", face.record)?;
-    Ok(Some(Seam {
-        vertices: [a, b],
-        endpoints: [actual_a, actual_b],
-        angle: radial.dot(frame.y).atan2(radial.dot(frame.x)),
+    Ok(Some(rings.seam))
+}
+
+/// Plan a phase cut on the complete original second ring. Call after defining
+/// curves are built and before any edge curve is transferred into the `BRep`.
+/// Aligned rings keep the existing direct-seam path and incur no native work.
+///
+/// This extends the maintained `MissingSeam` normalization; it is not a source
+/// repair. Native conic parameters are rational parameters, never STEP angles.
+/// Invalid support is a postcheck failure, not evidence of an unsupported phase.
+pub(super) fn plan_implicit_rings(
+    g: &Geometry<'_>,
+    face: &SourceFace,
+    edges: &[SourceEdge],
+    vertices: &[SourceVertex],
+    quality: &GeneralQuality,
+    execution: &mut Execution,
+) -> Result<Option<ImplicitRingPlan>> {
+    if !g.is(face.geometry, "CYLINDRICAL_SURFACE") {
+        return Ok(None);
+    }
+    let frame = g.placement(g.reference(face.geometry, "position")?)?;
+    let Some(rings) = implicit_rings(g, face, edges, vertices, frame, quality)? else {
+        return Ok(None);
+    };
+    if rings.aligned {
+        return Ok(None);
+    }
+    let [first, second] = rings.rings;
+    let edge = curve(edges, second.edge)?;
+    let built = edge
+        .built
+        .as_ref()
+        .ok_or(Error::Invalid("GeneralDefiningCurveMissing"))?;
+    let native = built
+        .native
+        .as_ref()
+        .ok_or(Error::Invalid("GeneralRingPlanningAfterCurveTransfer"))?;
+    let CurveKind::Ellipse(circle) = native.kind() else {
+        return Err(Error::Invalid("GeneralRingRequiresOriginalConic"));
+    };
+    let angular = circle.step_interval();
+    let angle_roundoff = 64. * f64::EPSILON * 360.;
+    need(
+        (angular.length() - 360.).abs() <= angle_roundoff
+            && native.natural_interval() == built.interval,
+        "GeneralImplicitRingFullPeriod",
+        edge.record,
+    )?;
+    let target = rings
+        .seam
+        .endpoints
+        .get(1)
+        .copied()
+        .ok_or(Error::Invalid("GeneralRingEndpoint"))?;
+    let delta = target - second.frame.origin;
+    let angle = delta.dot(second.frame.y).atan2(delta.dot(second.frame.x)) * 180. / PI;
+    // Select one representative in the ORIGINAL complete angular interval.
+    // Only the existing polar converter establishes its nonangular native t.
+    let angle = angle + 360. * ((angular.min() - angle) / 360.).ceil();
+    need(
+        angle.is_finite() && angular.min() < angle && angle < angular.max(),
+        "GeneralImplicitRingCutParameter",
+        edge.record,
+    )?;
+    execution.step()?;
+    let native_parameter = circle.convert_t_from_step_to_nurbs(g.kernel(), angle)?;
+    need(
+        native_parameter.is_finite()
+            && built.interval.min() < native_parameter
+            && native_parameter < built.interval.max(),
+        "GeneralImplicitRingCutParameter",
+        edge.record,
+    )?;
+    execution.step()?;
+    let cut = native.evaluate_point(g.kernel(), native_parameter)?;
+    let consistency = scalar(quality.consistency_mm);
+    need(
+        norm(cut - target) <= consistency
+            && norm(cut - second.point) > consistency
+            && (norm(cut - second.frame.origin) - second.radius).abs() <= consistency,
+        "GeneralImplicitRingCutGap",
+        edge.record,
+    )?;
+    // Use the original defining-curve points for the derived seam. The separate
+    // source vertex positions/identities survive unchanged in the source plan.
+    let first_point = curve(edges, first.edge)?
+        .built
+        .as_ref()
+        .ok_or(Error::Invalid("GeneralDefiningCurveMissing"))?
+        .endpoints
+        .first()
+        .copied()
+        .ok_or(Error::Invalid("GeneralRingEndpoint"))?;
+    Ok(Some(ImplicitRingPlan {
+        ring_edges: [first.edge, second.edge],
+        source_vertices: [first.vertex, second.vertex],
+        seam_endpoints: [first_point, cut],
+        seam_angle_rad: rings.seam.angle,
+        split: RingSplit {
+            edge: second.edge,
+            native_parameter,
+            point: cut,
+        },
     }))
 }
 fn full_period(start: f64) -> [f64; 2] {
@@ -303,6 +529,7 @@ pub(super) fn make(
     edges: &[SourceEdge],
     vertices: &[SourceVertex],
     quality: &GeneralQuality,
+    ring_plan: Option<&ImplicitRingPlan>,
     execution: &mut Execution,
 ) -> Result<BuiltSurface> {
     let record = face.geometry;
@@ -388,7 +615,15 @@ pub(super) fn make(
     let pad = Vec3::new(padding, padding, padding);
     min -= pad;
     max += pad;
-    let seam = missing_seam(g, face, edges, vertices, frame, quality)?;
+    let seam = if let Some(plan) = ring_plan {
+        Some(Seam {
+            vertices: plan.source_vertices,
+            endpoints: plan.seam_endpoints,
+            angle: plan.seam_angle_rad,
+        })
+    } else {
+        missing_seam(g, face, edges, vertices, frame, quality)?
+    };
     let surface = if g.is(record, "PLANE") {
         execution.step()?;
         Plane::new(
@@ -482,4 +717,317 @@ pub(super) fn make(
         seam,
         mappings: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod ring_tests {
+    use super::*;
+    use solidcore_step::{inspect, planar::Rational, semantics as s, Limits};
+
+    const CYLINDER: &str = include_str!("../../tests/fixtures/cylinder.step");
+
+    fn quality() -> GeneralQuality {
+        GeneralQuality {
+            id: "Q-implicit-ring-public-control".into(),
+            definition_mm: Rational::decimal("0.0000001").unwrap(),
+            consistency_mm: Rational::decimal("0.000001").unwrap(),
+            derived_uv_mm: Rational::decimal("0.000001").unwrap(),
+            query_mm: Rational::decimal("0.000001").unwrap(),
+            maximum_work_tolerance_mm: Rational::decimal("0.00001").unwrap(),
+            maximum_tolerance_growth_mm: Rational::ZERO,
+        }
+    }
+
+    fn source(text: &str) -> s::Snapshot {
+        let raw = inspect(text.as_bytes().to_vec(), Limits::planar_fixtures());
+        let result = s::check(
+            &raw,
+            s::Limits::fixtures(),
+            &s::Options {
+                geometry_scope: s::GeometryScope::GeneralBrep,
+                physical_context: Some("12".into()),
+                check_geometry_dependencies: true,
+                ..s::Options::default()
+            },
+        );
+        result
+            .snapshot
+            .unwrap_or_else(|| panic!("public defining geometry: {:?}", result.diagnostics))
+    }
+
+    fn record(source: &s::Snapshot, id: &str) -> usize {
+        source
+            .source()
+            .records()
+            .iter()
+            .position(|r| r.id == id)
+            .unwrap()
+    }
+
+    // Independently specified two-ring control over the public R=3,z=[0,7]
+    // definitions. This helper does not infer loops from the native result or
+    // grant a source shell qualification; integration tests own full STEP faces.
+    fn inputs(
+        source: &s::Snapshot,
+        g: &Geometry<'_>,
+    ) -> (SourceFace, Vec<SourceEdge>, Vec<SourceVertex>) {
+        let mut vertices = Vec::new();
+        for (vertex, position) in [("120", "102"), ("121", "103")] {
+            vertices.push(SourceVertex {
+                record: record(source, vertex),
+                point: g.position(record(source, position)).unwrap(),
+            });
+        }
+        let mut edges = Vec::new();
+        let mut loops = Vec::new();
+        for (i, (edge, geometry, oriented, bound, loop_id)) in [
+            ("130", "110", "152", "170", "160"),
+            ("131", "111", "154", "171", "161"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let point = vertices[i].point;
+            let mut execution = Execution { used: 0, max: 1000 };
+            let built = g
+                .make_curve(
+                    record(source, geometry),
+                    record(source, edge),
+                    point,
+                    point,
+                    true,
+                    1e-7,
+                    &mut execution,
+                )
+                .unwrap();
+            edges.push(SourceEdge {
+                record: record(source, edge),
+                geometry: record(source, geometry),
+                vertices: [i, i],
+                same_sense: true,
+                built: Some(built),
+            });
+            loops.push(super::super::SourceLoop {
+                record: record(source, loop_id),
+                bound: record(source, bound),
+                outer: i == 0,
+                orientation: true,
+                uses: vec![super::super::SourceUse {
+                    edge: i,
+                    record: record(source, oriented),
+                    forward: i == 0,
+                }],
+            });
+        }
+        (
+            SourceFace {
+                record: record(source, "182"),
+                geometry: record(source, "142"),
+                same_sense: true,
+                loops,
+            },
+            edges,
+            vertices,
+        )
+    }
+
+    #[test]
+    fn opposite_ring_cut_keeps_original_native_conic_and_source_anchors() {
+        // Lower anchor +Y, upper anchor +X. The independent cut is (0,3,7),
+        // regardless of the upper circle's frame handedness or reference axis.
+        for reversed in [false, true] {
+            let mut text = CYLINDER.replace("(0.,3.,7.)", "(3.,0.,7.)");
+            if reversed {
+                text = text.replace(
+                    "#107=AXIS2_PLACEMENT_3D('',#101,#104,#105);",
+                    "#108=DIRECTION('',(0.,0.,-1.));\n#109=DIRECTION('',(0.,1.,0.));\n#107=AXIS2_PLACEMENT_3D('',#101,#108,#109);",
+                );
+            }
+            let source = source(&text);
+            let kernel = solidcore::kernel::Kernel::default();
+            let g = Geometry::new(&source, &kernel, 1e-6, 1e-6).unwrap();
+            let (face, edges, vertices) = inputs(&source, &g);
+            let built = edges[1].built.as_ref().unwrap();
+            let native = built.native.as_ref().unwrap();
+            let CurveKind::Ellipse(circle) = native.kind() else {
+                panic!("original circle")
+            };
+            let controls = circle.base().gw_nurb().unwrap().cpts().to_vec();
+            let interval = built.interval;
+            let mut execution = Execution { used: 0, max: 2 };
+            let plan =
+                plan_implicit_rings(&g, &face, &edges, &vertices, &quality(), &mut execution)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(execution.used, 2);
+            assert_eq!(plan.ring_edges, [0, 1]);
+            assert_eq!(plan.source_vertices, [0, 1]);
+            assert_eq!(plan.split.edge, 1);
+            assert!(
+                interval.min() < plan.split.native_parameter
+                    && plan.split.native_parameter < interval.max()
+            );
+            assert!((plan.split.native_parameter - 90.).abs() > 1.);
+            assert!(norm(plan.split.point - Vec3::new(0., 3., 7.)) < 1e-12);
+            assert!(norm(plan.seam_endpoints[0] - Vec3::new(0., 3., 0.)) < 1e-12);
+            assert_eq!(plan.seam_endpoints[1], plan.split.point);
+            assert!((plan.seam_angle_rad - PI / 2.).abs() < 1e-12);
+            assert!(
+                norm(
+                    native
+                        .evaluate_point(&kernel, plan.split.native_parameter)
+                        .unwrap()
+                        - Vec3::new(0., 3., 7.)
+                ) < 1e-12
+            );
+            assert_eq!(circle.base().gw_nurb().unwrap().cpts(), controls);
+            assert_eq!(built.interval, interval);
+            assert_eq!(vertices[0].point, Vec3::new(0., 3., 0.));
+            assert_eq!(vertices[1].point, Vec3::new(3., 0., 7.));
+            assert_eq!(source.source().bytes(), text.as_bytes());
+            let mut execution = Execution { used: 0, max: 100 };
+            let surface = make(
+                &g,
+                &face,
+                &edges,
+                &vertices,
+                &quality(),
+                Some(&plan),
+                &mut execution,
+            )
+            .unwrap();
+            let angular = surface.surface.step_uv_domain();
+            assert!((angular.min().x + 270.).abs() < 1e-12);
+            assert!((angular.max().x - 90.).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn phase_planning_precharges_native_operations_and_aligned_rings_need_no_cut() {
+        for split in [false, true] {
+            let text = if split {
+                CYLINDER.replace("(0.,3.,7.)", "(3.,0.,7.)")
+            } else {
+                CYLINDER.to_owned()
+            };
+            let source = source(&text);
+            let kernel = solidcore::kernel::Kernel::default();
+            let g = Geometry::new(&source, &kernel, 1e-6, 1e-6).unwrap();
+            let (face, mut edges, vertices) = inputs(&source, &g);
+            if split {
+                for max in 0..2 {
+                    let mut execution = Execution { used: 0, max };
+                    assert!(matches!(
+                        plan_implicit_rings(
+                            &g,
+                            &face,
+                            &edges,
+                            &vertices,
+                            &quality(),
+                            &mut execution
+                        ),
+                        Err(Error::ResourceLimit)
+                    ));
+                    assert_eq!(execution.used, max);
+                }
+                edges[1].built.as_mut().unwrap().native.take();
+                let mut execution = Execution { used: 0, max: 2 };
+                assert!(matches!(
+                    plan_implicit_rings(&g, &face, &edges, &vertices, &quality(), &mut execution),
+                    Err(Error::Invalid("GeneralRingPlanningAfterCurveTransfer"))
+                ));
+                assert_eq!(execution.used, 0);
+            } else {
+                let mut execution = Execution { used: 0, max: 0 };
+                assert!(plan_implicit_rings(
+                    &g,
+                    &face,
+                    &edges,
+                    &vertices,
+                    &quality(),
+                    &mut execution
+                )
+                .unwrap()
+                .is_none());
+                assert_eq!(execution.used, 0);
+                assert!(missing_seam(
+                    &g,
+                    &face,
+                    &edges,
+                    &vertices,
+                    g.placement(record(&source, "106")).unwrap(),
+                    &quality()
+                )
+                .unwrap()
+                .is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn thin_distinct_rings_do_not_use_consistency_as_a_feature_size_floor() {
+        // Independent thin control: h=0.5 micrometers is below the chosen
+        // 1-micrometer consistency allowance but above a 0.01-micrometer native
+        // working tolerance. No circle, anchor or seam may be enlarged to 1 um.
+        let height = 5e-7;
+        let working_tolerance = 1e-8;
+        let text = CYLINDER
+            .replace("(0.,0.,7.)", "(0.,0.,0.0000005)")
+            .replace("(0.,3.,7.)", "(0.,3.,0.0000005)");
+        let source = source(&text);
+        let kernel = solidcore::kernel::Kernel::default();
+        let g = Geometry::new(&source, &kernel, 1e-6, 1e-6).unwrap();
+        let (face, edges, vertices) = inputs(&source, &g);
+        let mut execution = Execution { used: 0, max: 0 };
+        assert!(
+            plan_implicit_rings(&g, &face, &edges, &vertices, &quality(), &mut execution,)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(execution.used, 0);
+        let seam = missing_seam(
+            &g,
+            &face,
+            &edges,
+            &vertices,
+            g.placement(record(&source, "106")).unwrap(),
+            &quality(),
+        )
+        .unwrap()
+        .unwrap();
+        let actual = norm(seam.endpoints[1] - seam.endpoints[0]);
+        assert!((actual - height).abs() < 1e-18);
+        assert!(actual > working_tolerance && actual < scalar(quality().consistency_mm));
+        assert_eq!(vertices[1].point, Vec3::new(0., 3., height));
+        assert_eq!(source.source().bytes(), text.as_bytes());
+    }
+
+    #[test]
+    fn matching_anchors_do_not_excuse_a_tilted_ring_support_or_coincident_planes() {
+        for (text, key) in [
+            (
+                CYLINDER.replace(
+                    "#107=AXIS2_PLACEMENT_3D('',#101,#104,#105);",
+                    "#108=DIRECTION('',(1.,0.,1.));\n#107=AXIS2_PLACEMENT_3D('',#101,#108,#105);",
+                ),
+                "GeneralImplicitRingSupport",
+            ),
+            (
+                CYLINDER
+                    .replace("(0.,0.,7.)", "(0.,0.,0.)")
+                    .replace("(0.,3.,7.)", "(0.,3.,0.)"),
+                "GeneralImplicitSeamHeight",
+            ),
+        ] {
+            let source = source(&text);
+            let kernel = solidcore::kernel::Kernel::default();
+            let g = Geometry::new(&source, &kernel, 1e-6, 1e-6).unwrap();
+            let (face, edges, vertices) = inputs(&source, &g);
+            let mut execution = Execution { used: 0, max: 100 };
+            assert!(
+                matches!(plan_implicit_rings(&g, &face, &edges, &vertices, &quality(), &mut execution), Err(Error::General { key: actual, kind: crate::GeneralFailureKind::Postcheck, .. }) if actual == key)
+            );
+            assert_eq!(execution.used, 0);
+        }
+    }
 }

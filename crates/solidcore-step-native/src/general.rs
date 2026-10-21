@@ -7,12 +7,16 @@
 //! proofs or complete AP validity. Source interpretation is always the existing
 //! typed snapshot; source topology is never recovered from a display mesh.
 
+mod edge_pieces;
 mod geometry;
 mod material_measurement;
 mod surface;
 mod trim_measurement;
 
-use super::{Candidate, Error, Execution, GeneralFailureKind, Options, Result, SourcePlan};
+use super::{
+    Candidate, Error, Execution, GeneralDerivedVertex, GeneralFailureKind, Options, Result,
+    SourcePlan,
+};
 use geometry::{BuiltCurve, Geometry};
 pub use geometry::{ParameterMapping, UnitConversion};
 pub use material_measurement::{
@@ -127,6 +131,8 @@ pub struct GeneralReport<'a> {
     pub length_scale_mm: Rational,
     /// Source face/native derived-edge identities of chart cuts.
     pub chart_cuts: &'a [(usize, EdgeId)],
+    /// Complete provenance of added chart vertices; original source points stay separate.
+    pub derived_vertices: &'a [GeneralDerivedVertex],
     /// Actual construction-time observations; no sampling is a proof bound.
     pub observations: GeneralObservations,
     /// Absent until all final installed trims passed the separate measured gate.
@@ -181,6 +187,7 @@ pub(super) struct Plan {
     mappings: Vec<ParameterMapping>,
     observations: GeneralObservations,
     normalizations: Vec<(usize, EdgeId)>,
+    pub(super) derived_vertices: Vec<GeneralDerivedVertex>,
     loop_mappings: Vec<GeneralLoopMapping>,
     unit_conversions: Vec<UnitConversion>,
     length_scale_mm: Rational,
@@ -209,6 +216,7 @@ impl Plan {
             length_unit_conversions: &self.unit_conversions,
             length_scale_mm: self.length_scale_mm,
             chart_cuts: &self.normalizations,
+            derived_vertices: &self.derived_vertices,
             observations: self.observations,
             final_trim_measurements: self.final_trim_measurements.as_ref(),
             material_measurements: self.material_measurements.as_ref(),
@@ -252,9 +260,11 @@ impl Candidate {
         let source_edges: BTreeMap<_, _> = self
             .edges
             .iter()
-            .map(|(source, id)| (*id, *source))
+            .flat_map(|(source, ids)| ids.iter().map(move |id| (*id, *source)))
             .collect();
-        if source_edges.len() != self.edges.len() {
+        if source_edges.len() != self.edges.values().map(Vec::len).sum::<usize>()
+            || self.edges.values().any(Vec::is_empty)
+        {
             return Err(Error::Invalid("GeneralFinalTrimEdgeCorrespondence"));
         }
         let mut execution = Execution {
@@ -683,6 +693,7 @@ pub fn construct_general(
         mappings: Vec::new(),
         observations: GeneralObservations::default(),
         normalizations: Vec::new(),
+        derived_vertices: Vec::new(),
         loop_mappings: Vec::new(),
         unit_conversions: geometry.conversions().to_vec(),
         length_scale_mm: geometry.length_scale_exact(),
@@ -751,6 +762,23 @@ pub fn construct_general(
             .max(curve.maximum_consistency_mm);
         edge.built = Some(curve);
     }
+    // Plan every shared split before transferring any defining curve. Caps may
+    // precede a cylindrical face in source order; their topology must still use
+    // the identical complete partition and the same derived vertex identities.
+    let mut ring_plans = BTreeMap::new();
+    for face in &mut plan.faces {
+        surface::prepare_loop_head(face, &plan.edges)?;
+        if let Some(rings) = surface::plan_implicit_rings(
+            &geometry,
+            face,
+            &plan.edges,
+            &plan.vertices,
+            &plan.quality,
+            &mut execution,
+        )? {
+            ring_plans.insert(face.record, rings);
+        }
+    }
     let mut vertices: BTreeMap<usize, VertexId> = BTreeMap::new();
     for vertex in &plan.vertices {
         execution.step()?;
@@ -760,16 +788,24 @@ pub fn construct_general(
         execution.step()?;
         builder.end_vertex();
     }
+    let mut pieces = edge_pieces::Pieces::prepare(
+        &mut builder,
+        &mut execution,
+        &mut plan.edges,
+        &plan.vertices,
+        &vertices,
+        &ring_plans,
+        &mut plan.derived_vertices,
+        native.work_tolerance_mm,
+    )?;
     execution.step()?;
     let region = builder.start_region(true, None)?;
     builder.brep_mut().region_mut(region)?.is_void = 0;
     plan.material_region = Some(region);
     execution.step()?;
     builder.start_shell()?;
-    let mut edges: BTreeMap<usize, EdgeId> = BTreeMap::new();
     let mut faces: BTreeMap<usize, FaceId> = BTreeMap::new();
     for face in &mut plan.faces {
-        surface::prepare_loop_head(face, &plan.edges)?;
         execution.step()?;
         let id = builder.start_face(if face.same_sense {
             OrientType::Same
@@ -783,6 +819,7 @@ pub fn construct_general(
             &plan.edges,
             &plan.vertices,
             &plan.quality,
+            ring_plans.get(&face.record),
             &mut execution,
         )?;
         plan.mappings.extend(built.mappings);
@@ -801,6 +838,24 @@ pub fn construct_general(
                 "GeneralImplicitSeamHeight",
                 face.record,
             )?;
+            let seam_vertices = if let Some(derived) = pieces.seam_vertices(face.record) {
+                derived
+            } else {
+                let native_vertex = |index: usize| -> Result<VertexId> {
+                    let source = plan
+                        .vertices
+                        .get(index)
+                        .ok_or(Error::Invalid("GeneralSeamVertex"))?;
+                    vertices
+                        .get(&source.record)
+                        .copied()
+                        .ok_or(Error::Invalid("GeneralSeamVertex"))
+                };
+                [
+                    native_vertex(seam.vertices[0])?,
+                    native_vertex(seam.vertices[1])?,
+                ]
+            };
             execution.step()?;
             builder.start_loop(OrientType::Same)?;
             let first = *face
@@ -808,15 +863,12 @@ pub fn construct_general(
                 .first()
                 .and_then(|l| l.uses.first())
                 .ok_or(Error::Invalid("GeneralSeamUse"))?;
-            append_use(
+            pieces.append(
                 &mut builder,
                 &kernel,
                 &mut execution,
                 first,
-                &mut plan.edges,
-                &plan.vertices,
-                &vertices,
-                &mut edges,
+                Some(seam_vertices[0]),
                 native.work_tolerance_mm,
             )?;
             let derived = append_seam(
@@ -824,10 +876,9 @@ pub fn construct_general(
                 &kernel,
                 &mut execution,
                 &seam,
+                seam_vertices,
                 None,
                 true,
-                &plan.vertices,
-                &vertices,
                 native.work_tolerance_mm,
             )?;
             let second = *face
@@ -835,15 +886,12 @@ pub fn construct_general(
                 .get(1)
                 .and_then(|l| l.uses.first())
                 .ok_or(Error::Invalid("GeneralSeamUse"))?;
-            append_use(
+            pieces.append(
                 &mut builder,
                 &kernel,
                 &mut execution,
                 second,
-                &mut plan.edges,
-                &plan.vertices,
-                &vertices,
-                &mut edges,
+                Some(seam_vertices[1]),
                 native.work_tolerance_mm,
             )?;
             append_seam(
@@ -851,10 +899,9 @@ pub fn construct_general(
                 &kernel,
                 &mut execution,
                 &seam,
+                seam_vertices,
                 Some(derived),
                 false,
-                &plan.vertices,
-                &vertices,
                 native.work_tolerance_mm,
             )?;
             execution.step()?;
@@ -865,63 +912,14 @@ pub fn construct_general(
                 execution.step()?;
                 builder.start_loop(OrientType::Same)?;
                 for u in &bound.uses {
-                    let edge = plan
-                        .edges
-                        .get_mut(u.edge)
-                        .ok_or(Error::Invalid("GeneralEdgeIndex"))?;
-                    let va = plan
-                        .vertices
-                        .get(edge.vertices[0])
-                        .ok_or(Error::Invalid("GeneralVertexIndex"))?
-                        .record;
-                    let vb = plan
-                        .vertices
-                        .get(edge.vertices[1])
-                        .ok_or(Error::Invalid("GeneralVertexIndex"))?
-                        .record;
-                    let existing = edges.get(&edge.record).copied();
-                    execution.step()?;
-                    let target = builder.start_edge(
+                    pieces.append(
+                        &mut builder,
                         &kernel,
-                        if u.forward {
-                            OrientType::Same
-                        } else {
-                            OrientType::Opposite
-                        },
-                        existing,
-                        vertices.get(&va).copied(),
-                        vertices.get(&vb).copied(),
+                        &mut execution,
+                        *u,
+                        None,
+                        native.work_tolerance_mm,
                     )?;
-                    need(
-                        existing.is_none_or(|e| e == target),
-                        "GeneralSharedEdgeIdentity",
-                        edge.record,
-                    )?;
-                    if existing.is_none() {
-                        builder.brep_mut().edge_mut(target)?.tolerance = native.work_tolerance_mm;
-                        let definition = edge
-                            .built
-                            .as_mut()
-                            .ok_or(Error::Invalid("GeneralDefiningCurveMissing"))?;
-                        execution.step()?;
-                        builder.set_edge_curve(
-                            &kernel,
-                            definition
-                                .native
-                                .take()
-                                .ok_or(Error::Invalid("GeneralCurveAlreadyTransferred"))?,
-                            false,
-                        )?;
-                        execution.step()?;
-                        builder.set_limits(
-                            &kernel,
-                            VertexNode::Parameter(definition.interval.min()),
-                            VertexNode::Parameter(definition.interval.max()),
-                        )?;
-                        edges.insert(edge.record, target);
-                    }
-                    execution.step()?;
-                    builder.end_edge()?;
                 }
                 execution.step()?;
                 builder.end_loop(&kernel)?;
@@ -999,6 +997,7 @@ pub fn construct_general(
             }
         }
     }
+    let edges = pieces.correspondence(&plan.edges)?;
     Ok(Candidate {
         brep,
         kernel,
@@ -1014,96 +1013,17 @@ pub fn construct_general(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn append_use(
-    builder: &mut BrepConstructor,
-    kernel: &Kernel,
-    execution: &mut Execution,
-    u: SourceUse,
-    definitions: &mut [SourceEdge],
-    source_vertices: &[SourceVertex],
-    vertices: &BTreeMap<usize, VertexId>,
-    edges: &mut BTreeMap<usize, EdgeId>,
-    tolerance: f64,
-) -> Result<()> {
-    let edge = definitions
-        .get_mut(u.edge)
-        .ok_or(Error::Invalid("GeneralEdgeIndex"))?;
-    let [a, b] = edge.vertices;
-    let va = source_vertices
-        .get(a)
-        .ok_or(Error::Invalid("GeneralVertexIndex"))?
-        .record;
-    let vb = source_vertices
-        .get(b)
-        .ok_or(Error::Invalid("GeneralVertexIndex"))?
-        .record;
-    let existing = edges.get(&edge.record).copied();
-    execution.step()?;
-    let target = builder.start_edge(
-        kernel,
-        if u.forward {
-            OrientType::Same
-        } else {
-            OrientType::Opposite
-        },
-        existing,
-        vertices.get(&va).copied(),
-        vertices.get(&vb).copied(),
-    )?;
-    need(
-        existing.is_none_or(|e| e == target),
-        "GeneralSharedEdgeIdentity",
-        edge.record,
-    )?;
-    if existing.is_none() {
-        builder.brep_mut().edge_mut(target)?.tolerance = tolerance;
-        let definition = edge
-            .built
-            .as_mut()
-            .ok_or(Error::Invalid("GeneralDefiningCurveMissing"))?;
-        execution.step()?;
-        builder.set_edge_curve(
-            kernel,
-            definition
-                .native
-                .take()
-                .ok_or(Error::Invalid("GeneralCurveAlreadyTransferred"))?,
-            false,
-        )?;
-        execution.step()?;
-        builder.set_limits(
-            kernel,
-            VertexNode::Parameter(definition.interval.min()),
-            VertexNode::Parameter(definition.interval.max()),
-        )?;
-        edges.insert(edge.record, target);
-    }
-    execution.step()?;
-    builder.end_edge()?;
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
 fn append_seam(
     builder: &mut BrepConstructor,
     kernel: &Kernel,
     execution: &mut Execution,
     seam: &surface::Seam,
+    vertices: [VertexId; 2],
     existing: Option<EdgeId>,
     forward: bool,
-    source_vertices: &[SourceVertex],
-    vertices: &BTreeMap<usize, VertexId>,
     tolerance: f64,
 ) -> Result<EdgeId> {
-    let [a, b] = seam.vertices;
-    let va = source_vertices
-        .get(a)
-        .ok_or(Error::Invalid("GeneralSeamVertex"))?
-        .record;
-    let vb = source_vertices
-        .get(b)
-        .ok_or(Error::Invalid("GeneralSeamVertex"))?
-        .record;
+    let [va, vb] = vertices;
     execution.step()?;
     let id = builder.start_edge(
         kernel,
@@ -1113,13 +1033,13 @@ fn append_seam(
             OrientType::Opposite
         },
         existing,
-        vertices.get(&va).copied(),
-        vertices.get(&vb).copied(),
+        Some(va),
+        Some(vb),
     )?;
     need(
         existing.is_none_or(|e| e == id),
         "GeneralTargetSeamIdentity",
-        va,
+        seam.vertices[0],
     )?;
     if existing.is_none() {
         builder.brep_mut().edge_mut(id)?.tolerance = tolerance;

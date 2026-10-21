@@ -237,8 +237,11 @@ fn run_general(
         "source_sha256":raw.sha256,"carrier_options":raw.options(),
         "carrier_assumption":raw.carrier_assumption(),
         "schema_interpretation":model.source().applied_interpretation(),
-        "vertices":model.vertices().len(),"edges":model.edges().len(),"faces":model.faces().len(),
+        "vertices":model.brep().vertex_list().len(),"edges":model.brep().edge_list().len(),"faces":model.brep().face_list().len(),
         "operations":model.operations(),"native_pointer_validation":"Passed","native_deep_validation":"Passed",
+        "correspondence":{"source_vertices":model.vertices().len(),"source_edges":model.edges().len(),
+        "native_edge_pieces":model.edges().values().map(Vec::len).sum::<usize>(),
+        "derived_vertices":model.derived_vertices().len(),"chart_cuts":general_report.chart_cuts.len()},
         "final_trim_measurements":{"status":"Passed","maximum_mm":trims.maximum_mm,
         "samples":trims.samples,"edge_uses":trims.edge_uses,"evidence":"finite_same_parameter_samples_not_a_continuous_bound"},
         "material_measurements":material,"unrun":unrun,"repair":"None"})
@@ -295,8 +298,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{}",
         serde_json::json!({"status":"NativeConstructed","accepted_import":false,
-        "native_kernel":"Rust solidcore","vertices":model.vertices().len(),"edges":model.edges().len(),
-        "faces":model.faces().len(),"operations":model.operations(),
+        "native_kernel":"Rust solidcore","vertices":model.brep().vertex_list().len(),"edges":model.brep().edge_list().len(),
+        "faces":model.brep().face_list().len(),"operations":model.operations(),
         "native_pointer_validation":"Passed","native_deep_validation":"Passed",
         "unrun":["continuous_source_correspondence","error_budgets","final_publication"],"repair":"None"})
     );

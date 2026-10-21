@@ -85,7 +85,7 @@ use crate::math::{max2, min2, Point2, Point3, Vec3, EFF_ZERO, EFF_ZERO_SQRT};
 use crate::nurbs::b_spline_curve::BSplineCurve;
 use crate::nurbs::b_spline_curve_n_lib::TrimMode;
 use crate::nurbs::b_spline_surface_n_lib::p2::OrientType;
-use crate::surface::surface::{Surface, SurfaceKind};
+use crate::surface::surface::Surface;
 use crate::topology::edge as topo_edge;
 
 use super::p1::{
@@ -747,8 +747,8 @@ impl<O: ClassObject> CurveClassification<O> {
     /// # Errors
     ///
     /// [`SolidError::InvalidInput`] for `index` past either classification or a missing
-    /// curve; [`SolidError::Unported`] in the edge-coincidence branch (edge tolerances
-    /// and curves, the topology units).
+    /// curve; [`SolidError::Unported`] for unresolved edge owners or further
+    /// numerical/owner-dependent operations required by the coincidence branch.
     pub fn are_coincident_maybe(
         &self,
         k: &Kernel,
@@ -834,7 +834,7 @@ impl<O: ClassObject> CurveClassification<O> {
                 let edge_param = tgt_beg.t_param();
 
                 let edge_curve = edge_curve(geometry, edge_obj)?;
-                let edge_ivl = edge_interval(Some(edge_obj))?;
+                let edge_ivl = edge_interval_with_geometry(geometry, Some(edge_obj))?;
                 let tgt_curve: Cow<'_, Curve> = if on_surface {
                     Cow::Owned(crv_on_surf(
                         k,
@@ -1192,7 +1192,7 @@ pub fn set_do_filleting_geometry<O: ClassObject>(
             .edge_object()
             .ok_or(SolidError::null_pointer(OP_FILLET))?;
         let this_edge_curve = edge_curve(geometry, this_edge)?;
-        let this_edge_ivl = edge_interval(Some(this_edge))?;
+        let this_edge_ivl = edge_interval_with_geometry(geometry, Some(this_edge))?;
 
         // other mid edge
         let other_edge = other_ivl
@@ -1200,7 +1200,7 @@ pub fn set_do_filleting_geometry<O: ClassObject>(
             .edge_object()
             .ok_or(SolidError::null_pointer(OP_FILLET))?;
         let other_edge_curve = edge_curve(geometry, other_edge)?;
-        let other_edge_ivl = edge_interval(Some(other_edge))?;
+        let other_edge_ivl = edge_interval_with_geometry(geometry, Some(other_edge))?;
 
         // DropPoint locals
         let other_start_guess = other_edge_ivl.min();
@@ -1571,8 +1571,8 @@ fn partial_coincidence<O: ClassObject>(
     let o_edge = o_mid.object().ok_or(SolidError::null_pointer(OP_PARTIAL))?;
     let curve = edge_curve(geometry, edge)?;
     let o_curve = edge_curve(geometry, o_edge)?;
-    let edge_ivl = edge_interval(Some(edge))?;
-    let o_edge_ivl = edge_interval(Some(o_edge))?;
+    let edge_ivl = edge_interval_with_geometry(geometry, Some(edge))?;
+    let o_edge_ivl = edge_interval_with_geometry(geometry, Some(o_edge))?;
     let xsect_tol_3d = edge_pair_xsect_tol_3d(k, edge, o_edge)?;
 
     let coincide = |tol: f64| -> Result<Vec<Solution<NoObject>>> {
@@ -1689,18 +1689,13 @@ fn crv_on_surf(k: &Kernel, uv_curve: &Curve, surface: Option<&Surface>) -> Resul
     let Some(surface) = surface else {
         return Err(SolidError::invalid_input(OP_COIN, "no surface 1"));
     };
-    let SurfaceKind::BSpline(bs) = surface.kind() else {
-        // UNPORTED(curve.crv_on_surf): SmCrvOnSurf over a non-B-spline surface (the
-        // Rust CrvOnSurf holds only B-spline surfaces)
-        return Err(SolidError::unported(
-            "SmCrvOnSurf (non-B-spline surface)",
-            "curve.crv_on_surf",
-        ));
-    };
+    // SmCurveClass.cpp::AreCoincidentMaybe supplies the complete virtual
+    // receiver to a non-owning CrvOnSurf. Preserve the exact definition and its
+    // owner metadata; a B-spline slice would discard Plane/analytic behavior.
     Ok(Curve::from(CrvOnSurf::new(
         k,
         uv_curve.clone(),
-        bs.clone(),
+        surface.clone_for_evaluation()?,
         None,
         0,
     )?))
@@ -1720,6 +1715,21 @@ fn edge_curve<O: ClassObject>(geometry: &impl ClassGeometry<O>, edge: O) -> Resu
         // an opaque handle (the adapter has no B-rep): still a deferral
         // UNPORTED(topology.edge): SmEdge::GetCurve (unresolved handle)
         None => Err(SolidError::unported("SmEdge::GetCurve", "topology.edge")),
+    }
+}
+
+/// The actual topological restriction, not the defining curve's natural domain.
+/// `SmCurveClass.cpp::AreCoincidentMaybe` and `TestForPartialCoincidentEdges` use
+/// `GetInterval` at the original call positions. A scoped topology adapter resolves
+/// the native owner; an opaque handle retains the preexisting explicit deferral.
+fn edge_interval_with_geometry<O: ClassObject>(
+    geometry: &impl ClassGeometry<O>,
+    object: Option<O>,
+) -> Result<Extent1d> {
+    match object.and_then(|value| geometry.topology_entity(value)) {
+        Some((brep, EntityRef::Edge(id))) => topo_edge::interval(brep, id),
+        Some(_) => Err(SolidError::invalid_input(OP_GEOM, "handle is not an edge")),
+        None => edge_interval(object),
     }
 }
 
@@ -2204,6 +2214,168 @@ mod tests {
             Err(SolidError::NotFound { .. })
         ));
         assert!(cc.is_crossed_by_edge().unwrap_err().is_unported());
+    }
+
+    struct IntervalGeometry<'a> {
+        brep: &'a Brep,
+        source: &'a Curve,
+    }
+
+    impl ClassGeometry<H> for IntervalGeometry<'_> {
+        fn curve(&self, object: H) -> Option<&Curve> {
+            (object.1 == K::Curve).then_some(self.source)
+        }
+        fn surface(&self, _: H) -> Option<&Surface> {
+            None
+        }
+        fn volume(&self, _: H) -> Option<&Volume> {
+            None
+        }
+        fn point(&self, _: H) -> Option<Point3> {
+            None
+        }
+        fn topology_entity(&self, object: H) -> Option<(&Brep, EntityRef)> {
+            match object.1 {
+                K::Edge => Some((
+                    self.brep,
+                    EntityRef::Edge(EdgeId::from_index(object.0 as u32)),
+                )),
+                K::Vertex => Some((
+                    self.brep,
+                    EntityRef::Vertex(VertexId::from_index(object.0 as u32)),
+                )),
+                _ => None,
+            }
+        }
+        fn topology_zone_tol_3d(&self, object: H) -> Option<f64> {
+            if object.1 == K::Edge {
+                self.brep
+                    .edge(EdgeId::from_index(object.0 as u32))
+                    .ok()
+                    .map(|e| e.tolerance)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn actual_coincident_maybe_length_uses_the_edge_restriction_not_full_curve() {
+        let k = Kernel::default();
+        let source = line([0., 0., 0.], [100., 0., 0.]);
+        let mut brep = Brep::new();
+        let first = brep.add_vertex(Vec3::new(40., 0., 0.)).unwrap();
+        let last = brep.add_vertex(Vec3::new(60., 0., 0.)).unwrap();
+        let id = brep.add_edge(first, last).unwrap();
+        let edge_handle = H(id.index() as usize, K::Edge);
+        let mut defining = line([0., 0., 0.], [100., 0., 0.]);
+        defining.set_owner(
+            Some(crate::topology::brep_cache::arena_identity(
+                crate::topology::brep_cache::CacheObject::Edge(id),
+            )),
+            None,
+        );
+        brep.edge_mut(id).unwrap().curve = Some(defining);
+        brep.edge_mut(id).unwrap().interval = Extent1d::from_min_max(0.4, 0.6);
+        brep.edge_mut(id).unwrap().tolerance = 1e-6;
+        let mut classification = CurveClassification::with_curve_interval(
+            &k,
+            H(0, K::Curve),
+            Extent1d::from_min_max(0., 1.),
+            1e-6,
+        );
+        let interval = classification.at_mut(0).unwrap();
+        interval.set_interval(&Extent1d::from_min_max(0.45, 0.5));
+        interval
+            .start
+            .set_class_object(PointClassType::Edge, Some(edge_handle));
+        interval
+            .mid
+            .set_class_object(PointClassType::Edge, Some(edge_handle));
+        interval.start.set_t_param(0.45, false);
+        interval.start.set_gap_3d(1e-7);
+        interval.mid.set_gap_3d(0.);
+        interval.end.set_gap_3d(0.);
+        let geometry = IntervalGeometry {
+            brep: &brep,
+            source: &source,
+        };
+        assert_eq!(
+            edge_interval_with_geometry(&geometry, Some(edge_handle)).unwrap(),
+            Extent1d::from_min_max(0.4, 0.6)
+        );
+        // Independent lengths: whole basis 100, restricted edge 20, classified
+        // segment 5. The source's case-1 predicate is 5 < 20/10, hence false.
+        assert_eq!(
+            classification
+                .are_coincident_maybe(&k, &geometry, &classification, 0, false)
+                .unwrap(),
+            (CoincidentMaybe::No, IntervalPosition::Inside)
+        );
+        let opaque = Geo {
+            curves: vec![source.clone()],
+        };
+        assert!(edge_interval_with_geometry(&opaque, Some(edge_handle))
+            .unwrap_err()
+            .is_unported());
+        assert_eq!(
+            edge_interval_with_geometry(&geometry, Some(H(0, K::Vertex))).unwrap_err(),
+            SolidError::invalid_input(OP_GEOM, "handle is not an edge")
+        );
+        assert!(matches!(
+            edge_interval_with_geometry(&geometry, Some(H(u32::MAX as usize, K::Edge))),
+            Err(SolidError::NotFound { .. })
+        ));
+
+        // Retain the same complete curve but give its edge the full interval,
+        // with corresponding genuine endpoints. Now 5 < 100/10, hence fixable.
+        brep.edge_mut(id).unwrap().interval = Extent1d::from_min_max(0., 1.);
+        brep.vertex_mut(first).unwrap().point = Vec3::ZERO;
+        brep.vertex_mut(last).unwrap().point = Vec3::new(100., 0., 0.);
+        let geometry = IntervalGeometry {
+            brep: &brep,
+            source: &source,
+        };
+        assert_eq!(
+            classification
+                .are_coincident_maybe(&k, &geometry, &classification, 0, false)
+                .unwrap(),
+            (CoincidentMaybe::Fixable, IntervalPosition::Start)
+        );
+    }
+
+    #[test]
+    fn coincident_uv_curve_lifts_through_the_actual_analytic_plane() {
+        use crate::geom::extent2d::Extent2d;
+        use crate::surface::plane::Plane;
+        use crate::surface::surface::SurfaceKind;
+        let k = Kernel::default();
+        let surface: Surface = Plane::new(
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            Point2::new(100., 1.),
+            &Extent2d::from_bounds(0., 0., 1., 1.),
+        )
+        .into();
+        let uv: Curve = Line::from_points(Vec3::ZERO, Vec3::X, 2).into();
+        let lifted = crv_on_surf(&k, &uv, Some(&surface)).unwrap();
+        let CurveKind::CrvOnSurf(curve) = lifted.kind() else {
+            panic!("curve-on-surface kind lost")
+        };
+        let SurfaceKind::Plane(plane) = curve.surface().kind() else {
+            panic!("analytic receiver sliced")
+        };
+        assert!(plane.base().gw_nurb().is_none());
+        assert_eq!(lifted.natural_interval(), uv.natural_interval());
+        assert_eq!(
+            lifted.evaluate_point(&k, 0.5).unwrap(),
+            Vec3::new(50., 0., 0.)
+        );
+        assert_eq!(
+            lifted.evaluate(&k, 0.5, 1, true, true).unwrap()[1],
+            Vec3::new(100., 0., 0.)
+        );
     }
 
     #[test]

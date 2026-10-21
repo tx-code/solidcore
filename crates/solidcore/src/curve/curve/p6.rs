@@ -78,7 +78,10 @@ use crate::curve::curve_cache::CurveCache;
 use crate::error::{ignore_status, ignored, Result, SolidError};
 use crate::geom::extent1d::Extent1d;
 use crate::geom::extent3d::Extent3d;
-use crate::geom::global_solver::{GlobalSolve, GlobalSolver, SolutionRequested, SolverOperation};
+use crate::geom::global_solver::{
+    GlobalSolve, GlobalSolver, PreferredSolution, SolutionPairType, SolutionRequested,
+    SolverOperation,
+};
 use crate::geom::object::ObjectRef;
 use crate::geom::polar_box::{PolarBox, PolarBoxState};
 use crate::geom::pseudo_box::{Planar, PseudoBox};
@@ -120,6 +123,40 @@ impl SolutionObject for CurveHandle {
 
     fn natural_interval(&self) -> Option<Extent1d> {
         Some(self.0)
+    }
+}
+
+/// The native object domain used by solution identity, independent of the
+/// interval currently being queried or recursively subdivided.
+type ParameterIntervalLookup<'a, O> = dyn Fn(&Solution<O>, usize) -> Result<Option<Extent1d>> + 'a;
+
+/// Keeps the caller's actual owner lookup scoped to a split-solution merge.
+struct CoincidenceMergeSolver<'a, O> {
+    base: GlobalSolver<'a, O>,
+    parameter_interval: &'a ParameterIntervalLookup<'a, O>,
+}
+
+impl<'a, O: SolutionObject + 'a> GlobalSolve<'a, O> for CoincidenceMergeSolver<'a, O> {
+    fn solver(&self) -> &GlobalSolver<'a, O> {
+        &self.base
+    }
+
+    fn solver_mut(&mut self) -> &mut GlobalSolver<'a, O> {
+        &mut self.base
+    }
+
+    fn identical_solutions(
+        &self,
+        first: &Solution<O>,
+        second: &Solution<O>,
+    ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
+        // SmCurve.cpp::GlobalCoincidenceChecker merges split answers with the
+        // ordinary SmGlobalSolver::IdenticalSolutions. Its GetParameterInterval
+        // (SmSolutionArray.cpp:730--828) reads the original edge restriction or
+        // defining curve's natural domain, never a recursive query subinterval.
+        // Override only that lookup; sorting, thresholds and error order stay in
+        // the single existing native comparison/merge implementation.
+        GlobalSolver::identical_solutions_with_intervals(first, second, self.parameter_interval)
     }
 }
 
@@ -1349,6 +1386,41 @@ impl Curve {
         snap_to_ends: bool,
         objects: [Option<O>; 2],
     ) -> Result<Coincidence<O>> {
+        self.global_coincidence_checker_with_parameter_intervals(
+            k,
+            interval,
+            other,
+            other_interval,
+            tol,
+            snap_to_ends,
+            objects,
+            &Solution::parameter_interval,
+        )
+    }
+
+    /// The same coincidence check with a scoped lookup of the actual domains of
+    /// the objects stored in each solution. A topology caller supplies its owning
+    /// B-rep; standalone opaque handles retain the legacy lookup failure.
+    ///
+    /// The callback is used only where the native solution comparison reads
+    /// `GetParameterInterval`. It must return the object's original edge domain
+    /// or defining geometry domain, not `interval` or a recursive subinterval.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`Curve::global_coincidence_checker`] and of `parameter_interval`
+    /// at the original solution comparison point.
+    pub(crate) fn global_coincidence_checker_with_parameter_intervals<O: SolutionObject>(
+        &self,
+        k: &Kernel,
+        interval: &Extent1d,
+        other: &Self,
+        other_interval: &Extent1d,
+        tol: f64,
+        snap_to_ends: bool,
+        objects: [Option<O>; 2],
+        parameter_interval: &impl Fn(&Solution<O>, usize) -> Result<Option<Extent1d>>,
+    ) -> Result<Coincidence<O>> {
         // the two curves' caches for the end point drops, built at the first global
         // solve and kept for the whole split recursion (upstream keeps them on the
         // curves, which do not change here)
@@ -1363,6 +1435,7 @@ impl Curve {
             objects,
             0,
             &mut caches,
+            parameter_interval,
         )
     }
 
@@ -1378,6 +1451,7 @@ impl Curve {
         objects: [Option<O>; 2],
         depth: usize,
         caches: &mut [Option<CurveCache<CurveHandle>>; 2],
+        parameter_interval: &ParameterIntervalLookup<'_, O>,
     ) -> Result<Coincidence<O>> {
         if depth > MAX_COINCIDENCE_DEPTH {
             return Err(SolidError::invalid_input(
@@ -1438,11 +1512,20 @@ impl Curve {
                         objects,
                         depth + 1,
                         caches,
+                        parameter_interval,
                     )?
                     .solutions,
                 );
             }
-            return self.merge_split_solutions(k, &parts, interval, other, other_interval, true);
+            return self.merge_split_solutions(
+                k,
+                &parts,
+                interval,
+                other,
+                other_interval,
+                true,
+                parameter_interval,
+            );
         }
 
         // Do the same recursive division if the second curve is closed.
@@ -1461,11 +1544,20 @@ impl Curve {
                         objects,
                         depth + 1,
                         caches,
+                        parameter_interval,
                     )?
                     .solutions,
                 );
             }
-            return self.merge_split_solutions(k, &parts, interval, other, other_interval, false);
+            return self.merge_split_solutions(
+                k,
+                &parts,
+                interval,
+                other,
+                other_interval,
+                false,
+                parameter_interval,
+            );
         }
 
         // Two non closed intervals: drop the endPoints, sort them and test the
@@ -1734,13 +1826,17 @@ impl Curve {
         other: &Self,
         other_interval: &Extent1d,
         split_this: bool,
+        parameter_interval: &ParameterIntervalLookup<'_, O>,
     ) -> Result<Coincidence<O>> {
         // Now Combine the solutions if there are any
-        let mut gs: GlobalSolver<'_, O> = GlobalSolver::new();
-        gs.num_trees = 2;
-        gs.num_variables = 2;
-        gs.tolerance_3d = 0.0;
-        gs.set_solutions(SolutionArray::new());
+        let mut gs = CoincidenceMergeSolver {
+            base: GlobalSolver::new(),
+            parameter_interval,
+        };
+        gs.base.num_trees = 2;
+        gs.base.num_variables = 2;
+        gs.base.tolerance_3d = 0.0;
+        gs.base.set_solutions(SolutionArray::new());
 
         for part in parts {
             for sol in part {
@@ -1776,7 +1872,7 @@ impl Curve {
                 gs.add_sorted_solution(sol, SortKey::ByAllParameters, true)?;
             }
         }
-        let solutions = gs.set_solutions(SolutionArray::new());
+        let solutions = gs.base.set_solutions(SolutionArray::new());
 
         // accumulate coincident range domains
         let mut check_ivl1 = Extent1d::new();
@@ -2063,6 +2159,7 @@ mod tests {
                 objects,
                 0,
                 &mut caches,
+                &Solution::parameter_interval,
             )
             .unwrap()
         };
@@ -2225,5 +2322,112 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(e, SolidError::InvalidInput { .. }));
+    }
+    #[test]
+    fn split_coincidence_resolves_complete_native_edge_domains_and_keeps_opaque_refusal() {
+        use crate::error::EntityRef;
+        use crate::topology::{edge, Brep};
+        use std::cell::Cell;
+        let kernel = Kernel::default();
+        let first = circle_of_radius_two(0., 360.);
+        let second = first.clone();
+        let natural = first.natural_interval();
+        let quarter = natural.evaluate(0.25);
+        let intervals = [
+            Extent1d::from_min_max(natural.min(), quarter),
+            Extent1d::from_min_max(quarter, natural.max()),
+        ];
+        let mut model = Brep::new();
+        let x = model.add_vertex(Vec3::new(2., 0., 0.)).unwrap();
+        let y = model.add_vertex(Vec3::new(0., 2., 0.)).unwrap();
+        let a = model.add_edge(x, y).unwrap();
+        let b = model.add_edge(y, x).unwrap();
+        for (id, interval) in [a, b].into_iter().zip(intervals) {
+            let edge = model.edge_mut(id).unwrap();
+            edge.curve = Some(first.clone());
+            edge.interval = interval;
+        }
+        let objects = [Some(EntityRef::Edge(a)), Some(EntityRef::Edge(b))];
+        let calls = Cell::new(0);
+        let resolve = |solution: &Solution<EntityRef>, parameter| -> Result<Option<Extent1d>> {
+            calls.set(calls.get() + 1);
+            let Some((index, direction)) = solution.object_index_for_parameter_index(parameter)?
+            else {
+                return Ok(None);
+            };
+            assert_eq!(direction, 0);
+            let Some(EntityRef::Edge(id)) = solution.objects[index] else {
+                panic!("actual edge identity lost");
+            };
+            let domain = edge::interval(&model, id)?;
+            assert_ne!(domain, natural); // full defining curve is not this edge restriction
+            Ok(Some(domain))
+        };
+        let result = first
+            .global_coincidence_checker_with_parameter_intervals(
+                &kernel,
+                &intervals[0],
+                &second,
+                &intervals[1],
+                1e-6,
+                true,
+                objects,
+                &resolve,
+            )
+            .unwrap();
+        assert!(calls.get() > 0); // the recursive merge actually needed owner domains
+        assert!(!result.solutions.is_empty());
+        for solution in result.solutions {
+            assert_eq!(solution.solution_type, SolutionType::SingleValue);
+            let point = first
+                .evaluate_point(&kernel, solution.start.param(0).unwrap())
+                .unwrap();
+            let other = second
+                .evaluate_point(&kernel, solution.start.param(1).unwrap())
+                .unwrap();
+            assert!(point.distance(other) < 1e-6);
+            assert!(
+                point.distance(Vec3::new(2., 0., 0.)) < 1e-6
+                    || point.distance(Vec3::new(0., 2., 0.)) < 1e-6
+            );
+            assert_eq!(&solution.objects[..2], &objects);
+        }
+        assert!(matches!(
+            first.global_coincidence_checker(
+                &kernel,
+                &intervals[0],
+                &second,
+                &intervals[1],
+                1e-6,
+                true,
+                objects
+            ),
+            Err(SolidError::Unported {
+                upstream: "SmEdge::GetInterval",
+                ..
+            })
+        ));
+        let refused = first.global_coincidence_checker_with_parameter_intervals(
+            &kernel,
+            &intervals[0],
+            &second,
+            &intervals[1],
+            1e-6,
+            true,
+            objects,
+            &|_, _| {
+                Err(SolidError::invalid_input(
+                    "test::actual_owner_domain",
+                    "unresolved owner",
+                ))
+            },
+        );
+        assert!(matches!(
+            refused,
+            Err(SolidError::InvalidInput {
+                operation: "test::actual_owner_domain",
+                ..
+            })
+        ));
     }
 }

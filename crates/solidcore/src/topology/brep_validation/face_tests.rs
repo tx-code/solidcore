@@ -88,7 +88,7 @@ fn coincidence(
         .curve
         .as_ref()
         .ok_or_else(missing)?
-        .global_coincidence_checker(
+        .global_coincidence_checker_with_parameter_intervals(
             k,
             &first.interval,
             second.curve.as_ref().ok_or_else(missing)?,
@@ -96,6 +96,21 @@ fn coincidence(
             tol,
             true,
             [Some(EntityRef::Edge(a)), Some(EntityRef::Edge(c))],
+            &|solution, parameter| {
+                // SmFace.cpp's coincidence assertions pass actual edge objects;
+                // SmSolutionArray.cpp::GetParameterInterval reads each edge's
+                // full restriction, including when the checker subdivides it.
+                // Resolve the same arena borrowed for this validation, without
+                // substituting the defining curve's larger natural interval.
+                if let Some((object_index, 0)) =
+                    solution.object_index_for_parameter_index(parameter)?
+                {
+                    if let Some(Some(EntityRef::Edge(id))) = solution.objects.get(object_index) {
+                        return edge::interval(b, *id).map(Some);
+                    }
+                }
+                solution.parameter_interval(parameter)
+            },
         );
     match outcome {
         Err(SolidError::Upstream { .. } | SolidError::Nlib { .. }) => {

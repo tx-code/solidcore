@@ -169,7 +169,7 @@ pub(crate) fn pick(scene: &mut Scene, frame: Frame, pixel: DVec2) -> Result<Opti
     }
     let radius = 6. * f64::from(frame.pixels_per_point);
     let mut vertices = Vec::new();
-    for id in scene.owner.vertices().values() {
+    for id in scene.owner.brep().vertex_list() {
         let position = point(
             scene
                 .owner
@@ -195,7 +195,7 @@ pub(crate) fn pick(scene: &mut Scene, frame: Frame, pixel: DVec2) -> Result<Opti
         }
     }
     let mut edges = Vec::new();
-    for id in scene.owner.edges().values() {
+    for id in scene.owner.edges().values().flatten() {
         let edge = scene.owner.brep().edge(*id).map_err(|e| e.to_string())?;
         let CurveKind::Line(line) = edge
             .curve
@@ -247,6 +247,36 @@ pub(crate) fn pick(scene: &mut Scene, frame: Frame, pixel: DVec2) -> Result<Opti
 }
 
 pub(crate) fn label(scene: &Scene, entity: EntityRef) -> Result<String> {
+    if let EntityRef::Vertex(id) = entity {
+        if let Some(origin) = scene
+            .owner
+            .derived_vertices()
+            .iter()
+            .find(|origin| origin.native_vertex == id)
+        {
+            // A chart cut has no source VERTEX_POINT. Report its actual edge
+            // origin and complete-basis parameter instead of inventing one.
+            scene
+                .owner
+                .brep()
+                .vertex(id)
+                .map_err(|error| error.to_string())?;
+            let source_edge = scene
+                .owner
+                .source()
+                .source()
+                .records()
+                .get(origin.source_edge)
+                .ok_or("Derived vertex source edge record missing")?;
+            if !origin.native_parameter.is_finite() {
+                return Err("Derived vertex has a nonfinite source-basis parameter".into());
+            }
+            return Ok(format!(
+                "From edge #{} at t={} · native {entity}",
+                source_edge.id, origin.native_parameter
+            ));
+        }
+    }
     let record = match entity {
         EntityRef::Face(id) => scene
             .owner
@@ -258,7 +288,7 @@ pub(crate) fn label(scene: &Scene, entity: EntityRef) -> Result<String> {
             .owner
             .edges()
             .iter()
-            .find(|(_, target)| **target == id)
+            .find(|(_, pieces)| pieces.contains(&id))
             .map(|(record, _)| *record),
         EntityRef::Vertex(id) => scene
             .owner
@@ -383,7 +413,11 @@ mod tests {
         *scene.owner.vertices().get(&record(scene, id)).unwrap()
     }
     fn edge(scene: &Scene, id: &str) -> EdgeId {
-        *scene.owner.edges().get(&record(scene, id)).unwrap()
+        let pieces = scene.owner.edges().get(&record(scene, id)).unwrap();
+        let [edge] = pieces.as_slice() else {
+            panic!("planar fixture edge must have one native piece");
+        };
+        *edge
     }
     fn face(scene: &Scene, id: &str) -> FaceId {
         *scene.owner.faces().get(&record(scene, id)).unwrap()

@@ -63,8 +63,9 @@ impl Imported {
     pub fn vertices(&self) -> &std::collections::BTreeMap<usize, solidcore::topology::VertexId> {
         self.candidate.vertices()
     }
-    /// Source-to-native defining edge identities belonging to this result.
-    pub fn edges(&self) -> &std::collections::BTreeMap<usize, solidcore::topology::EdgeId> {
+    /// Source-to-native defining edge pieces belonging to this result.
+    /// This qualified planar profile requires exactly one piece per source edge.
+    pub fn edges(&self) -> &std::collections::BTreeMap<usize, Vec<solidcore::topology::EdgeId>> {
         self.candidate.edges()
     }
     /// Source-to-native face identities belonging to this result.
@@ -172,8 +173,23 @@ fn stored_plane_bound(
     Ok(bound)
 }
 
+fn singleton_edge(pieces: &[solidcore::topology::EdgeId]) -> Result<solidcore::topology::EdgeId> {
+    match pieces {
+        [edge] => Ok(*edge),
+        _ => Err(Error::Evidence(
+            "planar source edge must have exactly one native piece",
+        )),
+    }
+}
+
 fn correspondence(model: &Candidate, face: &solidcore_step::planar::FaceEvidence) -> Result<()> {
     let brep = &model.brep;
+    // One-to-many general construction cannot borrow this affine certificate.
+    // Reject empty or multiple groups before any loop-head or endpoint lookup;
+    // selecting the first piece would silently omit source/native topology.
+    for pieces in model.edges.values() {
+        singleton_edge(pieces)?;
+    }
     if model.vertices.len() != brep.vertex_list().len()
         || model.edges.len() != brep.edge_list().len()
         || model.faces.len() != brep.face_list().len()
@@ -220,13 +236,14 @@ fn correspondence(model: &Candidate, face: &solidcore_step::planar::FaceEvidence
             })
             .and_then(|r| model.edges.get(r))
             .ok_or(Error::Evidence("source loop head"))?;
+        let first = singleton_edge(first)?;
         // Native EndLoop retains the last inserted edge as its list head.
         // A closed oriented cycle has no distinguished start; only rotation is
         // equivalent here. Reversal or any changed incidence still rejects.
         let head = target
             .edges
             .iter()
-            .position(|e| e.edge == *first)
+            .position(|e| e.edge == first)
             .ok_or(Error::Evidence("native loop head"))?;
         for offset in 0..target.edges.len() {
             let edge = target
@@ -252,14 +269,20 @@ fn correspondence(model: &Candidate, face: &solidcore_step::planar::FaceEvidence
             } else {
                 orientation != definition.same_sense
             };
-            if Some(&edge.edge) != model.edges.get(&record) || edge.forward != expected {
+            let mapped = model
+                .edges
+                .get(&record)
+                .map(|pieces| singleton_edge(pieces))
+                .transpose()?;
+            if Some(edge.edge) != mapped || edge.forward != expected {
                 return Err(Error::Evidence("source/native directed use"));
             }
         }
     }
-    for (record, id) in &model.edges {
+    for (record, pieces) in &model.edges {
+        let id = singleton_edge(pieces)?;
         let definition = model.planar_plan()?.edge(*record)?;
-        let edge = brep.edge(*id)?;
+        let edge = brep.edge(id)?;
         let lo = *model
             .vertices
             .get(&definition.minimum_vertex)
@@ -443,10 +466,11 @@ impl Candidate {
             )?;
         }
         for source_edge in &model.planar_plan()?.evidence().edges {
-            let id = *model
+            let pieces = model
                 .edges
                 .get(&source_edge.edge)
                 .ok_or(Error::Evidence("unmapped source edge"))?;
+            let id = singleton_edge(pieces)?;
             let e = model.brep.edge(id)?;
             let curve = line(
                 e.curve
@@ -584,7 +608,7 @@ impl Candidate {
         )?;
         // This first strict profile permits no validator-driven tolerance growth.
         if model.brep.tolerance() > model.initial_work_tolerance_mm
-            || model.edges.values().any(|id| {
+            || model.edges.values().flatten().any(|id| {
                 model
                     .brep
                     .edge(*id)
@@ -612,5 +636,67 @@ impl Candidate {
             quality,
             certificate: cert,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solidcore_step::{inspect, planar, semantics, Limits};
+
+    fn plane() -> Candidate {
+        let raw = inspect(
+            include_bytes!("../../solidcore-step/tests/fixtures/plane.step").to_vec(),
+            Limits::planar_fixtures(),
+        );
+        let source = semantics::check(
+            &raw,
+            semantics::Limits::fixtures(),
+            &semantics::Options {
+                check_part_and_closure: true,
+                check_geometry_dependencies: true,
+                ..Default::default()
+            },
+        );
+        let planar = planar::check(
+            &source,
+            planar::Quality::planar_fixture(),
+            planar::Limits::fixtures(),
+        );
+        crate::construct_planar(
+            &planar,
+            crate::Options {
+                operations: 100_000,
+                work_tolerance_mm: 1e-6,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn planar_correspondence_rejects_empty_and_multiple_pieces_without_selecting_a_head() {
+        for multiple in [false, true] {
+            let mut model = plane();
+            let (&source, pieces) = model.edges.iter().next().unwrap();
+            let [native] = pieces.as_slice() else {
+                panic!("public plane starts with singleton edges");
+            };
+            let replacement = if multiple {
+                vec![*native, *native]
+            } else {
+                Vec::new()
+            };
+            let face = model.planar_plan().unwrap().evidence().faces[0].clone();
+            model.edges.insert(source, replacement);
+            // Source-group cardinality still equals the four actual edges;
+            // cardinality alone cannot establish this strict one-to-one profile.
+            assert_eq!(model.edges.len(), model.brep.edge_list().len());
+            assert!(matches!(
+                correspondence(&model, &face),
+                Err(Error::Evidence(
+                    "planar source edge must have exactly one native piece"
+                ))
+            ));
+        }
     }
 }

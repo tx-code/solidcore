@@ -104,6 +104,19 @@ this material-only route rather than promoted.
 The owning candidate retains the original source outcome and diagnostics, exact
 unit dependencies, defining curve parameter mappings, directed loop occurrences,
 shared native vertex/edge identities, and computational chart-cut correspondence.
+`Candidate::edges()` and `Imported::edges()` return every target piece for each
+source edge, ordered by the original defining-curve parameter. Strict planar
+certification requires exactly one piece. General two-ring cylindrical chart
+normalization can partition a closed circle without changing its complete
+analytic/NURBS definition or moving either original source vertex. Cuts are
+planned globally before native construction and reused by all neighboring faces;
+reversed uses reverse both piece order and direction. `derived_vertices()` records
+the source edge and original native basis parameter of each added chart point.
+Source loop receipts retain the original unsplit directed source boundaries.
+Additional full-curve copies are charged before copying; unsplit curves move
+without an added copy. Material and trim checkpoints account for every piece and
+derived vertex. This does not grant general continuous qualification.
+
 LINE, conics, trimmed conics and supported rational B-splines are materialized as
 defining native curves. Supported receivers retain their actual plane, cylinder,
 cone, torus or B-spline kind. Derived UV observations and native tolerance/growth
@@ -157,7 +170,7 @@ succeeds. Revalidation or a later owning UV query invalidates both receipts.
 
 The CLI selects this checkpoint with `--measure-material-accuracy VALUE`. It keeps
 `accepted_import:false` and distinguishes numerical observations from continuous
-error bounds. Public box, explicit-seam cylinder and annular-cylinder tests use
+error bounds. Public box, explicit-seam cylinder, phase-mismatched two-ring cylinder and annular-cylinder tests use
 independent analytic area/volume/centroid truth. They do not qualify arbitrary
 general sources or production tolerances.
 

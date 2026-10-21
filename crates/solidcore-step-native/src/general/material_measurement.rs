@@ -147,20 +147,43 @@ fn inventory(model: &Candidate, plan: &Plan) -> Result<Inventory> {
     let mut edges = Vec::new();
     let mut seen = BTreeSet::new();
     for source in &plan.edges {
-        let native = *model
+        let pieces = model
             .edges
             .get(&source.record)
             .ok_or(Error::Invalid("GeneralMaterialEdgeCorrespondence"))?;
-        if !seen.insert(native) {
+        if pieces.is_empty() {
             return Err(Error::Invalid("GeneralMaterialEdgeCorrespondence"));
         }
-        edges.push(EdgeBinding {
-            source: Some(source.record),
-            derived_face: None,
-            native,
-        });
+        let original = source
+            .built
+            .as_ref()
+            .ok_or(Error::Invalid("GeneralMaterialEdgeCorrespondence"))?;
+        let mut parameter = original.interval.min();
+        for &native in pieces {
+            let edge = model.brep.edge(native)?;
+            // This inventory covers the complete original defining interval,
+            // not just a subset with plausible aggregate area or volume. Exact
+            // adjacent split parameters are retained by the constructor.
+            if edge.interval.min() != parameter
+                || edge.interval.max().partial_cmp(&parameter) != Some(std::cmp::Ordering::Greater)
+            {
+                return Err(Error::Invalid("GeneralMaterialEdgeCorrespondence"));
+            }
+            parameter = edge.interval.max();
+            if !seen.insert(native) {
+                return Err(Error::Invalid("GeneralMaterialEdgeCorrespondence"));
+            }
+            edges.push(EdgeBinding {
+                source: Some(source.record),
+                derived_face: None,
+                native,
+            });
+        }
+        if parameter != original.interval.max() {
+            return Err(Error::Invalid("GeneralMaterialEdgeCorrespondence"));
+        }
     }
-    if model.edges.len() != edges.len() {
+    if model.edges.len() != plan.edges.len() {
         return Err(Error::Invalid("GeneralMaterialEdgeCorrespondence"));
     }
     for &(source_face, native) in &plan.normalizations {
@@ -176,10 +199,33 @@ fn inventory(model: &Candidate, plan: &Plan) -> Result<Inventory> {
     if native_edges.len() != edges.len() || native_edges.iter().any(|e| !seen.contains(e)) {
         return Err(Error::Invalid("GeneralMaterialEdgeCorrespondence"));
     }
-    let source_vertices: BTreeSet<_> = model.vertices.values().copied().collect();
-    if source_vertices.len() != plan.vertices.len()
-        || model.vertices.len() != plan.vertices.len()
-        || native_vertices.len() != source_vertices.len()
+    let mut source_vertices: BTreeSet<_> = model.vertices.values().copied().collect();
+    if source_vertices.len() != plan.vertices.len() || model.vertices.len() != plan.vertices.len() {
+        return Err(Error::Invalid("GeneralMaterialVertexCorrespondence"));
+    }
+    for vertex in &plan.derived_vertices {
+        let pieces = model
+            .edges
+            .get(&vertex.source_edge)
+            .ok_or(Error::Invalid("GeneralMaterialVertexCorrespondence"))?;
+        if !vertex.native_parameter.is_finite()
+            || pieces.len() < 2
+            || !source_vertices.insert(vertex.native_vertex)
+        {
+            return Err(Error::Invalid("GeneralMaterialVertexCorrespondence"));
+        }
+        let mut lower = false;
+        let mut upper = false;
+        for piece in pieces {
+            let edge = model.brep.edge(*piece)?;
+            lower |= edge.interval.max() == vertex.native_parameter;
+            upper |= edge.interval.min() == vertex.native_parameter;
+        }
+        if !lower || !upper {
+            return Err(Error::Invalid("GeneralMaterialVertexCorrespondence"));
+        }
+    }
+    if native_vertices.len() != source_vertices.len()
         || native_vertices.iter().any(|v| !source_vertices.contains(v))
     {
         return Err(Error::Invalid("GeneralMaterialVertexCorrespondence"));
@@ -863,6 +909,22 @@ mod tests {
         let mut model = ready(BOX, 100_000).unwrap();
         let source = *model.edges.keys().next().unwrap();
         assert!(model.edges.remove(&source).is_some());
+        assert!(matches!(
+            model.measure_general_material(1e-7),
+            Err(Error::Invalid("GeneralMaterialEdgeCorrespondence"))
+        ));
+    }
+
+    #[test]
+    fn a_shortened_native_edge_cannot_claim_complete_original_source_correspondence() {
+        let mut model = ready(BOX, 100_000).unwrap();
+        let native = model.edges.values().next().unwrap()[0];
+        let interval = model.brep.edge(native).unwrap().interval;
+        model.brep.edge_mut(native).unwrap().interval =
+            solidcore::geom::extent1d::Extent1d::from_min_max(
+                interval.min(),
+                interval.evaluate(0.5),
+            );
         assert!(matches!(
             model.measure_general_material(1e-7),
             Err(Error::Invalid("GeneralMaterialEdgeCorrespondence"))

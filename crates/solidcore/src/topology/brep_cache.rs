@@ -22,8 +22,8 @@
 //! uninitialized cache return `InvalidInput` (upstream asserts). Ignored statuses
 //! propagate Unported; an ordinary ignored box failure keeps the previous box,
 //! as upstream. No new recursion; spatial-tree traversal uses geom.tree's bounds.
-//! B-rep box calculation (`query.brep`) and face queries (`topology.face_p4`) remain
-//! explicit back-edges; face boxes call `query::face::p1`; the polygon path is ported.
+//! Face queries (`topology.face_p4`) remain explicit back-edges; the B-rep box calls
+//! `query::brep`, face boxes `query::face::p1`; the polygon path is ported.
 
 use crate::error::{Result, SolidError};
 use crate::geom::a_object::{BREP_TYPE, POLY_BREP_TYPE};
@@ -33,6 +33,7 @@ use crate::geom::tree::{NodeGeomType, Tree, TreeOwner};
 use crate::kernel::Kernel;
 use crate::math::EFF_ZERO;
 use crate::nurbs::b_spline_curve::BoundingBoxRequest;
+use crate::query::brep::{self as qbrep, BoundingBoxOptions};
 use crate::query::poly::{PolyBrep, PolyEdgeId, PolyFaceId, PolyVertexId};
 use crate::topology::{edge, Brep, EdgeId, FaceId, VertexId};
 
@@ -167,7 +168,7 @@ impl<O: Copy + PartialEq> BrepCache<O> {
         }
         let mut bbox = match source {
             CacheSource::Brep(b) => {
-                let mut bbox = brep_bounding_box(k, b)?;
+                let mut bbox = qbrep::calculate_bounding_box(k, b, BoundingBoxOptions::default())?;
                 bbox.expand_absolute(b.tolerance() * 100.0);
                 let size = bbox.size();
                 bbox.add_point(bbox.max() + 0.15 * size);
@@ -436,17 +437,7 @@ fn resize_edge(
     Ok(())
 }
 
-fn brep_bounding_box(k: &Kernel, b: &Brep) -> Result<Extent3d> {
-    crate::query::brep::calculate_bounding_box(
-        k,
-        b,
-        crate::query::brep::BoundingBoxOptions::default(),
-    )
-}
-
-// (SmBrep::GetVertices / GetEdges / GetFaces are wired to topology::brep::p1; the
-// B-rep tree build calls brep_bounding_box first, so they are not reached until
-// query.brep lands and the unit's report cannot show them yet)
+// (SmBrep::GetVertices / GetEdges / GetFaces are wired to topology::brep::p1)
 fn brep_vertices(b: &Brep) -> Result<Vec<VertexId>> {
     crate::topology::brep::p1::vertices(b, None)
 }
@@ -811,15 +802,23 @@ mod tests {
         ));
         let mut cache = BrepCache::new(BREP_TYPE).unwrap();
         assert!(cache.vertex_tree().is_none());
-        let mut b = Brep::new();
+        let b = Brep::new();
         assert!(matches!(
             cache.resize_trees(&k, &b, &[], &[], &[], &arena_identity, &|_| None),
             Err(SolidError::InvalidInput { .. })
         ));
-        let shell = b.add_shell().unwrap();
-        b.add_face(shell).unwrap();
+        // A face without its defining surface fails before any tree is published.
+        // Keep this fork control separate from the empty positive B-rep below.
+        let mut missing_surface = Brep::new();
+        let shell = missing_surface.add_shell().unwrap();
+        missing_surface.add_face(shell).unwrap();
         assert!(matches!(
-            cache.build_trees(&k, CacheSource::Brep(&b), |o| o, &arena_identity),
+            cache.build_trees(
+                &k,
+                CacheSource::Brep(&missing_surface),
+                |object| object,
+                &arena_identity,
+            ),
             Err(SolidError::InvalidInput { .. })
         ));
         assert!(
@@ -827,6 +826,28 @@ mod tests {
                 && cache.curve_tree().is_none()
                 && cache.surface_tree().is_none()
         );
+        // an edge without curve fails the build after the B-rep box, leaving no tree
+        let mut open = Brep::new();
+        let v0 = open.add_vertex(crate::math::Point3::ZERO).unwrap();
+        let v1 = open
+            .add_vertex(crate::math::Point3::new(1.0, 0.0, 0.0))
+            .unwrap();
+        open.add_edge(v0, v1).unwrap();
+        assert!(matches!(
+            cache.build_trees(&k, CacheSource::Brep(&open), |o| o, &arena_identity),
+            Err(SolidError::Upstream { code: 1006, .. })
+        ));
+        assert!(
+            cache.vertex_tree().is_none()
+                && cache.curve_tree().is_none()
+                && cache.surface_tree().is_none()
+        );
+        // an empty B-rep builds (its box is the inside-out empty box)
+        let mut empty = BrepCache::new(BREP_TYPE).unwrap();
+        empty
+            .build_trees(&k, CacheSource::Brep(&b), |o| o, &arena_identity)
+            .unwrap();
+        assert!(empty.vertex_tree().is_some());
         let p = PolyBrep::new(&k, 1e-6);
         assert!(matches!(
             cache.build_trees(&k, CacheSource::PolyBrep(&p), |o| o, &arena_identity),

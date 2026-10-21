@@ -1,0 +1,4 @@
+# STEP fixtures are lossless source inputs: checkout must preserve committed bytes,
+# including line endings used by identity, source-location and mutation contracts.
+*.step -text
+*.stp -text

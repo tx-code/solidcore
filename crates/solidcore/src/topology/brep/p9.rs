@@ -44,6 +44,7 @@ use crate::kernel::Kernel;
 use crate::math::{Point3, Vec3, EFF_ZERO_PARAM};
 use crate::nurbs::b_spline_surface::p1::SurfParamType;
 use crate::nurbs::b_spline_surface_n_lib::p2::OrientType;
+use crate::query::brep::{self as qbrep, BoundingBoxOptions};
 use crate::surface::surface::Surface;
 use crate::topology::edge;
 use crate::topology::vertex;
@@ -118,8 +119,12 @@ where
         };
         let bounds = match supplied_box {
             Some(bounds) => bounds,
-            None => crate::error::ignored(brep_bounds(k, b))?
-                .unwrap_or_else(crate::geom::extent3d::Extent3d::new),
+            None => crate::error::ignored(qbrep::calculate_bounding_box(
+                k,
+                b,
+                BoundingBoxOptions::default(),
+            ))?
+            .unwrap_or_else(crate::geom::extent3d::Extent3d::new),
         };
         let ray_start = bounds.max() + (bounds.max() - bounds.min()) * 0.5;
         let mut direction = Vec3::new(1.0, 1.0, 1.0);
@@ -201,8 +206,11 @@ where
             if !success {
                 let edge_id = best_edge.ok_or_else(|| SolidError::null_pointer(OP))?;
                 let record = b.edge(edge_id)?;
-                let curve = required(record.curve.as_ref(), "ray target edge without curve")?;
-                let point = curve.evaluate_point(k, record.interval.evaluate(0.789))?;
+                // (a copy: the ray fires may add UV trim curves to the B-rep)
+                let curve =
+                    required(record.curve.as_ref(), "ray target edge without curve")?.clone();
+                let interval = record.interval;
+                let point = curve.evaluate_point(k, interval.evaluate(0.789))?;
                 let attempt = crate::topology::shell::ray_fire(
                     k,
                     b,
@@ -220,7 +228,7 @@ where
                 let success = ray_success(&attempt.status)?;
                 state = attempt.state;
                 if !success {
-                    let point = curve.evaluate_point(k, record.interval.evaluate(0.189))?;
+                    let point = curve.evaluate_point(k, interval.evaluate(0.189))?;
                     let start = bounds.min() - (bounds.max() - bounds.min()) * 0.5;
                     let attempt = crate::topology::shell::ray_fire(
                         k,
@@ -246,6 +254,9 @@ where
                 }
             }
         } else {
+            // The upstream no-shell query and native validator use the same
+            // sampling/retry body. Keep its cache on this actual mutable B-rep,
+            // rather than building a second query cache with detached ownership.
             return find_infinite_region_no_shell(k, b, brep_id, &bounds, tolerance);
         }
         return Ok(state.region);
@@ -388,11 +399,7 @@ fn brep_edges(b: &Brep) -> Result<Vec<EdgeId>> {
 }
 
 fn brep_bounds(k: &Kernel, b: &Brep) -> Result<crate::geom::extent3d::Extent3d> {
-    crate::query::brep::calculate_bounding_box(
-        k,
-        b,
-        crate::query::brep::BoundingBoxOptions::default(),
-    )
+    crate::query::brep::calculate_bounding_box(k, b, BoundingBoxOptions::default())
 }
 
 fn brep_ray_fire(
@@ -2346,6 +2353,8 @@ fn drop_curve(
     interval: &Extent1d,
     tolerance: f64,
 ) -> Result<(Vec<Curve>, f64, f64)> {
+    // The shared Surface dispatcher retains the native Plane override (including
+    // creating_uv_trim_curve) and the fork's general surface projection path.
     let dropped = surface.drop_curve::<crate::topology::ObjectHandle>(
         k, domain, curve, interval, tolerance, true, None, true,
     )?;

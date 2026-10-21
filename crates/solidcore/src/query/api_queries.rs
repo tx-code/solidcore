@@ -25,12 +25,14 @@
 //! handles retain the caller's identity. Missing topology queries return Unported
 //! at the call site. Solution point extraction retains upstream's zero parameter
 //! advance for a preceding Surface and ignores ordinary evaluation errors (the
-//! output stays undefined); Unported errors still propagate. No new recursion or
-//! allocation from serialized counts.
+//! output stays undefined); Unported errors still propagate. The containment tests of
+//! [`brep_relationship`] (`sm_PointInSolid`, `sm_CountContainedSamples`) classify on a
+//! private copy of each target ([`BrepClassifier`], keyed by
+//! [`BrepIdentity::default`]). No new recursion or allocation from serialized counts.
 
 use crate::curve::curve::p1::GlobalPointSolveOptions;
 use crate::curve::curve::Curve;
-use crate::error::{ignored, Result, SolidError};
+use crate::error::{ignored, EntityRef, Result, SolidError};
 use crate::geom::extent1d::Extent1d;
 use crate::geom::extent3d::Extent3d;
 use crate::geom::global_solver::{SolutionRequested, SolverOperation};
@@ -44,6 +46,8 @@ use crate::kernel::Kernel;
 use crate::math::{Point2, Point3, Vec3};
 use crate::nurbs::b_spline_curve::BoundingBoxRequest;
 use crate::nurbs::b_spline_surface_n_lib::p2::OrientType;
+use crate::query::brep::{self as qbrep, BoundingBoxOptions};
+use crate::query::brep::{BrepClassifier, BrepIdentity};
 use crate::surface::surface::p1::zone_tol_3d;
 use crate::surface::surface::p4::NoObject;
 use crate::surface::surface::p5::DropPointOptions;
@@ -69,7 +73,7 @@ pub struct ClosestPoint {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BrepRayHit {
     /// Actual native vertex, edge or trimmed face selected by the ray solver.
-    pub entity: crate::EntityRef,
+    pub entity: EntityRef,
     /// Point along the normalized forward ray, in model coordinates.
     pub point: Point3,
     /// Unsquared forward distance from the origin, in model length units.
@@ -148,13 +152,13 @@ pub fn brep_ray_fire(
         return Err(SolidError::invalid_input(OP, "nonfinite native ray point"));
     }
     match entity {
-        crate::EntityRef::Vertex(id) => {
+        EntityRef::Vertex(id) => {
             brep.vertex(id)?;
         }
-        crate::EntityRef::Edge(id) => {
+        EntityRef::Edge(id) => {
             brep.edge(id)?;
         }
-        crate::EntityRef::Face(id) => {
+        EntityRef::Face(id) => {
             brep.face(id)?;
         }
         _ => {
@@ -472,21 +476,41 @@ pub struct BrepRelationship {
     pub distance: f64,
 }
 
-// Returns the point class and whether its region exists and is material.
-fn classify_point(
-    _target: &Brep,
-    _point: Point3,
-    _tolerance: f64,
-) -> Result<(PointClassType, bool)> {
-    // UNPORTED(query.brep): SmBrep::Point3DClassify
-    Err(SolidError::unported(
-        "SmBrep::Point3DClassify",
-        "query.brep",
-    ))
+/// A B-rep points are classified against (`pTarget`).
+struct Target<'b>(BrepClassifier<'static, 'b>);
+
+impl<'b> Target<'b> {
+    fn new(brep: &'b Brep) -> Self {
+        Self(BrepClassifier::new(brep, BrepIdentity::default()))
+    }
+
+    /// `pTarget->Point3DClassify(point, tolerance, FALSE, sPC)`: the point class and
+    /// whether its object is a region that is not void (`pReg != NULL &&
+    /// !pReg->IsVoid()`).
+    fn classify(
+        &mut self,
+        k: &Kernel,
+        point: Point3,
+        tolerance: f64,
+    ) -> Result<(PointClassType, bool)> {
+        let pc = self.0.point_3d_classify(k, point, tolerance, false)?;
+        let material = match pc.object() {
+            Some(EntityRef::Region(r)) => self.0.brep().region(r)?.is_void() == 0,
+            _ => false,
+        };
+        Ok((pc.point_class(), material))
+    }
 }
 
-fn point_in_solid(target: &Brep, point: Point3, tolerance: f64) -> Result<bool> {
-    Ok(ignored(classify_point(target, point, tolerance))?
+/// `sm_PointInSolid`: whether `point` classifies to a material region of `target`
+/// (a failing classification is `false`).
+fn point_in_solid(
+    k: &Kernel,
+    target: &mut Target<'_>,
+    point: Point3,
+    tolerance: f64,
+) -> Result<bool> {
+    Ok(ignored(target.classify(k, point, tolerance))?
         .is_some_and(|(class, material)| class == PointClassType::Region && material))
 }
 
@@ -497,7 +521,7 @@ fn brep_vertices(brep: &Brep) -> Result<Vec<VertexId>> {
 fn count_contained_samples(
     k: &Kernel,
     sample: &Brep,
-    target: &Brep,
+    target: &mut Target<'_>,
     tolerance: f64,
 ) -> Result<(usize, usize)> {
     let mut points = Vec::new();
@@ -511,7 +535,7 @@ fn count_contained_samples(
     }
     let (mut inside, mut outside) = (0, 0);
     for point in points {
-        if let Some((class, material)) = ignored(classify_point(target, point, tolerance))? {
+        if let Some((class, material)) = ignored(target.classify(k, point, tolerance))? {
             match class {
                 PointClassType::Region => {
                     if material {
@@ -548,6 +572,7 @@ pub fn brep_relationship<O: SolutionObject>(
     let distance = solution.start.solution_value;
     let tolerance =
         crate::geom::tol::context_zone_tol_3d(k, None, crate::geom::tol::SmallTopoType::NormalSize);
+    let (mut target_a, mut target_b) = (Target::new(a.brep), Target::new(b.brep));
     if distance > a.brep.tolerance() + b.brep.tolerance() {
         let pa = ignored(solution_point(k, objects, solution, 0))?;
         let pb = if pa.is_some() {
@@ -556,8 +581,8 @@ pub fn brep_relationship<O: SolutionObject>(
             None
         };
         let relationship = if let (Some(pa), Some(pb)) = (pa, pb) {
-            let bin_a = point_in_solid(a.brep, pb, tolerance)?;
-            let ain_b = point_in_solid(b.brep, pa, tolerance)?;
+            let bin_a = point_in_solid(k, &mut target_a, pb, tolerance)?;
+            let ain_b = point_in_solid(k, &mut target_b, pa, tolerance)?;
             if bin_a {
                 3
             } else if ain_b {
@@ -566,8 +591,8 @@ pub fn brep_relationship<O: SolutionObject>(
                 0
             }
         } else {
-            let (bin, bout) = count_contained_samples(k, b.brep, a.brep, tolerance)?;
-            let (ain, aout) = count_contained_samples(k, a.brep, b.brep, tolerance)?;
+            let (bin, bout) = count_contained_samples(k, b.brep, &mut target_a, tolerance)?;
+            let (ain, aout) = count_contained_samples(k, a.brep, &mut target_b, tolerance)?;
             if bin > 0 && bout == 0 {
                 3
             } else if ain > 0 && aout == 0 {
@@ -581,8 +606,8 @@ pub fn brep_relationship<O: SolutionObject>(
             distance,
         })
     } else {
-        let (bin, _) = count_contained_samples(k, b.brep, a.brep, tolerance)?;
-        let (ain, _) = count_contained_samples(k, a.brep, b.brep, tolerance)?;
+        let (bin, _) = count_contained_samples(k, b.brep, &mut target_a, tolerance)?;
+        let (ain, _) = count_contained_samples(k, a.brep, &mut target_b, tolerance)?;
         Ok(BrepRelationship {
             relationship: if bin > 0 || ain > 0 { 2 } else { 1 },
             distance: 0.0,
@@ -698,11 +723,7 @@ pub fn brep_bounding_box(k: &Kernel, brep: &Brep, tight: bool) -> Result<Extent3
     if tight {
         crate::query::brep::calculate_tight_bounding_box(k, brep)
     } else {
-        crate::query::brep::calculate_bounding_box(
-            k,
-            brep,
-            crate::query::brep::BoundingBoxOptions::default(),
-        )
+        qbrep::calculate_bounding_box(k, brep, BoundingBoxOptions::default())
     }
 }
 

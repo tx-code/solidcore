@@ -46,8 +46,9 @@
 //!   `SmMatrix::SolveLinearSystem`'s near-singular warning, which upstream returns
 //!   through `SER`, is [`SolidError::Upstream`] with `SM_ERR_WARNING`.
 //! - **Recognisers** after the plane in `GlobalSurfaceIntersect`: the surface of
-//!   revolution's special case runs; the cone, cylinder, sphere and extrusion need
-//!   surface kinds not in [`SurfaceKind`] yet. Against a surface of revolution, a plane
+//!   revolution's and the cone's (`SmCone::IntersectWithPlane`, also for a cylinder)
+//!   special cases run; the sphere and extrusion need surface kinds not in
+//!   [`SurfaceKind`] yet. Against a cone or surface of revolution, a plane
 //!   with a face returns [`SolidError::Unported`] (`SmFace::GetTolerance`) even where
 //!   the special case would not reach the plane's box. The general
 //!   `SmSurface::GlobalSurfaceIntersect` runs `SmSurfaceIntersector::DoIntersection`
@@ -1371,12 +1372,6 @@ pub(crate) fn global_surface_intersect(
 
     // switch on OtherSurface Type looking for cheap special intersection case
     match other.kind() {
-        SurfaceKind::Cone(cone) => {
-            let (more, mut found) =
-                cone.intersect_with_plane(k, other_uv_domain, plane, uv_domain, approx_tol_3d)?;
-            core::mem::swap(&mut found.surface1_uv_curves, &mut found.surface2_uv_curves);
-            (need_nurb_intersection, out) = (more, found);
-        }
         // plane/plane special case intersection
         SurfaceKind::Plane(other_plane) => {
             // (whether each plane has a face: SmSurface::GetFace)
@@ -1389,6 +1384,21 @@ pub(crate) fn global_surface_intersect(
                 approx_tol_3d,
                 owned,
             )?;
+        }
+        // cone/plane special case intersection (SmCone_TYPE and SmCylinder_TYPE):
+        // SmCone::IntersectWithPlane, which hides the surface of revolution's; the
+        // orders and the UV curves are swapped
+        SurfaceKind::Cone(cone) => {
+            // SmCone.cpp:3281--3282 expands the plane box using its face's
+            // tolerance. This borrowed wrapper cannot resolve that face into
+            // a B-rep; do not silently substitute the bare Plane's zone default.
+            if this.face()?.is_some() {
+                zone_tolerance(true)?;
+            }
+            let (need, mut x) =
+                cone.intersect_with_plane(k, other_uv_domain, plane, uv_domain, approx_tol_3d)?;
+            core::mem::swap(&mut x.surface1_uv_curves, &mut x.surface2_uv_curves);
+            (need_nurb_intersection, out) = (need, x);
         }
         // SurfOfRevolution/plane special case intersection: the orders and the UV
         // curves are swapped (the surface of revolution's edge flags and angle
@@ -1449,6 +1459,66 @@ mod tests {
 
     fn dom() -> Extent2d {
         Extent2d::from_bounds(-5.0, -3.0, 5.0, 3.0)
+    }
+
+    #[test]
+    fn cone_dispatch_requires_resolvable_plane_owner_tolerance() {
+        let k = Kernel::default();
+        let plane = rect();
+        let mut this = Surface::from(plane.clone());
+        let mut cone = crate::surface::cone::Cone::new_cylinder_bounded(
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            2.0,
+            0.0,
+            360.0,
+            3.0,
+            false,
+            false,
+            false,
+        );
+        cone.make_nurb(&k).unwrap();
+        let other = Surface::from(cone);
+        let other_domain = other.natural_uv_domain();
+        // The public bare-geometry path remains a real analytic intersection.
+        let result = global_surface_intersect(
+            &k,
+            &this,
+            &plane,
+            &dom(),
+            &other,
+            &other_domain,
+            [true, true],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.curves_3d.len(), 1);
+
+        this.set_owner(Some(crate::geom::object::ObjectRef {
+            type_code: crate::geom::assert_array::labels::FACE_TYPE,
+            key: crate::geom::attribute::ObjectKey(7),
+        }));
+        let error = global_surface_intersect(
+            &k,
+            &this,
+            &plane,
+            &dom(),
+            &other,
+            &other_domain,
+            [true, true],
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            SolidError::Unported {
+                upstream: "SmFace::GetTolerance",
+                unit: "topology.face_p2",
+            }
+        ));
     }
 
     #[test]

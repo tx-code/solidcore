@@ -14,6 +14,13 @@ and approximate mode. Approximate mode skips faces; its vertex-only shortcut
 requires **more than 500 vertices and more than 100 edges**. These legacy culling
 boxes and approximation choices do not establish a continuous geometric bound.
 
+The merged upstream Rust interface uses `BoundingBoxOptions { approx, tight,
+expand_by_zone_tol_3d }`, with defaults `false`, `false`, `true`. This replaces
+the fork's earlier `approximate` and `expand_by_tolerance` field names without
+changing their meaning. `Brep::locked_bounding_box()` returns an optional copied
+extent; `set_locked_bounding_box` records it. Public wrappers and native import
+use the same implementation and caller-supplied `Kernel`.
+
 The explicit locked box overrides normal box options. Relocking releases the old
 box first, so failure leaves no stale lock. The independent tight-box operation
 does not use that shortcut; it retains native contained-member shortcuts, ignored
@@ -23,7 +30,9 @@ propagate `Unported`. No sampled stand-in is used for an absent query.
 Public query wrappers and available cache, property, HCR and stitch callers now
 delegate to the owning box implementation with their actual `Kernel`. Interfaces
 that carry only unresolved opaque handles still require a model resolver. The
-remaining functions of base unit `query.brep` are not qualified by this co-port.
+upstream addition also provides classification and evaluation queries; its
+historical FFI results remain separate from local fork integration checks. Neither
+the box co-port nor a successful native import establishes full query qualification.
 
 ## Tolerance operation
 

@@ -607,15 +607,16 @@ mod tests {
                 ..
             })
         ));
-        assert!(find_face(
+        // the B-rep box is ported (query.brep): the cache builds and, without faces,
+        // the solve finds none
+        let r = find_face(
             &Kernel::default(),
             &brep,
             BrepId::from_index(7),
             p(0.0, 0.0, 0.0),
             &crate::topology::brep_cache::arena_identity,
             &|_| None,
-        )
-        .unwrap()
-        .is_none());
+        );
+        assert!(matches!(r, Ok(None)), "{r:?}");
     }
 }

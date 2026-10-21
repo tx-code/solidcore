@@ -1150,9 +1150,9 @@ fn run() -> Result<Value> {
                     &k,
                     &b,
                     BoundingBoxOptions {
-                        approximate: flags & 1 != 0,
+                        approx: flags & 1 != 0,
                         tight: flags & 2 != 0,
-                        expand_by_tolerance: flags & 4 != 0,
+                        expand_by_zone_tol_3d: flags & 4 != 0,
                     },
                 )
             };

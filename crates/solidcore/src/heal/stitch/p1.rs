@@ -61,14 +61,15 @@
 //!   (`brep_p2::ArenaNotifyState`) and the kernel's notification context (it defers at
 //!   `SmBrep::DeleteEdge`, `topology.brep_p4`, for a wire edge, else at part 7's own
 //!   first unported callee).
-//! - The calls into `SqueezeEdge` (`topology.brep_p3`) and `CalculateBoundingBox`
-//!   (`query.brep`) return [`SolidError::Unported`]. `SmApiStitch(pBrep, pFace)` builds
+//! - Calls into `SqueezeEdge` (`topology.brep_p3`) retain their actual dependency
+//!   failures. Bounding boxes execute `query.brep` on the caller's BRep/Kernel.
+//!   `SmApiStitch(pBrep, pFace)` builds
 //!   its `SmMerge` with `boolean.merge_p2`'s [`MergeState::with_breps`], whose computed
 //!   tolerance fails on the null other B-rep where upstream crashes (UB-167), so its
 //!   `MergeAddedFace` is never reached. The API entry points call `DoStitching`,
 //!   `StitchIntoSolid` and `StitchIntoShell` in [`super::p2`]. `SmBrep::Notify(SM_NO_PRE_EDIT)`
-//!   is `topology::brep::p2::notify` on an empty notify state (no B-rep cache, no
-//!   attribute state on the heal path).
+//!   executes `topology::brep::p2::notify_owned` against the actual B-rep's cache
+//!   and attribute state on the heal path.
 
 use std::collections::BTreeMap;
 
@@ -88,6 +89,7 @@ use crate::kernel::Kernel;
 use crate::math::{Point3, Vec3, BIG_DOUBLE, EFF_ZERO, PI};
 use crate::nurbs::b_spline_curve::p2::BoundingBoxRequest;
 use crate::nurbs::b_spline_surface_n_lib::p2::OrientType;
+use crate::query::brep::{self as qbrep, BoundingBoxOptions};
 use crate::topology::brep::p1 as bp1;
 use crate::topology::brep_cache::{arena_identity, CacheObject};
 use crate::topology::edgeuse::p1 as eu1;
@@ -1168,8 +1170,12 @@ impl<'c> Stitch<'c> {
 
             // CalculateBoundingBox(sBrepBBox) with the header defaults; status ignored
             // upstream (a failure leaves the default-initialised box)
-            let brep_bbox =
-                ignored(brep_bounding_box(k, b, false, false, true))?.unwrap_or_default();
+            let brep_bbox = ignored(qbrep::calculate_bounding_box(
+                k,
+                b,
+                BoundingBoxOptions::default(),
+            ))?
+            .unwrap_or_default();
 
             let edges = bp1::edges(b, None)?;
             // lNumPerNode = max(500, edges/10) only sizes the memory blocks
@@ -2112,26 +2118,6 @@ pub(crate) fn brep_notify_pre_edit(k: &mut Kernel, b: &mut Brep) -> Result<()> {
         b,
         crate::geom::object::NotifyOperation::PreEdit,
         [Some(this), None, None],
-    )
-}
-
-/// `SmBrep::CalculateBoundingBox(rBox, bApprox, bTight, bExpandByZoneTol3d)` (unit
-/// `query.brep`; header defaults FALSE, FALSE, TRUE).
-fn brep_bounding_box(
-    k: &Kernel,
-    b: &Brep,
-    approx: bool,
-    tight: bool,
-    expand_by_zone_tol_3d: bool,
-) -> Result<Extent3d> {
-    crate::query::brep::calculate_bounding_box(
-        k,
-        b,
-        crate::query::brep::BoundingBoxOptions {
-            approximate: approx,
-            tight,
-            expand_by_tolerance: expand_by_zone_tol_3d,
-        },
     )
 }
 

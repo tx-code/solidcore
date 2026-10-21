@@ -1189,6 +1189,18 @@ mod tests {
         );
     }
 
+    /// The B-rep box (`query.brep`) these paths used to stop at is ported: on the
+    /// synthetic operands they now run the merge engine, whose outcome here is not
+    /// compared with upstream (success, or an ordinary failure of the engine).
+    fn assert_reaches_merge<T: core::fmt::Debug>(result: Result<T>) {
+        if let Err(error) = result {
+            assert!(
+                !error.is_unported() && error.operation().starts_with("boolean::merge"),
+                "{error:?}"
+            );
+        }
+    }
+
     fn assert_dependency<T: core::fmt::Debug>(result: Result<T>, symbol: &str, owner: &str) {
         assert!(
             matches!(result.unwrap_err(), SolidError::Unported { upstream, unit } if upstream == symbol && unit == owner)
@@ -2753,19 +2765,19 @@ mod tests {
             let mut lock = MarkLock::new(std::slice::from_mut(&mut kernel.context), 0, 1).unwrap();
             let mark = lock.mark_type();
             let before = kernel.context.current_mark(mark);
-            assert_dependency(
-                shell_difference(
-                    &mut kernel,
-                    &mut input,
-                    shell,
-                    distance,
-                    1.0e-6,
-                    &mut fixture.context(),
-                ),
-                "SmBrep::CalculateBoundingBox",
-                "query.brep",
-            );
-            assert_eq!(input.as_ref().unwrap().key(), key);
+            assert_reaches_merge(shell_difference(
+                &mut kernel,
+                &mut input,
+                shell,
+                distance,
+                1.0e-6,
+                &mut fixture.context(),
+            ));
+            // (an inset keeps the original as the primary operand; an outset's original is
+            // the other operand, which a late engine error may already have consumed)
+            if distance < 0.0 {
+                assert_eq!(input.as_ref().unwrap().key(), key);
+            }
             assert!(fixture.records.contains_key(&key));
             assert!(kernel.context.is_mark_locked(mark));
             assert_eq!(kernel.context.current_mark(mark), before);
@@ -2782,21 +2794,22 @@ mod tests {
             let mut fixture = NotificationFixture::new(&original);
             let mut input = Some(original);
             let mut kernel = Kernel::default();
-            assert_dependency(
-                shell_difference(
-                    &mut kernel,
-                    &mut input,
-                    Brep::new(),
-                    distance,
-                    crate::math::EFF_ZERO * 0.5,
-                    &mut fixture.context(),
-                ),
-                "SmBrep::CalculateBoundingBox",
-                "query.brep",
+            let result = shell_difference(
+                &mut kernel,
+                &mut input,
+                Brep::new(),
+                distance,
+                crate::math::EFF_ZERO * 0.5,
+                &mut fixture.context(),
             );
-            assert_eq!(input.as_ref().unwrap().key(), original_key_value);
+            // ManifoldBoolean resets DoingBoolean only on success: its SER exits leave it
+            // set (SmMerge.cpp:2551, 3114, 4148)
+            assert_eq!(kernel.context.doing_boolean(), result.is_err());
+            assert_reaches_merge(result);
+            if distance < 0.0 {
+                assert_eq!(input.as_ref().unwrap().key(), original_key_value);
+            }
             assert!(fixture.records.contains_key(&original_key_value));
-            assert!(!kernel.context.doing_boolean());
         }
     }
 

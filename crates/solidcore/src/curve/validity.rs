@@ -9,6 +9,7 @@
 //! |------|----------|
 //! | [`Curve::check_reverse_direction`] | `SmBSplineCurve::PassesValidityCheck(SM_VC_REVERSE_DIRECTION)` |
 //! | [`Curve::has_internal_pole`] | `SmBSplineCurve.cpp`3701--3779; `SmCurve.h`744 |
+//! | [`Curve::assert_no_periodic_jump`] | `SmBSplineCurve.cpp`7623--7691 |
 //!
 //! Deviations: the native warning result is a bit mask; checked failures are Rust
 //! errors. The owned original curve is mutated, not a temporary approximation.
@@ -53,6 +54,44 @@ pub(crate) fn materialize_bspline(k: &Kernel, curve: &mut Curve) -> Result<()> {
 }
 
 impl Curve {
+    /// `SmBSplineCurve::AssertNoPeriodicJump` on a stored B-spline-derived UV
+    /// curve. Two-control-point curves retain the native exemption. This only
+    /// diagnoses jumps; it never unwraps UV coordinates or changes parameters.
+    pub fn assert_no_periodic_jump(
+        &mut self,
+        k: &Kernel,
+        closed_u: bool,
+        closed_v: bool,
+        domain: &crate::geom::extent2d::Extent2d,
+    ) -> Result<bool> {
+        bspline_base(self)?;
+        if self.dim() != 2 || (!closed_u && !closed_v) {
+            return Ok(true);
+        }
+        materialize_bspline(k, self)?;
+        let polygon = bspline_base(self)?.polygon(&self.natural_interval())?;
+        if polygon.len() == 2 {
+            return Ok(true);
+        }
+        let u = 0.9 * domain.x_length();
+        let v = 0.9 * domain.y_length();
+        let mut valid = true;
+        for pair in polygon.windows(2) {
+            let a = pair
+                .first()
+                .ok_or_else(|| SolidError::null_pointer("periodic jump polygon"))?;
+            let b = pair
+                .get(1)
+                .ok_or_else(|| SolidError::null_pointer("periodic jump polygon"))?;
+            if closed_u && (b.x - a.x).abs() >= u {
+                valid = false;
+            }
+            if closed_v && (b.y - a.y).abs() >= v {
+                valid = false;
+            }
+        }
+        Ok(valid)
+    }
     /// Native `SmBSplineCurve::HasInternalPole`: any active degree-plus-one
     /// coincident control-point sequence, except a wholly degenerate curve.
     /// Missing stored NURB returns false; the query never materializes or repairs.
@@ -154,5 +193,52 @@ impl Curve {
             _ => return Ok(0),
         };
         base.get_or_create_gw_nurb()?.end_reversal(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::extent2d::Extent2d;
+    use crate::math::Vec3;
+    use crate::nurbs::{
+        crv_basic::Curve as Nurb,
+        math::{CPoint, NOW, NOZ},
+    };
+
+    #[test]
+    fn periodic_jump_retains_inclusive_boundary_and_two_point_exemption() {
+        let k = Kernel::default();
+        let domain = Extent2d::from_bounds(0., 0., 1., 1.);
+        for (middle, expected) in [(0.9, false), (f64::from_bits(0.9_f64.to_bits() - 1), true)] {
+            let nurb = Nurb::new(
+                vec![
+                    CPoint::new(0., 0., NOZ, NOW),
+                    CPoint::new(middle, 0., NOZ, NOW),
+                    CPoint::new(1., 0., NOZ, NOW),
+                ],
+                1,
+                vec![0., 0., 0.5, 1., 1.],
+            )
+            .unwrap();
+            let mut c = Curve::from(BSplineCurve::from_nurb(nurb, 2, true));
+            assert_eq!(
+                c.assert_no_periodic_jump(&k, true, false, &domain).unwrap(),
+                expected
+            );
+        }
+        let mut line = Curve::from(crate::curve::line::Line::from_points(
+            Vec3::ZERO,
+            Vec3::new(100., 100., 0.),
+            2,
+        ));
+        assert!(line
+            .assert_no_periodic_jump(&k, false, false, &domain)
+            .unwrap());
+        assert!(bspline_base(&line).unwrap().gw_nurb().is_none());
+        assert!(line
+            .assert_no_periodic_jump(&k, true, true, &domain)
+            .unwrap());
+        assert!(bspline_base(&line).unwrap().gw_nurb().is_some());
     }
 }

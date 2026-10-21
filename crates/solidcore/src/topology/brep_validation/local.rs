@@ -83,14 +83,15 @@ pub(super) fn walk_root(
     for loop_ in loops {
         valid &= super::assert_loop(k, b, loop_, options, report.reports.as_deref_mut())?;
     }
-    for (nonempty, symbol) in [
-        (!edges.is_empty(), "SmEdge::AssertValid"),
-        (!vertices.is_empty(), "SmVertex::AssertValid"),
-    ] {
-        if nonempty {
-            // UNPORTED(fork.topology_validation): remaining local validators.
-            return Err(SolidError::unported(symbol, "fork.topology_validation"));
-        }
+    for edge in edges {
+        valid &= super::assert_edge(k, b, edge, options, report.reports.as_deref_mut())?;
+    }
+    if !vertices.is_empty() {
+        // UNPORTED(fork.topology_validation): remaining Vertex validator.
+        return Err(SolidError::unported(
+            "SmVertex::AssertValid",
+            "fork.topology_validation",
+        ));
     }
     Ok(valid)
 }

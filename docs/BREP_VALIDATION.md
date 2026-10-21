@@ -54,12 +54,12 @@ The ordered root implementation still reaches missing operations:
 - Ray-based `IsInnerShellOf` and complete coincidence detection.
 - The root `AssertSubTopology` branch now collects the actual stored lists and
   face-derived loops, then runs Region, Shell, Face and Loop checks in native
-  order. Edge/Vertex local validators and the non-root `GetSubTopology` branch
+  order, followed by the real Edge/Edgeuse calls. Vertex validation and the non-root `GetSubTopology` branch
   remain explicit missing operations. Face execution now includes Plane and
   BSplineSurface assertions; other concrete surface subclasses and periodic
   seam classification remain required.
-- Underlying geometric paths such as a repeated gap check constructing a
-  `CrvOnSurf` over an analytic plane, where concrete surface dispatch is missing.
+- Other concrete curve/surface assertion bodies and unavailable geometric
+  dependencies, together with live shared cache registration/checkout identity.
 
 Accordingly a root-only no-walk success establishes only its selected root and
 underlying checks. A walk encountering a missing descendant or selected missing
@@ -285,7 +285,8 @@ query and the face-or-wire attachment test. It ignores walk as the source does.
 Disabled fresh-gap and broad sector tests stay disabled. Checked arena failures
 and missing dependencies propagate; they cannot yield a complete validity result.
 The Edge/Vertex base membership adapters do not imply their full local validators
-are implemented. Root traversal still stops at the Edge/Vertex/curve dependencies.
+are implemented. Root traversal now executes Edge/Edgeuse and stops at Vertex
+validation on the qualified planar graph; other geometry can stop earlier.
 
 The native observer uses public synthetic Plane, rotated Plane and bilinear
 surface receivers, all ownership flags, copies, identity/rotation/scales, failed
@@ -349,11 +350,60 @@ Shared curve materialization uses the actual owner and context, preserves
 existing representations, and serves both assertion and reverse-direction checks.
 Internal-pole queries never create a missing NURB; the native base `SmCurve`
 receivers retain their literal false default. Geometry attributes, warning-stream
-transport, other subclass assertions and complete Edge/Vertex validation remain
+transport, other subclass assertions and complete Vertex validation remain
 required SDK work.
 
 ```text
 cargo build --locked -p solidcore --example brep_curve_validation_probe
 python scripts/build_brep_constructor_reference.py --source <cpp-checkout> --sdk <release-sdk> --toolchain-env <msvc-env.json> --output bin/curve-validation-reference --probe curve_validation
 python scripts/brep_curve_validation_compare.py --cpp bin/curve-validation-reference/brep-curve_validation-reference.exe --rust bin/debug/examples/brep_curve_validation_probe.exe --receipt bin/brep-curve-validity.local.json
+```
+
+
+## Edge, edgeuse and pole/periodicity queries
+
+`assert_edge` follows `SmEdge.cpp`7480--7750 at maintained fork `d8ed45a`:
+owning base, curve/context/domain, the real curve and use assertions, length,
+level-two on-face form, alternating orientation, endpoint incidence/gaps and
+manifold/spine radial order. The native numeric-level behavior is retained:
+Given still executes rule13. Child calls keep the requested level but receive
+no parent's Given request array. Non-root walk remains an explicit dependency.
+Root walking now invokes these edge routines before reaching Vertex validation.
+
+`assert_edgeuse` retains optional context/type checks, the **own stored** UV
+owner/length/periodic/parameter rules, loop/wire membership, reciprocal corners,
+SAME-use radial/mate sector checks, the concrete UV assertion and the pole query.
+Its walk flag is ignored as native. Loop membership actually reports index14,
+despite the source comment calling it12. Duplicate diagnostics and owner
+parameters retain the existing AssertArray protocol. No check edits UV parameters,
+changes source geometry or relaxes a tolerance.
+
+`Curve::assert_no_periodic_jump` preserves the two-control-point exemption and
+inclusive `0.9 * domain length` boundary (`SmBSplineCurve.cpp`7623--7691).
+`edgeuse::validity::dog_leg_near_pole` follows `SmEdgeuse.cpp`3663--3895:
+it can borrow a mate's UV, returns the first polygon index, and retains both the
+intersector-approximation endpoint branch and the ordinary branch. The native
+ordinary branch overwrites its singularity direction with X for both U and V;
+that observable quirk is preserved, without presenting it as a mathematical rule.
+
+Gap calculation now preserves the native `BuildSampleSet -> GetKnots` lazy
+materialization on the actual owned curve (`SmGap.cpp`1730--1743 and
+`SmBSplineCurve.cpp`4075--4085). Existing stored NURBs are never regenerated.
+Binormal projection uses the real face-owned cache getter; cache construction may
+create other trims even for a 3D-only request. Missing geometry and inaccessible
+failed-binormal outputs still return explicit errors. Shared cache identity,
+registration, checkout, other subclass assertions and Vertex remain incomplete;
+a completed local comparison cannot qualify whole-model acceptance or import.
+
+The maintained comparison uses actual constructor-built lamina, two-face manifold,
+three-face spine and wire graphs; own/mate UV, all levels, single defects, repeats,
+report parameters, control-point materialization, gap-cache state and marks are
+compared. Independent binary64 endpoint equality/next-value tests supplement the
+SDK comparisons. The query matrix includes all four singular boundaries and the
+source's V-direction quirk. Native-unsafe graphs are not used as a validity oracle.
+
+```text
+cargo build --locked -p solidcore --example brep_validation_probe --example brep_edge_queries_probe
+python scripts/build_brep_constructor_reference.py --source <cpp-checkout> --sdk <release-sdk> --toolchain-env <msvc-env.json> --output bin/edge-queries-reference --probe edge_queries
+python scripts/brep_edge_validation_compare.py --cpp <validation-observer> --rust bin/debug/examples/brep_validation_probe.exe --queries-cpp bin/edge-queries-reference/brep-edge_queries-reference.exe --queries-rust bin/debug/examples/brep_edge_queries_probe.exe --receipt bin/brep-edge-validity.local.json
 ```

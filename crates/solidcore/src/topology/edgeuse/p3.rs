@@ -27,16 +27,12 @@
 //!   to the face; the port works on a copy of the face's surface whose owner is
 //!   cleared. `EvaluateBinormal` clears it only around `GlobalPointSolve` and
 //!   `IsOnSeam` (a copy there); every other surface call uses the face's surface as it
-//!   is. The surface cache flags `EvaluateBinormal` switches (`m_bPointTestEnabled`,
-//!   `m_bProcessBoundaryCurves`) have nothing to act on because the Rust surface
-//!   solvers build no surface cache. `EvaluateBinormal` first gets the surface cache of
-//!   the face's surface (`smsurf_GetSurfaceCache`), whose construction creates the UV
-//!   trim curves of the face's edge uses (`SmFace::CreateUVTrimCurves`). The Rust
-//!   trimmed surface cache holds its face as an opaque handle without the B-rep, so it
-//!   cannot make that call (a `justified:` stub, plan/findings.md `topology.face_p3`),
-//!   and the paths that reach the global point solve are deferred. The same side effect
-//!   makes `CreateUVTrimCurve` clean up a UV trim curve the cache attached; the clean-up
-//!   is kept.
+//!   is. The face-owned cache getter now receives the actual `Brep` and can create
+//!   UV trims as a side effect, including on a 3D-only binormal call. Its owning
+//!   cache lives through the solve. Global checkout/registration/reuse and full
+//!   cache-flag transport remain separate migration gaps; these local snapshots
+//!   do not establish shared cache identity. The solver's temporary owner rescue
+//!   still disables face-point testing as in the native routine.
 //! - **Out-params.** `CreateUVTrimCurve` returns a [`CreatedUvTrimCurve`]; its optional
 //!   `pdMaxDeviation` is `want_deviation`. `GetOrCreateUVTrimCurve` returns its status
 //!   as [`UvTrimCurveFetch::status`] (upstream's status can be a failure while the
@@ -61,8 +57,7 @@
 //!   it as upstream does. `NormalizedEvaluate` returns `SM_SUCCESS` for a point it
 //!   dropped to the surface even where upstream's trim curve was missing.
 //! - **Unported callees.** `SmSurface::DropCurve` (`intersect.surface_drop_lib_p3`),
-//!   `SmFace::CreateUVTrimCurves`
-//!   (`topology.face_p3`, through the face's surface cache) and the paths of
+//!   and the paths of
 //!   `SmSurface::DropPoint` / `LocalPointSolve` that reach `LocalPointSolve_1`
 //!   (`surface.surface_point_solve_p3`) return [`SolidError::Unported`];
 //!   `GlobalPointSolve` of a non-plane surface is `surface.surface_point_solve_p3`
@@ -275,20 +270,16 @@ fn status<T>(r: Result<T>) -> Result<Option<T>> {
     }
 }
 
-/// `smsurf_GetSurfaceCache(pSurface)` of the surface of a face (`NER`), as
-/// `EvaluateBinormal` calls it before clearing the surface's owner: the face's trimmed
-/// surface cache, whose construction attaches a UV trim curve to every edge use of the
-/// face (`SmFace::CreateUVTrimCurves`, `SmTrimSrfCache.cpp:209`). The Rust surface cache
-/// holds its face as an opaque handle without the B-rep, so it cannot make that call
-/// (`surface::trim_srf_cache`'s own `face_create_uv_trim_curves` stub); building the cache
-/// here without it would drop the side effect on the face's edge uses.
-fn face_surface_cache() -> Result<()> {
-    // UNPORTED(topology.face_p3): SmFace::CreateUVTrimCurves -- justified: findings.md topology.face_p3 "Stubs left for this unit"
-    // (through the trimmed surface cache of the face's surface, which has no B-rep handle)
-    Err(SolidError::unported(
-        "SmFace::CreateUVTrimCurves",
-        "topology.face_p3",
-    ))
+/// Bind the native surface-cache getter to the actual `Brep`. Construction may
+/// create the face's UV trims, including on a 3D-only binormal call. The owning
+/// slot stays alive through the solve; temporary owner rescue in `CreateUVTrimCurves`
+/// selects a plain cache on recursive evaluations instead of rebuilding trims.
+fn face_surface_cache(
+    k: &Kernel,
+    b: &mut Brep,
+    face: crate::topology::FaceId,
+) -> Result<crate::surface::cache_topology::OwnedSurfaceCache<crate::error::EntityRef>> {
+    crate::topology::surface_cache::get_face_surface_cache(k, b, face, None)
 }
 
 /// `pEdge->SetTolerance(tolerance)` (default arguments).
@@ -1928,9 +1919,9 @@ pub fn evaluate_binormal_uv(
 
         // get and lock the surface cache (of the face's surface: its owner is cleared
         // only below)
-        face_surface_cache()?;
+        let _cache = face_surface_cache(k, b, f)?;
 
-        // (the surface cache flags are not modelled; module docs). Use surface's
+        // Checkout-manager reuse remains separate migration work. Use surface's
         // domain instead of Face's domain.
         let srf_domain = surface.natural_uv_domain();
 

@@ -178,7 +178,7 @@ pub(super) fn validate_edge(k: &Kernel, b: &mut Brep, id: EdgeId, fix: bool) -> 
     Ok(())
 }
 
-fn borrowed_uv_copy(curve: &Curve) -> Result<Curve> {
+pub(super) fn borrowed_uv_copy(curve: &Curve) -> Result<Curve> {
     let copied = match curve.kind() {
         CurveKind::BSpline(c) => Curve::from(c.clone_exact()),
         CurveKind::Line(c) => {

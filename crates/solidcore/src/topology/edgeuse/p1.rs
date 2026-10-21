@@ -985,6 +985,18 @@ pub fn calc_max_edge_face_gap(
     if interval.min() == interval.max() {
         return Err(SolidError::sm_err(OP));
     }
+    // SmGap.cpp::BuildSampleSet (d8ed45a, 1730--1743) calls the virtual
+    // SmBSplineCurve::GetKnots, which creates the *owned* NURB lazily even
+    // for analytic subclasses. A borrowed Rust knot query otherwise creates
+    // only a temporary representation and loses this observable cache effect.
+    let curve = b
+        .edge_mut(e)?
+        .curve
+        .as_mut()
+        .ok_or_else(|| null("CalcMaxEdgeFaceGap: edge without curve"))?;
+    if curve.is_kind_of(crate::curve::curve::p2::BSPLINE_CURVE_TYPE) {
+        crate::curve::validity::materialize_bspline(k, curve)?;
+    }
     let sample = {
         let curve = b
             .edge(e)?

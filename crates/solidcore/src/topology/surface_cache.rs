@@ -85,6 +85,29 @@ pub(crate) fn working_surface_tolerance(k: &Kernel, b: &Brep, surface: &Surface)
     }
 }
 
+/// Native `GetNaturalUVDomain` on the actual stored surface. B-spline families
+/// lazily create a missing NURB; an evaluation copy would lose that effect.
+/// Existing definitions and UV parameterizations are retained.
+pub(crate) fn natural_domain_owned(
+    k: &Kernel,
+    b: &mut Brep,
+    id: FaceId,
+) -> Result<crate::geom::extent2d::Extent2d> {
+    use crate::surface::{surface::SurfaceKind, validity};
+    let s = b
+        .face_mut(id)?
+        .surface
+        .as_mut()
+        .ok_or_else(|| SolidError::null_pointer(OP))?;
+    if matches!(
+        s.kind(),
+        SurfaceKind::BSpline(_) | SurfaceKind::Plane(_) | SurfaceKind::SurfOfRevolution(_)
+    ) {
+        validity::materialize_bspline(k, s)?;
+    }
+    Ok(s.natural_uv_domain())
+}
+
 impl CacheTopology<EntityRef> for BrepSurfaceContext<'_> {
     fn face(&mut self, surface: &Surface) -> Result<Option<EntityRef>> {
         let Some(owner) = surface.face()? else {

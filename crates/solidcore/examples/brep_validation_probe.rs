@@ -114,7 +114,8 @@ fn run() -> Result<Value> {
         || mode.starts_with("assert_shell")
         || mode.starts_with("assert_face")
         || mode.starts_with("assert_loop")
-        || mode.starts_with("assert_vertexuse");
+        || mode.starts_with("assert_vertexuse")
+        || mode.starts_with("assert_edge");
     let side_mode = mode.starts_with("edge_side") || mode.starts_with("loop_side");
     let mut k = Kernel::default();
     let mut builder = BrepConstructor::new()?;
@@ -256,6 +257,46 @@ fn run() -> Result<Value> {
         None
     };
     builder.end_face()?;
+    if mode.contains("_manifold") || mode.contains("_spine") {
+        for tip in [Vec3::Z, -Vec3::Y]
+            .into_iter()
+            .take(if mode.contains("_spine") { 2 } else { 1 })
+        {
+            builder.start_face(OrientType::Same)?;
+            builder.set_face_surface(
+                Plane::new(Vec3::X, -Vec3::X, tip, Vec2::new(1., 1.), &domain).into(),
+                domain,
+            )?;
+            builder.start_loop(OrientType::Same)?;
+            let tip_vertex = builder.start_vertex_of_loop(tip)?;
+            let vv = [*at(&vertices, 1)?, *at(&vertices, 0)?, tip_vertex];
+            let pp = [Vec3::X, Vec3::ZERO, tip];
+            for j in 0..3 {
+                builder.start_edge(
+                    &k,
+                    if j == 0 {
+                        OrientType::Opposite
+                    } else {
+                        OrientType::Same
+                    },
+                    if j == 0 { Some(*at(&edges, 0)?) } else { None },
+                    Some(*at(&vv, j)?),
+                    Some(*at(&vv, (j + 1) % 3)?),
+                )?;
+                if j != 0 {
+                    builder.set_edge_curve(
+                        &k,
+                        Line::from_points(*at(&pp, j)?, *at(&pp, (j + 1) % 3)?, 3).into(),
+                        false,
+                    )?;
+                    builder.set_limits(&k, VertexNode::Parameter(0.), VertexNode::Parameter(1.))?;
+                }
+                builder.end_edge()?;
+            }
+            builder.end_loop()?;
+            builder.end_face()?;
+        }
+    }
     builder.end_shell(&mut k, false)?;
     let mut b = builder.finish()?;
     if defect.starts_with("bspline_") {
@@ -283,7 +324,7 @@ fn run() -> Result<Value> {
     let mut target_shell = outer;
     if (mode.starts_with("assert_region")
         || mode.starts_with("assert_shell")
-        || (mode.starts_with("assert_vertexuse")
+        || ((mode.starts_with("assert_vertexuse") || mode.starts_with("assert_edge"))
             && (mode.contains("_wire") || mode.contains("_shellvertex"))))
         && (mode.contains("_vertex") || mode.contains("_wire"))
     {
@@ -291,8 +332,20 @@ fn run() -> Result<Value> {
             solidcore::topology::brep::p2::make_shell_vertex_topology(&mut b, None)?;
         target_shell = shell;
         if mode.contains("_wire") {
-            let (_, end) =
+            let (wire, end) =
                 solidcore::topology::brep::p2::make_edge_vertex_topology(&mut b, None, vertex)?;
+            if mode.starts_with("assert_edge") {
+                b.vertex_mut(vertex)?.point = Vec3::ZERO;
+                b.vertex_mut(end)?.point = Vec3::X;
+                let mut c = Curve::from(Line::from_points(Vec3::ZERO, Vec3::X, 3));
+                c.set_owner(
+                    Some(arena_identity(CacheObject::Edge(wire))),
+                    Some(arena_identity(CacheObject::Brep)),
+                );
+                b.edge_mut(wire)?.curve = Some(c);
+                b.edge_mut(wire)?.interval =
+                    solidcore::geom::extent1d::Extent1d::from_min_max(0., 1.);
+            }
             if mode.contains("_chain") || mode.contains("_branch") {
                 solidcore::topology::brep::p2::make_edge_vertex_topology(&mut b, None, end)?;
             }
@@ -334,7 +387,7 @@ fn run() -> Result<Value> {
     } else {
         vu
     };
-    if side_mode && mode.contains("_uv") {
+    if (side_mode || mode.starts_with("assert_edge")) && mode.contains("_uv") {
         for eu in solidcore::topology::edgeuse::p1::loopuse_edgeuses(&b, lu)? {
             solidcore::topology::edgeuse::p3::get_or_create_uv_trim_curve(
                 &k, &mut b, eu, false, false, true,
@@ -418,6 +471,59 @@ fn run() -> Result<Value> {
             "lu_no_faceuse" => b.loopuse_mut(lu)?.faceuse = None,
             "lu_no_start" => b.loopuse_mut(lu)?.start = LoopuseStart::Edgeuse(None),
             "edge_no_curve" => b.edge_mut(*at(&edges, 0)?)?.curve = None,
+            "curve_no_owner" => {
+                b.edge_mut(*at(&edges, 0)?)?
+                    .curve
+                    .as_mut()
+                    .ok_or("curve")?
+                    .set_owner(None, None);
+            }
+            "edge_interval_short" | "edge_interval_outside" => {
+                b.edge_mut(*at(&edges, 0)?)?.interval = if name == "edge_interval_short" {
+                    solidcore::geom::extent1d::Extent1d::from_min_max(0., 0.5)
+                } else {
+                    solidcore::geom::extent1d::Extent1d::from_min_max(-0.1, 1.1)
+                };
+            }
+            "edge_oversized_tolerance" => b.edge_mut(*at(&edges, 0)?)?.tolerance = 2.,
+            "eu_wrong_orientation" => b.edgeuse_mut(first)?.orientation = OrientType::Opposite,
+            "eu_vertex_backpointer" => {
+                let mate = require(solidcore::topology::edgeuse::p1::mate(&b, first)?)?;
+                let vu = require(b.edgeuse(first)?.vertexuse)?;
+                b.vertexuse_mut(vu)?.owner = VertexuseOwner::Edgeuse(Some(mate));
+            }
+            "uv_no_owner" => {
+                b.edgeuse_mut(first)?
+                    .uv_trim_curve
+                    .as_mut()
+                    .ok_or("UV fixture")?
+                    .set_owner(None, None);
+            }
+            "uv_zero_length" | "uv_bad_dimension" | "uv_interval" => {
+                let mut c = Curve::from(Line::from_points(
+                    Vec3::ZERO,
+                    if name == "uv_zero_length" {
+                        Vec3::ZERO
+                    } else {
+                        Vec3::X
+                    },
+                    if name == "uv_bad_dimension" { 3 } else { 2 },
+                ));
+                if name == "uv_interval" {
+                    c.edit_parameterization(
+                        &k,
+                        &solidcore::geom::extent1d::Extent1d::from_min_max(0., 2.),
+                    )?;
+                }
+                c.set_owner(
+                    Some(solidcore::geom::object::ObjectRef {
+                        type_code: solidcore::geom::assert_array::labels::EDGEUSE_TYPE,
+                        key: solidcore::geom::attribute::ObjectKey(u64::from(first.index())),
+                    }),
+                    None,
+                );
+                b.edgeuse_mut(first)?.uv_trim_curve = Some(c);
+            }
             "eu_no_edge" => b.edgeuse_mut(first)?.edge = None,
             "eu_no_vertexuse" => b.edgeuse_mut(first)?.vertexuse = None,
             "eu_no_owner" => b.edgeuse_mut(first)?.owner = EdgeuseOwner::Loopuse(None),
@@ -559,6 +665,37 @@ fn run() -> Result<Value> {
                 )
             } else if mode.starts_with("assert_vertexuse") {
                 validation::assert_vertexuse(&mut k, &mut b, target_vu, options, reports)
+            } else if mode.starts_with("assert_edgeuse") {
+                let first = if mode.contains("_wire") {
+                    let ShellMembers::Edgeuse(use_) = b.shell(target_shell)?.members else {
+                        return Err(SolidError::null_pointer("wire fixture"));
+                    };
+                    use_
+                } else {
+                    first
+                };
+                let use_ = if mode.contains("_mate") {
+                    solidcore::topology::edgeuse::p1::mate(&b, first)?
+                        .ok_or_else(|| SolidError::null_pointer("fixture mate"))?
+                } else {
+                    first
+                };
+                validation::assert_edgeuse(&mut k, &mut b, use_, options, reports)
+            } else if mode.starts_with("assert_edge") {
+                let edge = if mode.contains("_wire") {
+                    let ShellMembers::Edgeuse(use_) = b.shell(target_shell)?.members else {
+                        return Err(SolidError::null_pointer("wire fixture"));
+                    };
+                    b.edgeuse(use_)?
+                        .edge
+                        .ok_or_else(|| SolidError::null_pointer("wire fixture edge"))?
+                } else {
+                    edges
+                        .first()
+                        .copied()
+                        .ok_or_else(|| SolidError::null_pointer("fixture edge"))?
+                };
+                validation::assert_edge(&mut k, &mut b, edge, options, reports)
             } else {
                 validation::assert_loop(&mut k, &mut b, target_loop, options, reports)
             };
@@ -873,7 +1010,7 @@ fn run() -> Result<Value> {
         .reports()
         .iter()
         .map(|r| {
-            json!([
+            let mut row = json!([
                 r.reporting_type,
                 r.list_index,
                 r.test_index,
@@ -885,7 +1022,13 @@ fn run() -> Result<Value> {
                 r.tol3d,
                 r.value,
                 r.owner_type_string
-            ])
+            ]);
+            if mode.starts_with("assert_edge") {
+                if let Some(row) = row.as_array_mut() {
+                    row.push(json!([r.owner_param.x, r.owner_param.y]));
+                }
+            }
+            row
         })
         .collect();
     let mut result = json!({"status":status,"last_add":reports.last_add(),"reports":rows});
@@ -1002,6 +1145,32 @@ fn run() -> Result<Value> {
                 .map(|(mark, before)| k.context.current_mark(*mark) - before)
                 .collect::<Vec<_>>()),
         );
+    }
+    if mode.starts_with("assert_edge") {
+        let mut uses = Vec::new();
+        for edge in b.edge_list() {
+            uses.extend(b.edge(*edge)?.edgeuses.iter().copied());
+        }
+        uses.sort_by_key(|use_| use_.index());
+        let states = uses
+            .into_iter()
+            .map(|id| {
+                let use_ = b.edgeuse(id)?;
+                let uv = use_.uv_trim_curve.as_ref();
+                let nurb = uv.is_some_and(|uv| match uv.kind() {
+                    CurveKind::BSpline(c) => c.gw_nurb().is_some(),
+                    CurveKind::Line(c) => c.base().gw_nurb().is_some(),
+                    _ => false,
+                });
+                Ok(json!([
+                    id.index(),
+                    uv.is_some(),
+                    nurb,
+                    use_.max_edge_face_gap.is_init()
+                ]))
+            })
+            .collect::<solidcore::Result<Vec<_>>>()?;
+        output.insert("use_state".into(), json!(states));
     }
     if let Some(side) = side_output {
         output.insert("side".into(), side);

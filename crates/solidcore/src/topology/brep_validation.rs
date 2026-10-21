@@ -24,6 +24,7 @@ mod assertions;
 #[cfg(test)]
 mod curve_tests;
 mod curves;
+mod edges;
 #[cfg(test)]
 mod face_loop_tests;
 mod face_tests;
@@ -42,6 +43,7 @@ mod uses;
 
 pub use assertions::{assert_valid, AssertValidOptions};
 pub use curves::{assert_edge_curve, assert_uv_curve};
+pub use edges::{assert_edge, assert_edgeuse};
 pub use faces::assert_face;
 pub use local::{assert_region, assert_shell};
 pub use loops::assert_loop;

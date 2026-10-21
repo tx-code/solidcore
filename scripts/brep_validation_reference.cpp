@@ -67,9 +67,11 @@ FIELD(LuMate, SmLoopuse, m_pLUMate, SmLoopuse *)
 FIELD(LoopStart, SmLoopuse, m_pEUorVU, SmTopology *)
 FIELD(Curve, SmEdge, m_pCurve, SmCurve *)
 FIELD(VertexUse, SmEdgeuse, m_pVU, SmVertexuse *)
+FIELD(UvCurve, SmEdgeuse, m_pUVTrimCurve, SmBSplineCurve *)
 FIELD(EuOwner, SmEdgeuse, m_pSorLU, SmTopology *)
 FIELD(Ccw, SmEdgeuse, m_pCCW, SmEdgeuse *)
 FIELD(Cw, SmEdgeuse, m_pCW, SmEdgeuse *)
+FIELD(EuOrientation, SmEdgeuse, m_eOrientation, SmOrientType)
 FIELD(VuOwner, SmVertexuse, m_pSorLUorEU, SmTopology *)
 FIELD(FuOrientation, SmFaceuse, m_eOrientation, SmOrientType)
 FIELD(LuOrientation, SmLoopuse, m_eOrientation, SmOrientType)
@@ -167,7 +169,7 @@ int main(int argc, char **argv) {
         const bool cache_mode=mode.starts_with("cache_");
         const bool local_mode=mode=="local_bsp";
         const bool root_mode=mode=="assert_root"||mode=="assert_root_walk";
-        const bool topology_mode=mode.starts_with("assert_region")||mode.starts_with("assert_shell")||mode.starts_with("assert_face")||mode.starts_with("assert_loop")||mode.starts_with("assert_vertexuse");
+        const bool topology_mode=mode.starts_with("assert_region")||mode.starts_with("assert_shell")||mode.starts_with("assert_face")||mode.starts_with("assert_loop")||mode.starts_with("assert_vertexuse")||mode.starts_with("assert_edge");
         const bool side_mode=mode.starts_with("edge_side")||mode.starts_with("loop_side");
         SmContext context;
         SmBrepConstructor builder;
@@ -193,8 +195,21 @@ int main(int argc, char **argv) {
         std::array<SmVertex *, 3> vertices;
         for (size_t i = 0; i < 3; ++i)
             vertices[i] = builder.StartVertexOfLoop(points[i]);
+        // Capture creation identities before later faces reorder radial lists.
+        // Observer IDs describe arenas, never transient list positions.
+        std::map<SmEdgeuse*,unsigned> allocated_uses;
+        auto capture_uses=[&](SmEdge* edge){SmTArray<SmEdgeuse*> uses;edge->GetEdgeuses(uses);
+            std::vector<SmEdgeuse*> fresh;
+            for(ULONG i=0;i<uses.GetSize();++i)if(!allocated_uses.contains(uses[i]))fresh.push_back(uses[i]);
+            // The Rust arena creates SAME then OPPOSITE. A reused edge's radial
+            // list can encounter the new OPPOSITE first; it is not creation order.
+            std::sort(fresh.begin(),fresh.end(),[](auto a,auto b){return a->GetOrientation()==SM_OT_SAME&&b->GetOrientation()!=SM_OT_SAME;});
+            for(auto use:fresh)allocated_uses[use]=unsigned(allocated_uses.size());};
+        SmEdge* shared_edge=nullptr;
         for (size_t i = 0; i < 3; ++i) {
-            if (!builder.StartEdge(SM_OT_SAME, nullptr, vertices[i], vertices[(i + 1) % 3]))
+            auto created_edge=builder.StartEdge(SM_OT_SAME, nullptr, vertices[i], vertices[(i + 1) % 3]);
+            if(i==0)shared_edge=created_edge;
+            if (!created_edge)
                 throw std::runtime_error("edge");
             if (i == 0 && defect.starts_with("reverse_")) {
                 gw_CPOINT cp[5];
@@ -230,6 +245,7 @@ int main(int argc, char **argv) {
                     new (&context) SmLine(points[i], points[(i + 1) % 3], 3, &context), FALSE));
             require(builder.SetLimits(SmVertexNode(0.), SmVertexNode(1.)));
             require(builder.EndEdge());
+            capture_uses(created_edge);
         }
         require(builder.EndLoop());
         if(mode.find("_hole")!=std::string::npos){
@@ -252,15 +268,40 @@ int main(int argc, char **argv) {
         SmLoop *vertex_loop=nullptr;
         if(mode.find("vertexloop")!=std::string::npos)vertex_loop=builder.StartAndEndSingleVertexLoop(SmPoint3d(.2,.2,0));
         require(builder.EndFace());
+        if(mode.find("_manifold")!=std::string::npos||mode.find("_spine")!=std::string::npos){
+            const int count=mode.find("_spine")!=std::string::npos?2:1;
+            for(int n=0;n<count;++n){
+                SmPoint3d tip=n==0?SmPoint3d(0,0,1):SmPoint3d(0,-1,0);
+                builder.StartFace(SM_OT_SAME);
+                require(builder.SetFaceSurface(new(&context)SmPlane(points[1],SmVector3d(-1,0,0),tip,SmVector2d(1,1),domain,&context),domain));
+                builder.StartLoop(SM_OT_SAME);
+                auto vertex=builder.StartVertexOfLoop(tip);
+                SmVertex* vv[]={vertices[1],vertices[0],vertex};
+                SmPoint3d pp[]={points[1],points[0],tip};
+                for(size_t j=0;j<3;++j){
+                    auto edge=builder.StartEdge(j==0?SM_OT_OPPOSITE:SM_OT_SAME,j==0?shared_edge:nullptr,vv[j],vv[(j+1)%3]);
+                    if(!edge)throw std::runtime_error("radial edge");
+                    if(j!=0){require(builder.SetEdgeCurve(new(&context)SmLine(pp[j],pp[(j+1)%3],3,&context),FALSE));
+                        require(builder.SetLimits(SmVertexNode(0.),SmVertexNode(1.)));}
+                    require(builder.EndEdge());capture_uses(edge);
+                }
+                require(builder.EndLoop());require(builder.EndFace());
+            }
+        }
         require(builder.EndShell(FALSE));
         require(builder.EndBrep());
         SmShell *target_shell=outer;
         if((mode.starts_with("assert_region")||mode.starts_with("assert_shell")||
-            (mode.starts_with("assert_vertexuse")&&(mode.find("_wire")!=std::string::npos||mode.find("_shellvertex")!=std::string::npos))) &&
+            ((mode.starts_with("assert_vertexuse")||mode.starts_with("assert_edge"))&&(mode.find("_wire")!=std::string::npos||mode.find("_shellvertex")!=std::string::npos))) &&
             (mode.find("_vertex")!=std::string::npos || mode.find("_wire")!=std::string::npos)) {
             SmVertex *vertex=nullptr;require(b->MakeShellVertexTopology(nullptr,target_shell,vertex));
             if(mode.find("_wire")!=std::string::npos) {
                 SmEdge *wire=nullptr;SmVertex *end=nullptr;require(b->MakeEdgeVertexTopology(nullptr,vertex,wire,end));
+                if(mode.starts_with("assert_edge")){
+                    vertex->SetPoint(SmPoint3d(0,0,0));end->SetPoint(SmPoint3d(1,0,0));
+                    wire->SetCurve(new(&context)SmLine(vertex->GetPoint(),end->GetPoint(),3,&context));
+                    wire->SetInterval(SmExtent1d(0,1));
+                }
                 if(mode.find("_chain")!=std::string::npos || mode.find("_branch")!=std::string::npos) {
                     SmVertex *tip=nullptr;require(b->MakeEdgeVertexTopology(nullptr,end,wire,tip));
                 }
@@ -309,14 +350,21 @@ int main(int argc, char **argv) {
         if(mode.find("_hole")!=std::string::npos){SmTArray<SmLoop*> all;f->GetLoops(all);
             for(ULONG i=1;i<all.GetSize();++i){record(keys,all[i],i);auto use=all[i]->GetLoopuse();record(keys,use,2*i);record(keys,use->GetOtherLoopuse(),2*i+1);}}
         if(vertex_loop){record(keys,vertex_loop,1);record(keys,target_lu,2);record(keys,target_mate_lu,3);}
+        if(mode.find("_manifold")!=std::string::npos||mode.find("_spine")!=std::string::npos){
+            SmTArray<SmFace*> faces;b->GetFaces(faces);
+            for(ULONG i=1;i<faces.GetSize();++i){auto face=faces[i];record(keys,face,i);keys[face->GetSurface()]=(1ULL<<63)|i;
+                auto up=face->GetUpwardFaceuse();record(keys,up,2*i);record(keys,up->GetMate(),2*i+1);
+                SmTArray<SmLoop*> loops;face->GetLoops(loops);auto l=loops[0];record(keys,l,i);
+                auto use=l->GetLoopuse();record(keys,use,2*i);record(keys,use->GetOtherLoopuse(),2*i+1);}
+        }
         unsigned use_index = 0, vertexuse_index = 0;
         for (ULONG i = 0; i < edges.GetSize(); ++i) {
             record(keys, edges[i], i);
             SmTArray<SmEdgeuse *> uses;
             edges[i]->GetEdgeuses(uses);
             for (ULONG j = 0; j < uses.GetSize(); ++j) {
-                record(keys, uses[j], use_index++);
-                record(keys, uses[j]->GetVertexuse(), vertexuse_index++);
+                record(keys, uses[j], mode.find("_manifold")!=std::string::npos||mode.find("_spine")!=std::string::npos?allocated_uses.at(uses[j]):use_index++);
+                record(keys, uses[j]->GetVertexuse(), mode.find("_manifold")!=std::string::npos||mode.find("_spine")!=std::string::npos?allocated_uses.at(uses[j]):vertexuse_index++);
             }
         }
         for (ULONG i = 0; i < vs.GetSize(); ++i){
@@ -324,7 +372,7 @@ int main(int argc, char **argv) {
             SmTArray<SmVertexuse*> uses;vs[i]->GetVertexuses(uses);
             for(ULONG j=0;j<uses.GetSize();++j)if(!keys.contains(uses[j]))record(keys,uses[j],vertexuse_index++);
         }
-        if(side_mode && mode.find("_uv")!=std::string::npos){SmTArray<SmEdgeuse*> uses;lu->GetEdgeuses(uses);
+        if((side_mode||mode.starts_with("assert_edge")) && mode.find("_uv")!=std::string::npos){SmTArray<SmEdgeuse*> uses;lu->GetEdgeuses(uses);
             for(ULONG i=0;i<uses.GetSize();++i){SmBSplineCurve *curve=nullptr;require(uses[i]->GetOrCreateUVTrimCurve(curve));}}
         const SmMarkType mark_types[]={SM_MT_MARK,SM_MT_MARK2,SM_MT_MARK3,SM_MT_MARKIO,SM_MT_MARKASSERT};
         std::array<ULONG,5> before_marks{};
@@ -392,6 +440,22 @@ int main(int argc, char **argv) {
                 restore.clear(field<LoopStart>(lu));
             else if (name == "edge_no_curve")
                 restore.clear(field<Curve>(edges[0]));
+            else if(name=="curve_no_owner"){
+                auto c=edges[0]->GetCurve();auto old=c->GetOwner();restore.actions.emplace_back([c,old]{c->SetOwner(old);});c->SetOwner(nullptr);
+            }
+            else if(name=="edge_interval_short"||name=="edge_interval_outside")edges[0]->SetInterval(name=="edge_interval_short"?SmExtent1d(0,.5):SmExtent1d(-.1,1.1));
+            else if(name=="edge_oversized_tolerance")field<EdgeTol>(edges[0])=2.;
+            else if(name=="eu_wrong_orientation")field<EuOrientation>(first)=SM_OT_OPPOSITE;
+            else if(name=="eu_vertex_backpointer")restore.assign(field<VuOwner>(first->GetVertexuse()),static_cast<SmTopology*>(first->GetMate()));
+            else if(name=="uv_no_owner"){
+                auto c=field<UvCurve>(first);if(!c)throw std::runtime_error("missing UV fixture");auto old=c->GetOwner();restore.actions.emplace_back([c,old]{c->SetOwner(old);});c->SetOwner(nullptr);
+            }
+            else if(name=="uv_zero_length"||name=="uv_bad_dimension"||name=="uv_interval"){
+                auto old=field<UvCurve>(first);if(!old)throw std::runtime_error("missing UV fixture");
+                auto c=new(&context)SmLine(SmPoint3d(0,0,0),SmPoint3d(name=="uv_zero_length"?0.:1.,0,0),name=="uv_bad_dimension"?3:2,&context);
+                if(name=="uv_interval")require(c->EditParameterization(SmExtent1d(0,2)));
+                c->SetOwner(first);field<UvCurve>(first)=c;restore.actions.emplace_back([first,old,c]{field<UvCurve>(first)=old;delete c;});
+            }
             else if (name == "eu_no_edge")
                 restore.clear(field<Owner>(first));
             else if (name == "eu_no_vertexuse")
@@ -504,6 +568,8 @@ int main(int argc, char **argv) {
                 if(mode.starts_with("assert_face"))return f->AssertValid(target,level,walk,req);
                 if(mode.starts_with("assert_loopuse"))return (mode.find("_mate")!=std::string::npos?target_mate_lu:target_lu)->AssertValid(target,level,walk,req);
                 if(mode.starts_with("assert_vertexuse"))return target_vu->AssertValid(target,level,walk,req);
+                if(mode.starts_with("assert_edgeuse")){auto use=mode.find("_wire")!=std::string::npos?static_cast<SmEdgeuse*>(field<List>(target_shell)):first;return (mode.find("_mate")!=std::string::npos?use->GetMate():use)->AssertValid(target,level,walk,req);}
+                if(mode.starts_with("assert_edge")){auto edge=mode.find("_wire")!=std::string::npos?static_cast<SmEdgeuse*>(field<List>(target_shell))->GetEdge():edges[0];return edge->AssertValid(target,level,walk,req);}
                 return target_loop->AssertValid(target,level,walk,req);};
             root_valid=call();if(selection=="repeat")root_valid=call();
         }
@@ -543,6 +609,11 @@ int main(int argc, char **argv) {
         };
         if(cache_mode){obtain_cache();if(selection=="repeat")obtain_cache();}
 
+        for(ULONG i=0;i<edges.GetSize();++i){
+            if(auto c=edges[i]->GetCurve())keys[c]=(1ULL<<62)|i;
+            SmTArray<SmEdgeuse*> uses;edges[i]->GetEdgeuses(uses);
+            for(ULONG j=0;j<uses.GetSize();++j)if(auto c=field<UvCurve>(uses[j]))keys[c]=(3ULL<<62)|(keys.at(uses[j])&0xffffffffULL);
+        }
         std::cout << "{\"status\":" << status
                   << ",\"last_add\":" << (reports.GetLastAdd() ? "true" : "false")
                   << ",\"reports\":[";
@@ -556,7 +627,9 @@ int main(int argc, char **argv) {
             quote(r->m_pName);
             std::cout << ',';
             quote(r->m_pMessage);
-            std::cout << ',' << r->m_sTol3d << ',' << r->m_dValue << ',';quote(r->m_sOwnerTypeString);std::cout<<']';
+            std::cout << ',' << r->m_sTol3d << ',' << r->m_dValue << ',';quote(r->m_sOwnerTypeString);
+            if(mode.starts_with("assert_edge"))std::cout<<",["<<r->m_sOwnerParam.x<<','<<r->m_sOwnerParam.y<<']';
+            std::cout<<']';
         }
         std::cout << "]";
         if (argc == 5 && !tolerance && !box_mode) {
@@ -602,6 +675,15 @@ int main(int argc, char **argv) {
             for(size_t j=0;j<observed.size();++j){if(j)std::cout<<',';std::cout<<'[';
                 for(size_t i=0;i<5;++i){if(i)std::cout<<',';std::cout<<(observed[j]->GetMark(mark_types[i])==context.GetCurrentMark(mark_types[i])?"true":"false");}
                 std::cout<<']';}std::cout<<']';
+        }
+        if(mode.starts_with("assert_edge")){
+            std::vector<SmEdgeuse*> uses;
+            for(ULONG i=0;i<edges.GetSize();++i){SmTArray<SmEdgeuse*> all;edges[i]->GetEdgeuses(all);for(ULONG j=0;j<all.GetSize();++j)uses.push_back(all[j]);}
+            std::sort(uses.begin(),uses.end(),[&](auto a,auto b){return keys.at(a)<keys.at(b);});
+            std::cout<<",\"use_state\":[";
+            for(size_t i=0;i<uses.size();++i){if(i)std::cout<<',';auto use=uses[i];auto uv=field<UvCurve>(use);
+                std::cout<<'['<<(keys.at(use)&0xffffffffULL)<<','<<(uv?"true":"false")<<','<<(uv&&uv->GetGwNurbPointer()?"true":"false")<<','<<(use->IsMaxEdgeFaceGapInit()?"true":"false")<<']';}
+            std::cout<<']';
         }
         if(side_mode)std::cout<<",\"side\":["<<(side_inside?"true":"false")<<','<<(side_boundary?"true":"false")<<','<<side_index<<']';
         if(root_mode)std::cout<<",\"root_valid\":"<<(root_valid?"true":"false");

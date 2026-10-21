@@ -398,7 +398,7 @@ mod tests {
         assert!(matches!(
             error,
             SolidError::Unported {
-                upstream: "SmEdge::AssertValid",
+                upstream: "SmVertex::AssertValid",
                 ..
             }
         ));

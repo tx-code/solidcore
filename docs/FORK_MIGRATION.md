@@ -174,3 +174,13 @@ including calls without an output handle. This does not complete Edge/Vertex
 assertions or other concrete curve subclasses. Portable software interval
 arithmetic covers the bounded Bezier proof; nondefault native floating-control
 and cache-side-effect parity still need separate qualification.
+
+
+The actual Edge/Edgeuse local assertion bodies now follow the stored curve/use,
+UV ownership/parameterization, endpoint-gap, manifold/spine sector and radial
+ordering paths. Root descendants invoke them before the remaining Vertex gate.
+Periodic-jump and near-pole polygon queries execute over original definitions;
+owned gap sampling and binormal cache creation retain their lazy side effects.
+Source-native unsafe graphs and unresolved geometry/non-root traversal calls
+remain separate evidence categories. See `BREP_VALIDATION.md`; this does not
+complete native import, topology validation or the full SDK migration.

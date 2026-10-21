@@ -150,3 +150,46 @@ fn general_source_checks_cannot_be_disabled_or_surface_roles_promoted() {
     );
     assert!(matches!(result, Err(Error::Source { .. })));
 }
+
+#[test]
+fn failed_development_unit_proof_keeps_the_original_marker_diagnostic_for_native_callers() {
+    let data = include_str!("../../solidcore-step/tests/fixtures/material-box.step")
+        .replace("AP203_CONFIGURATION_CONTROLLED_3D_DESIGN_OF_MECHANICAL_PARTS_AND_ASSEMBLIES_MIM_LF {1 0 10303 403 2 1 2}", "AUTOMOTIVE_DESIGN {1 0 10303 214 3 1 1}")
+        .replace("#11=(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.));", "#11=(CONVERSION_BASED_UNIT('arbitrary',#900) NAMED_UNIT(#902) PLANE_ANGLE_UNIT());")
+        .replace("ENDSEC;\nEND-ISO", "#900=PLANE_ANGLE_MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE(0.5),#901);\n#901=(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.));\n#902=DIMENSIONAL_EXPONENTS(1.,0.,0.,0.,0.,0.,0.);\nENDSEC;\nEND-ISO");
+    let raw = inspect(data.into_bytes(), Limits::planar_fixtures());
+    let result = construct_general(
+        &raw,
+        s::Limits::fixtures(),
+        &s::Options {
+            development_unit_policy: s::DevelopmentUnitPolicy::Ap214ExplicitPlaneAngleDimensions,
+            ..Default::default()
+        },
+        Options {
+            operations: 100_000,
+            work_tolerance_mm: 1e-6,
+        },
+        quality().unwrap(),
+    );
+    let Err(Error::Source {
+        status,
+        diagnostics,
+        development_unit_diagnostics,
+        preserved_diagnostics,
+        interpretation_diagnostics,
+    }) = result
+    else {
+        panic!("invalid physical dimensions must not construct a native model");
+    };
+    assert_eq!(status, s::Status::Rejected);
+    assert!(diagnostics
+        .iter()
+        .any(|d| d.source.key == "DevelopmentPlaneAngleDimensionsMustBeZero"));
+    assert_eq!(development_unit_diagnostics.len(), 1);
+    assert_eq!(
+        development_unit_diagnostics[0].source.key,
+        "DerivedSlotMarkerRequired"
+    );
+    assert!(preserved_diagnostics.is_empty());
+    assert!(interpretation_diagnostics.is_empty());
+}

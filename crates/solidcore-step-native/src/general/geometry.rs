@@ -694,7 +694,16 @@ impl Geometry<'_> {
             .find(|unit| {
                 Some(unit.record_index) == units.plane_angle_unit && unit.si_name == "RADIAN"
             })
-            .map(|unit| 10_f64.powf(f64::from(unit.canonical_power10)));
+            .map(|unit| 10_f64.powf(f64::from(unit.canonical_power10)))
+            .or_else(|| {
+                // Only the source-owned development proof can admit a
+                // converted physical angle here. Do not rebuild a second unit
+                // graph, infer degrees from a label, or rewrite source values.
+                // Source syntax remains unverified in that separate receipt.
+                self.source
+                    .development_unit_receipt()?
+                    .scale_to_radians(units.plane_angle_unit?)
+            });
         scale
             .filter(|scale| scale.is_finite() && *scale > 0.)
             .ok_or_else(|| failure(key, record, GeneralFailureKind::Unsupported))
@@ -1234,6 +1243,52 @@ mod tests {
     }
 
     #[test]
+    fn physical_angle_conversion_consumes_only_the_matching_sealed_source_proof() {
+        let text = include_str!("../../../solidcore-step/tests/fixtures/plane.step")
+            .replace(
+                "AP203_CONFIGURATION_CONTROLLED_3D_DESIGN_OF_MECHANICAL_PARTS_AND_ASSEMBLIES_MIM_LF {1 0 10303 403 2 1 2}",
+                "AUTOMOTIVE_DESIGN {1 0 10303 214 3 1 1}",
+            )
+            .replace(
+                "#11=(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.));",
+                "#11=(CONVERSION_BASED_UNIT('not a scale inference',#900) NAMED_UNIT(#902) PLANE_ANGLE_UNIT());",
+            )
+            .replace("ENDSEC;\nEND-ISO", "#900=PLANE_ANGLE_MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE(0.0174532925199433),#901);\n#901=(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.));\n#902=DIMENSIONAL_EXPONENTS(0.,0.,0.,0.,0.,0.,0.);\nENDSEC;\nEND-ISO");
+        let raw = inspect(text.as_bytes().to_vec(), Limits::planar_fixtures());
+        let options = s::Options {
+            geometry_scope: s::GeometryScope::GeneralBrep,
+            check_geometry_dependencies: true,
+            check_part_and_closure: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            s::check(&raw, s::Limits::fixtures(), &options).status,
+            s::Status::Rejected
+        );
+        let checked = s::check(
+            &raw,
+            s::Limits::fixtures(),
+            &s::Options {
+                development_unit_policy:
+                    s::DevelopmentUnitPolicy::Ap214ExplicitPlaneAngleDimensions,
+                ..options
+            },
+        );
+        let source = checked.snapshot.unwrap();
+        let kernel = Kernel::default();
+        let geometry = Geometry::new(&source, &kernel, 1e-6, 1e-6).unwrap();
+        let actual = geometry
+            .angle_scale(record(&source, "11"), "missing angle proof")
+            .unwrap();
+        assert_eq!(actual, 0.0174532925199433);
+        assert_eq!(source.source().bytes(), text.as_bytes());
+        assert!(!source
+            .development_unit_receipt()
+            .unwrap()
+            .source_syntax_verified());
+    }
+
+    #[test]
     fn source_line_is_projected_without_fitting_and_native_calls_are_precharged() {
         let source = source("");
         let kernel = Kernel::default();
@@ -1342,6 +1397,69 @@ mod tests {
             )
             .unwrap();
         assert!(norm(closed.endpoints[0] - closed.endpoints[1]) < 1e-12);
+    }
+
+    #[test]
+    fn spline_endpoint_inversion_preserves_interior_parameters_and_strict_consistency() {
+        // Independently designed polynomial: P(s)=(2s,2s(1-s),0),
+        // source t=2+3s. At t=2.75/4.25 the exact points are
+        // (0.5,0.375,0)/(1.5,0.375,0), strictly inside its natural [2,5].
+        // Neither endpoint can use CurveParameter's natural-end fast path.
+        let source = source(
+            "#910=CARTESIAN_POINT('',(0.,0.,0.));\n\
+             #911=CARTESIAN_POINT('',(1.,1.,0.));\n\
+             #912=CARTESIAN_POINT('',(2.,0.,0.));\n\
+             #913=B_SPLINE_CURVE_WITH_KNOTS('',2,(#910,#911,#912),.UNSPECIFIED.,.F.,.F.,(3,3),(2.,5.),.UNSPECIFIED.);",
+        );
+        let kernel = Kernel::default();
+        let consistency = 1e-6;
+        let geometry = Geometry::new(&source, &kernel, consistency, 1e-6).unwrap();
+        let a = Vec3::new(0.5, 0.375, 0.);
+        let b = Vec3::new(1.5, 0.375, 0.);
+        let mut execution = Execution { used: 0, max: 100 };
+        let built = geometry
+            .make_curve(
+                record(&source, "913"),
+                record(&source, "203"),
+                a,
+                b,
+                false,
+                1e-9,
+                &mut execution,
+            )
+            .unwrap();
+        assert!((built.interval.min() - 2.75).abs() < 1e-9);
+        assert!((built.interval.max() - 4.25).abs() < 1e-9);
+        assert!(norm(built.endpoints[0] - a) <= consistency);
+        assert!(norm(built.endpoints[1] - b) <= consistency);
+        let native = built.native.as_ref().unwrap();
+        assert!(matches!(
+            native.kind(),
+            solidcore::curve::curve::CurveKind::BSpline(_)
+        ));
+        assert_eq!(native.natural_interval().min(), 2.);
+        assert_eq!(native.natural_interval().max(), 5.);
+        // The whole defining curve is in z=0, so every curve point is at
+        // least 2*consistency away from either displaced topology endpoint.
+        // This is an analytic lower bound, not a sampled residual estimate.
+        let displacement = Vec3::new(0., 0., 2. * consistency);
+        let mut rejected_execution = Execution { used: 0, max: 100 };
+        assert!(matches!(
+            geometry.make_curve(
+                record(&source, "913"),
+                record(&source, "203"),
+                a + displacement,
+                b + displacement,
+                false,
+                1e-9,
+                &mut rejected_execution,
+            ),
+            Err(Error::General {
+                key: "GeneralSplineEndpointInversion",
+                kind: GeneralFailureKind::Postcheck,
+                ..
+            })
+        ));
     }
 
     #[test]

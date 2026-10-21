@@ -138,6 +138,11 @@ in [LICENSES/Microsoft-STL.txt](LICENSES/Microsoft-STL.txt), obtained from the
 The helper is a safe Rust translation; no Microsoft binary or private CAD input
 is included in this repository.
 
+The final-trim sampler's `finite_lerp` follows MSVC 14.50.35717
+`include/cmath:1562–1627` (`_Common_lerp` / `_Linear_for_lerp`), including its
+explicit same-sign runtime FMA and monotonic endpoint rules. It is covered by
+the same Microsoft copyright and Apache-2.0 WITH LLVM-exception license above.
+
 ### d3-force
 
 - Packages: `d3-force` 3.0.0 with its dependencies `d3-dispatch` 3.0.1, `d3-quadtree` 3.0.1

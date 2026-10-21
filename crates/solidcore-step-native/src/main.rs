@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //! Explicit synthetic construction checkpoint; not a full-import success CLI.
+use solidcore_step::semantics::DevelopmentUnitPolicy;
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -9,6 +10,7 @@ struct Arguments {
     general: bool,
     interop: bool,
     ap214: bool,
+    development_unit_policy: DevelopmentUnitPolicy,
     quality: Option<PathBuf>,
     carrier: solidcore_step::InspectOptions,
 }
@@ -25,6 +27,7 @@ fn parse_arguments(
         general: false,
         interop: false,
         ap214: false,
+        development_unit_policy: DevelopmentUnitPolicy::Disabled,
         quality: None,
         carrier: solidcore_step::InspectOptions::default(),
     };
@@ -32,13 +35,17 @@ fn parse_arguments(
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--help" | "-h") => {
-                println!("step-native-import --fixture-limits FILE [--general-development --quality JSON] [--interop] [--ap214-unregistered-as-2010] [--opaque-header-name] [--opaque-data-strings] [--level1-as-corrected-encoding]\n\nConstruction checkpoints only; accepted_import remains false. General mode runs complete typed source checks, never the P0 rule subset. Its quality JSON must explicitly provide all budgets in mm. Input and work limits selected by --fixture-limits are development values, not production defaults. Carrier exceptions require explicit general + interoperability mode. Opaque strings retain bytes with unestablished text; their typed uses still require semantic approval. Level-1 interpretation remains an unverified assumption, never a corrected declaration.");
+                println!("step-native-import --fixture-limits FILE [--general-development --quality JSON] [--interop] [--ap214-unregistered-as-2010] [--opaque-header-name] [--opaque-data-strings] [--level1-as-corrected-encoding] [--development-ap214-angle-dimensions]\n\nConstruction checkpoints only; accepted_import remains false. General mode runs complete typed source checks, never the P0 rule subset. Its quality JSON must explicitly provide all budgets in mm. Input and work limits selected by --fixture-limits are development values, not production defaults. Carrier exceptions require explicit general + interoperability mode. Opaque strings retain bytes with unestablished text; their typed uses still require semantic approval. Level-1 interpretation remains an unverified assumption, never a corrected declaration. The independent development angle-unit policy only continues after source-reference, dimension and conversion proofs; original syntax remains unverified and results are separate from strict qualification.");
                 return Ok(None);
             }
             Some("--fixture-limits") => fixture = true,
             Some("--general-development") => result.general = true,
             Some("--interop") => result.interop = true,
             Some("--ap214-unregistered-as-2010") => result.ap214 = true,
+            Some("--development-ap214-angle-dimensions") => {
+                result.development_unit_policy =
+                    DevelopmentUnitPolicy::Ap214ExplicitPlaneAngleDimensions;
+            }
             Some("--opaque-header-name") => {
                 result.carrier.header_name_policy =
                     solidcore_step::HeaderNamePolicy::PreserveOpaqueBytes;
@@ -80,6 +87,9 @@ fn parse_arguments(
         return Err(
             "Carrier exceptions require explicit --general-development and --interop".into(),
         );
+    }
+    if result.development_unit_policy != DevelopmentUnitPolicy::Disabled && !result.general {
+        return Err("--development-ap214-angle-dimensions requires --general-development and an explicit quality configuration".into());
     }
     Ok(Some(result))
 }
@@ -139,6 +149,7 @@ fn general(
         maximum_tolerance_growth_mm: number("maximum_tolerance_growth_mm")?,
     };
     let options = s::Options {
+        development_unit_policy: args.development_unit_policy,
         source_policy: if args.interop {
             s::SourcePolicy::PreserveNonGeometric
         } else {
@@ -185,17 +196,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // contract; they neither rewrite raw text nor approve opaque typed fields.
     let raw = solidcore_step::inspect_with_options(bytes, limits, args.carrier);
     if args.general {
-        let model = general(&raw, &args)?.validate_native()?;
+        let model = general(&raw, &args)?
+            .validate_native()?
+            .measure_general_trims()?;
+        let general_report = model.general_report().ok_or("Missing general report")?;
+        let trims = general_report
+            .final_trim_measurements
+            .ok_or("Missing final trim measurements")?;
         println!(
             "{}",
             serde_json::json!({"status":"NativeConstructed","accepted_import":false,
             "general_development":true,"source_policy":model.source().source_policy(),
+            "development_unit_policy":model.source().development_unit_policy(),
+            "development_unit_receipt":model.source().development_unit_receipt(),
             "source_sha256":raw.sha256,"carrier_options":raw.options(),
             "carrier_assumption":raw.carrier_assumption(),
             "schema_interpretation":model.source().applied_interpretation(),
             "vertices":model.vertices().len(),"edges":model.edges().len(),"faces":model.faces().len(),
             "operations":model.operations(),"native_pointer_validation":"Passed","native_deep_validation":"Passed",
-            "unrun":["final_trim_measurements","material_measurements","general_development_publication"],"repair":"None"})
+            "final_trim_measurements":{"status":"Passed","maximum_mm":trims.maximum_mm,
+            "samples":trims.samples,"edge_uses":trims.edge_uses,"evidence":"finite_same_parameter_samples_not_a_continuous_bound"},
+            "unrun":["material_measurements","general_development_publication"],"repair":"None"})
         );
         return Ok(());
     }
@@ -240,10 +261,44 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_arguments;
+    use super::{parse_arguments, DevelopmentUnitPolicy};
     use solidcore_step::{
         CarrierInterpretation, DataStringPolicy, HeaderNamePolicy, InspectOptions,
     };
+
+    #[test]
+    fn development_units_require_general_mode_and_are_independent_of_property_interop() {
+        let parse = |args: &[&str]| parse_arguments(args.iter().copied().map(Into::into));
+        let strict = parse(&["--fixture-limits", "synthetic.step"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            strict.development_unit_policy,
+            DevelopmentUnitPolicy::Disabled
+        );
+        assert!(parse(&[
+            "--fixture-limits",
+            "synthetic.step",
+            "--development-ap214-angle-dimensions"
+        ])
+        .is_err());
+        let requested = parse(&[
+            "--fixture-limits",
+            "synthetic.step",
+            "--general-development",
+            "--quality",
+            "quality.json",
+            "--development-ap214-angle-dimensions",
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            requested.development_unit_policy,
+            DevelopmentUnitPolicy::Ap214ExplicitPlaneAngleDimensions
+        );
+        assert!(!requested.interop);
+        assert_eq!(requested.carrier, InspectOptions::default());
+    }
 
     #[test]
     fn carrier_policies_are_explicit_independent_and_never_implicit_in_interop() {

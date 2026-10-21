@@ -126,12 +126,34 @@ and interpretation receipts. Opaque bytes do not become invented text or approve
 typed fields; a level-1 declaration remains unchanged and unverified. Interop alone
 does not enable any carrier option. Physical unit/type checks remain in force.
 
-This increment still returns an unpublished **candidate**. General final-trim
-checks, material measurements, complete continuous correspondence qualification,
+`--development-ap214-angle-dimensions` independently requests the verified
+development unit policy in general mode. It is disabled by default and does not
+expand the nongeometric interoperability policy. A supported explicit AP214
+plane-angle dimensions reference may continue only after the complete source
+pipeline verifies its dimensional and conversion dependencies. Original bytes,
+conversion factors and source diagnostics remain owned; the separate receipt
+does not establish valid source syntax or formal AP conformance. Such results
+must remain separate from strict qualification. A requested option is never proof
+that it applied or that native construction/acceptance completed.
+
+After native validation, `measure_general_trims` checks the actual installed UV
+curves at the original common edge parameter, using both knot sets and nine
+samples per union span. It rejects incompatible domains, nonfinite evaluations
+and measured gaps exceeding the selected budget. Its optional owning receipt
+remains absent until every use succeeds. These are finite measurements, not a
+continuous bound. A later owner UV query invalidates this receipt before it can
+change derived state; callers must measure the complete result again.
+
+This increment still returns an unpublished **candidate**. Material measurements,
+complete continuous correspondence qualification,
 application cancellation/publication, and several kernel back-edges remain to be
-migrated. Concrete cone/torus validators do not acquire a pass from an inherited
-B-spline validator. The optional CLI keeps `accepted_import:false`. Neither this
-route nor a viewer screenshot counts toward a real-model import acceptance target.
+migrated. Concrete cone/cylinder/torus validators execute their actual rules and
+the revolution/B-spline parent chain. Uniquely value-owned generator containment
+does not qualify C++ independently corruptible owner/context backlinks. The
+optional CLI keeps `accepted_import:false`. Neither this route nor a viewer
+screenshot counts toward a real-model import acceptance target. Failed source
+checks also retain the original independent development, nongeometric and schema
+diagnostics in `Error::Source`; no missing snapshot silently erases them.
 
 ```sh
 cargo test -p solidcore-step-native --features cli,general-development

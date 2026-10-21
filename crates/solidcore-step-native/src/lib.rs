@@ -20,7 +20,7 @@ pub use certify::{AcceptanceQuality, Certificate, Imported};
 #[cfg(feature = "general-development")]
 pub use general::{
     construct_general, GeneralLoopMapping, GeneralObservations, GeneralQuality, GeneralReport,
-    ParameterMapping, UnitConversion,
+    GeneralTrimMeasurements, GeneralTrimUseMeasurement, ParameterMapping, UnitConversion,
 };
 
 use plan::{ExactPoint, Plan};
@@ -60,6 +60,13 @@ pub enum Error {
         status: s::Status,
         /// Original typed source diagnostics, without fabricated model errors.
         diagnostics: Vec<s::Diagnostic>,
+        /// Original nongeometric diagnostics kept by the independent source policy.
+        preserved_diagnostics: Vec<s::Diagnostic>,
+        /// Original diagnostics associated with an explicit schema interpretation.
+        interpretation_diagnostics: Vec<s::Diagnostic>,
+        /// Original unit-marker diagnostics, including when the development
+        /// proof or a later phase failed and no source snapshot was published.
+        development_unit_diagnostics: Vec<s::Diagnostic>,
     },
     /// A source-addressed general construction or qualification failure.
     General {
@@ -192,6 +199,39 @@ impl Candidate {
     /// Borrow the candidate's own kernel context.
     pub fn kernel(&self) -> &Kernel {
         &self.kernel
+    }
+    /// Classify UV against this candidate's actual trimmed face and owner context.
+    /// Native query cache/UV creation may mutate derived state. This does not
+    /// grant import acceptance or expose mutable topology to a viewer.
+    ///
+    /// # Errors
+    /// Nonfinite UV, an unmapped face, or the actual native query failure,
+    /// including unimplemented dependencies. No copied model/default context
+    /// or mesh classification substitutes for the owning native query.
+    pub fn classify_face_uv(
+        &mut self,
+        face: FaceId,
+        uv: Vec2,
+    ) -> Result<solidcore::intersect::point_class::PointClassType> {
+        if !uv.x.is_finite()
+            || !uv.y.is_finite()
+            || !self.faces.values().any(|mapped| *mapped == face)
+        {
+            return Err(Error::Invalid("unmapped or nonfinite face UV query"));
+        }
+        #[cfg(feature = "general-development")]
+        if let SourcePlan::General(plan) = &mut self.plan {
+            // Native UV queries may lazily change derived representation, even
+            // on failure. A previous final-trim observation cannot certify the
+            // later state; the complete measurement must be run again.
+            plan.invalidate_final_trim_measurements();
+        }
+        Ok(solidcore::query::api_queries::face_classify_uv(
+            &self.kernel,
+            &mut self.brep,
+            face,
+            uv,
+        )?)
     }
     /// Original immutable semantic/source owner, with original bytes and units.
     pub fn source(&self) -> &s::Snapshot {

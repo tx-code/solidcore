@@ -9,6 +9,7 @@
 
 mod geometry;
 mod surface;
+mod trim_measurement;
 
 use super::{Candidate, Error, Execution, GeneralFailureKind, Options, Result, SourcePlan};
 use geometry::{BuiltCurve, Geometry};
@@ -20,10 +21,10 @@ use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::topology::{
     brep_constructor::{BrepConstructor, VertexNode},
     face::p3 as fp3,
-    EdgeId, FaceId, VertexId,
+    EdgeId, EdgeuseId, FaceId, VertexId,
 };
 use solidcore_step::{planar::Rational, semantics as s};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Named, explicit budgets for the general development path. No production
 /// preset or source uncertainty is substituted for these application choices.
@@ -53,6 +54,40 @@ pub struct GeneralObservations {
     pub maximum_curve_surface_gap_mm: f64,
     /// Largest native reported vertex gap in millimeters.
     pub maximum_vertex_gap_mm: f64,
+}
+
+/// One final installed edge-use trim measured with its original actual parameter.
+/// This numerical observation is not a continuous error certificate.
+#[derive(Clone, Debug)]
+pub struct GeneralTrimUseMeasurement {
+    /// Original face record, in the source face traversal order.
+    pub source_face: usize,
+    /// Original defining edge record; absent for an explicitly derived chart cut.
+    pub source_edge: Option<usize>,
+    /// Actual owning native face.
+    pub native_face: FaceId,
+    /// Actual native defining edge, shared when the topology shares it.
+    pub native_edge: EdgeId,
+    /// Actual selected upward incidence; derived seams retain both occurrences.
+    pub native_edge_use: EdgeuseId,
+    /// Largest sampled paired-parameter gap, in millimeters.
+    pub maximum_mm: f64,
+    /// Samples actually evaluated, including repeated endpoints between knot spans.
+    pub samples: usize,
+}
+
+/// Completed final-trim measurements on the actual checked general candidate.
+/// Its presence establishes only this numerical checkpoint; not accepted import.
+#[derive(Clone, Debug)]
+pub struct GeneralTrimMeasurements {
+    /// Largest sampled gap over all upward face incidences, in millimeters.
+    pub maximum_mm: f64,
+    /// Total actual samples, with nine samples per union knot span.
+    pub samples: usize,
+    /// Actual measured incidence count; shared/derived uses are not deduplicated.
+    pub edge_uses: usize,
+    /// Source-face order, then the kernel's upward loop/edge-use order.
+    pub uses: Vec<GeneralTrimUseMeasurement>,
 }
 /// Directed source loop receipt before equivalent computational chart cuts.
 #[derive(Clone, Debug)]
@@ -90,6 +125,9 @@ pub struct GeneralReport<'a> {
     pub chart_cuts: &'a [(usize, EdgeId)],
     /// Actual construction-time observations; no sampling is a proof bound.
     pub observations: GeneralObservations,
+    /// Absent until all final installed trims passed the separate measured gate.
+    /// A measured zero is distinct from a checkpoint that has not run.
+    pub final_trim_measurements: Option<&'a GeneralTrimMeasurements>,
 }
 
 pub(super) struct SourceVertex {
@@ -139,9 +177,13 @@ pub(super) struct Plan {
     loop_mappings: Vec<GeneralLoopMapping>,
     unit_conversions: Vec<UnitConversion>,
     length_scale_mm: Rational,
+    final_trim_measurements: Option<GeneralTrimMeasurements>,
 }
 
 impl Plan {
+    pub(super) fn invalidate_final_trim_measurements(&mut self) {
+        self.final_trim_measurements = None;
+    }
     pub fn source(&self) -> &s::Snapshot {
         &self.source
     }
@@ -158,7 +200,162 @@ impl Plan {
             length_scale_mm: self.length_scale_mm,
             chart_cuts: &self.normalizations,
             observations: self.observations,
+            final_trim_measurements: self.final_trim_measurements.as_ref(),
         }
+    }
+}
+
+impl Candidate {
+    /// Measure every FINAL installed general trim after the actual native checks.
+    /// Each union span has nine same-parameter edge/UV/lifted-surface samples.
+    /// Geometry, UV, units and budgets are never altered. This consumes the
+    /// candidate on failure and does not establish continuous bounds, region or
+    /// material qualification, publication, or accepted import.
+    ///
+    /// # Errors
+    /// Missing native readiness/correspondence/trim, parameter-domain mismatch,
+    /// failed/nonfinite evaluations, a measured gap beyond the original derived
+    /// UV budget, or the next per-use native execution boundary exceeding its limit.
+    pub fn measure_general_trims(mut self) -> Result<Self> {
+        if self.native_checks.is_none() {
+            return Err(Error::Invalid("GeneralFinalTrimRequiresNativeChecks"));
+        }
+        let SourcePlan::General(plan) = &mut self.plan else {
+            return Err(Error::Invalid("GeneralFinalTrimRequiresGeneralCandidate"));
+        };
+        let mapped_faces: BTreeSet<_> = self.faces.values().copied().collect();
+        if mapped_faces.len() != plan.faces.len()
+            || self.faces.len() != plan.faces.len()
+            || self.brep.face_list().len() != plan.faces.len()
+            || self
+                .brep
+                .face_list()
+                .iter()
+                .any(|id| !mapped_faces.contains(id))
+        {
+            return Err(Error::Invalid("GeneralFinalTrimFaceCorrespondence"));
+        }
+        let source_edges: BTreeMap<_, _> = self
+            .edges
+            .iter()
+            .map(|(source, id)| (*id, *source))
+            .collect();
+        if source_edges.len() != self.edges.len() {
+            return Err(Error::Invalid("GeneralFinalTrimEdgeCorrespondence"));
+        }
+        let mut execution = Execution {
+            used: self.operations,
+            max: self.operation_limit,
+        };
+        let mut measured = GeneralTrimMeasurements {
+            maximum_mm: 0.,
+            samples: 0,
+            edge_uses: 0,
+            uses: Vec::new(),
+        };
+        // StepImportGeneral.cpp::VerifyRebuiltUv iterates model faces in source
+        // order and calls GetUpwardEdgeuses, preserving every seam occurrence.
+        // The maps below resolve identity only; their key order is not traversal.
+        for source_face in &plan.faces {
+            let face = *self
+                .faces
+                .get(&source_face.record)
+                .ok_or(Error::Invalid("GeneralFinalTrimFaceCorrespondence"))?;
+            let surface = self.brep.face(face)?.surface.as_ref().ok_or_else(|| {
+                failure(
+                    "GeneralFinalTrimMissing",
+                    source_face.record,
+                    GeneralFailureKind::Postcheck,
+                )
+            })?;
+            let uses =
+                solidcore::topology::face::p4::upward_edgeuses(&self.brep, face, false, None)?;
+            if uses.is_empty() {
+                return Err(failure(
+                    "GeneralFinalTrimMissing",
+                    source_face.record,
+                    GeneralFailureKind::Postcheck,
+                ));
+            }
+            for edge_use in uses {
+                let edge = solidcore::topology::edgeuse::p1::edge(&self.brep, edge_use)?
+                    .ok_or_else(|| {
+                        failure(
+                            "GeneralFinalTrimMissing",
+                            source_face.record,
+                            GeneralFailureKind::Postcheck,
+                        )
+                    })?;
+                let record = self.brep.edge(edge)?;
+                let curve = record.curve.as_ref().ok_or_else(|| {
+                    failure(
+                        "GeneralFinalTrimMissing",
+                        source_face.record,
+                        GeneralFailureKind::Postcheck,
+                    )
+                })?;
+                let (uv, _) =
+                    solidcore::topology::edgeuse::p1::uv_trim_curve(&self.brep, edge_use)?;
+                let uv = uv.ok_or_else(|| {
+                    failure(
+                        "GeneralFinalTrimMissing",
+                        source_face.record,
+                        GeneralFailureKind::Postcheck,
+                    )
+                })?;
+                let source_edge = source_edges.get(&edge).copied();
+                if source_edge.is_none()
+                    && !plan
+                        .normalizations
+                        .iter()
+                        .any(|(source, id)| *source == source_face.record && *id == edge)
+                {
+                    return Err(Error::Invalid("GeneralFinalTrimEdgeCorrespondence"));
+                }
+                let interval = record.interval;
+                // Native code checks the required receiver/trim before Step;
+                // one charged work block includes all this use's finite samples.
+                execution.step()?;
+                let observation = trim_measurement::measure(
+                    curve,
+                    uv,
+                    surface,
+                    interval.min(),
+                    interval.max(),
+                    source_face.record,
+                )?;
+                need(
+                    observation.maximum_mm <= scalar(plan.quality.derived_uv_mm),
+                    "GeneralFinalTrimGap",
+                    source_face.record,
+                )?;
+                if observation.maximum_mm > measured.maximum_mm {
+                    measured.maximum_mm = observation.maximum_mm;
+                }
+                measured.samples = measured
+                    .samples
+                    .checked_add(observation.samples)
+                    .ok_or(Error::ResourceLimit)?;
+                measured.edge_uses = measured
+                    .edge_uses
+                    .checked_add(1)
+                    .ok_or(Error::ResourceLimit)?;
+                measured.uses.push(GeneralTrimUseMeasurement {
+                    source_face: source_face.record,
+                    source_edge,
+                    native_face: face,
+                    native_edge: edge,
+                    native_edge_use: edge_use,
+                    maximum_mm: observation.maximum_mm,
+                    samples: observation.samples,
+                });
+            }
+        }
+        // Publish one complete observation only after every actual use passed.
+        // No intermediate zero or partial list can look like completed readiness.
+        plan.final_trim_measurements = Some(measured);
+        self.operations = execution.used;
+        Ok(self)
     }
 }
 
@@ -401,6 +598,9 @@ pub fn construct_general(
         .ok_or_else(|| Error::Source {
             status: source_report.status,
             diagnostics: source_report.diagnostics.clone(),
+            preserved_diagnostics: source_report.preserved_diagnostics().to_vec(),
+            interpretation_diagnostics: source_report.interpretation_diagnostics().to_vec(),
+            development_unit_diagnostics: source_report.development_unit_diagnostics().to_vec(),
         })?;
     let shape = role(&source, "shape")?;
     let shell = role(&source, "shell")?;
@@ -426,6 +626,7 @@ pub fn construct_general(
         loop_mappings: Vec::new(),
         unit_conversions: geometry.conversions().to_vec(),
         length_scale_mm: geometry.length_scale_exact(),
+        final_trim_measurements: None,
     };
     plan.prepare(&geometry)?;
     for face in &plan.faces {
@@ -878,4 +1079,249 @@ fn edge_bounds(edge: &SourceEdge) -> Result<Extent3d> {
         .as_ref()
         .map(|c| c.bounds)
         .ok_or(Error::Invalid("GeneralDefiningCurveMissing"))
+}
+
+#[cfg(test)]
+mod final_trim_tests {
+    use super::*;
+    use solidcore::curve::curve::Curve;
+    use solidcore::nurbs::b_spline_curve::{
+        BSplineCurve, BSplineCurveForm, CanonicalData, KnotType,
+    };
+    use solidcore::topology::edgeuse::p1 as eu;
+
+    const BOX: &[u8] = include_bytes!("../../solidcore-step/tests/fixtures/material-box.step");
+
+    fn candidate(bytes: &[u8], operations: usize) -> Result<Candidate> {
+        let raw =
+            solidcore_step::inspect(bytes.to_vec(), solidcore_step::Limits::planar_fixtures());
+        construct_general(
+            &raw,
+            s::Limits::fixtures(),
+            &s::Options::default(),
+            Options {
+                operations,
+                work_tolerance_mm: 1e-6,
+            },
+            GeneralQuality {
+                id: "Q-General-final-trim-public-box".into(),
+                definition_mm: Rational::decimal("0.0000001")?,
+                consistency_mm: Rational::decimal("0.000001")?,
+                derived_uv_mm: Rational::decimal("0.000001")?,
+                query_mm: Rational::decimal("0.000001")?,
+                maximum_work_tolerance_mm: Rational::decimal("0.00001")?,
+                maximum_tolerance_growth_mm: Rational::ZERO,
+            },
+        )
+    }
+    fn first_use(model: &Candidate) -> EdgeuseId {
+        let SourcePlan::General(plan) = &model.plan else {
+            panic!("general fixture");
+        };
+        let face = *model.faces.get(&plan.faces[0].record).unwrap();
+        solidcore::topology::face::p4::upward_edgeuses(&model.brep, face, false, None).unwrap()[0]
+    }
+
+    #[test]
+    fn a_later_owner_uv_query_invalidates_previous_final_trim_observations() {
+        let mut model = candidate(BOX, 100_000)
+            .unwrap()
+            .validate_native()
+            .unwrap()
+            .measure_general_trims()
+            .unwrap();
+        assert!(model
+            .general_report()
+            .unwrap()
+            .final_trim_measurements
+            .is_some());
+        let face = *model.faces.values().next().unwrap();
+        model
+            .classify_face_uv(face, solidcore::math::Vec2::ZERO)
+            .unwrap();
+        assert!(model
+            .general_report()
+            .unwrap()
+            .final_trim_measurements
+            .is_none());
+        let measured = model.measure_general_trims().unwrap();
+        assert_eq!(
+            measured
+                .general_report()
+                .unwrap()
+                .final_trim_measurements
+                .unwrap()
+                .edge_uses,
+            24
+        );
+    }
+
+    #[test]
+    fn public_box_final_trims_are_optional_until_measured_then_cover_every_actual_use_in_source_order(
+    ) {
+        // Author another legal SET order so a BTreeMap traversal would be
+        // observably wrong while all defining geometry/topology stays the same.
+        let text = std::str::from_utf8(BOX).unwrap().replace(
+            "(#507,#517,#527,#537,#547,#557)",
+            "(#557,#547,#537,#527,#517,#507)",
+        );
+        let model = candidate(text.as_bytes(), 100_000).unwrap();
+        assert!(model
+            .general_report()
+            .unwrap()
+            .final_trim_measurements
+            .is_none());
+        let model = model.validate_native().unwrap();
+        assert!(model
+            .general_report()
+            .unwrap()
+            .final_trim_measurements
+            .is_none());
+        let SourcePlan::General(plan) = &model.plan else {
+            panic!("general fixture");
+        };
+        assert_ne!(plan.faces[0].record, *model.faces.keys().next().unwrap());
+        let mut expected = Vec::new();
+        for source in &plan.faces {
+            let face = *model.faces.get(&source.record).unwrap();
+            for incidence in
+                solidcore::topology::face::p4::upward_edgeuses(&model.brep, face, false, None)
+                    .unwrap()
+            {
+                expected.push((source.record, face, incidence));
+            }
+        }
+        let operations = model.operations;
+        let model = model.measure_general_trims().unwrap();
+        let report = model.general_report().unwrap();
+        let measured = report.final_trim_measurements.unwrap();
+        assert_eq!(measured.edge_uses, 24);
+        assert_eq!(measured.samples, 216);
+        assert!(measured.maximum_mm <= 1e-6);
+        assert_eq!(model.operations, operations + 24);
+        assert_eq!(model.source().source().bytes(), text.as_bytes());
+        assert_eq!(measured.uses.len(), expected.len());
+        for (actual, expected) in measured.uses.iter().zip(expected) {
+            assert_eq!(
+                (
+                    actual.source_face,
+                    actual.native_face,
+                    actual.native_edge_use
+                ),
+                expected
+            );
+            assert!(actual.source_edge.is_some());
+            assert_eq!(actual.samples, 9);
+        }
+    }
+
+    #[test]
+    fn final_trim_gate_requires_real_native_checks_and_charges_each_use_before_execution() {
+        assert!(matches!(
+            candidate(BOX, 100_000).unwrap().measure_general_trims(),
+            Err(Error::Invalid("GeneralFinalTrimRequiresNativeChecks"))
+        ));
+        let full = candidate(BOX, 100_000)
+            .unwrap()
+            .validate_native()
+            .unwrap()
+            .measure_general_trims()
+            .unwrap();
+        let operations = full.operations();
+        let exact = candidate(BOX, operations)
+            .unwrap()
+            .validate_native()
+            .unwrap()
+            .measure_general_trims()
+            .unwrap();
+        assert_eq!(exact.operations(), operations);
+        assert!(exact
+            .general_report()
+            .unwrap()
+            .final_trim_measurements
+            .is_some());
+        let short = candidate(BOX, operations - 1)
+            .unwrap()
+            .validate_native()
+            .unwrap();
+        assert!(matches!(
+            short.measure_general_trims(),
+            Err(Error::ResourceLimit)
+        ));
+        // A consumed failed candidate cannot affect another owner.
+        assert_eq!(
+            full.general_report()
+                .unwrap()
+                .final_trim_measurements
+                .unwrap()
+                .edge_uses,
+            24
+        );
+    }
+
+    #[test]
+    fn post_validation_uv_domain_changes_are_rejected_without_an_affine_remap() {
+        let mut model = candidate(BOX, 100_000).unwrap().validate_native().unwrap();
+        let incidence = first_use(&model);
+        let (_, owner) = eu::uv_trim_curve(&model.brep, incidence).unwrap();
+        let uv = model
+            .brep
+            .edgeuse_mut(owner.unwrap())
+            .unwrap()
+            .uv_trim_curve
+            .as_mut()
+            .unwrap();
+        uv.edit_parameterization(
+            &model.kernel,
+            &solidcore::geom::extent1d::Extent1d::from_min_max(-0.25, 1.25),
+        )
+        .unwrap();
+        assert!(matches!(
+            model.measure_general_trims(),
+            Err(Error::General {
+                key: "FinalTrimParameterDomain",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn post_validation_uv_parameter_warp_on_the_same_segment_fails_the_original_mm_budget() {
+        let mut model = candidate(BOX, 100_000).unwrap().validate_native().unwrap();
+        let incidence = first_use(&model);
+        let edge = eu::edge(&model.brep, incidence).unwrap().unwrap();
+        let interval = model.brep.edge(edge).unwrap().interval;
+        let (uv, owner) = eu::uv_trim_curve(&model.brep, incidence).unwrap();
+        let uv = uv.unwrap();
+        let a = uv.evaluate_point(interval.min()).unwrap();
+        let b = uv.evaluate_point(interval.max()).unwrap();
+        let replacement = Curve::from(
+            BSplineCurve::create_canonical(&CanonicalData {
+                dim: 2,
+                degree: 2,
+                control_points: &[a, a, b],
+                form: BSplineCurveForm::Unspecified,
+                knot_multiplicities: &[3, 3],
+                knots: &[interval.min(), interval.max()],
+                knot_type: KnotType::Unspecified,
+                weights: None,
+                trim: None,
+            })
+            .unwrap(),
+        );
+        // Intentional test-only mutation models a later native UV consumer.
+        // Endpoints, domain and image are unchanged, but paired parameters differ.
+        model
+            .brep
+            .edgeuse_mut(owner.unwrap())
+            .unwrap()
+            .uv_trim_curve = Some(replacement);
+        assert!(matches!(
+            model.measure_general_trims(),
+            Err(Error::General {
+                key: "GeneralFinalTrimGap",
+                ..
+            })
+        ));
+    }
 }

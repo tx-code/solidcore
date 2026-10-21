@@ -225,8 +225,18 @@ single affine face. The opt-in general route constructs supported original curve
 and receiver definitions through the complete typed source pipeline, retaining
 unit/parameter/loop/chart-cut receipts. Native validation and general final
 qualification remain separate gates; a construction checkpoint is not an accepted
-real-model import. Native cone/cylinder/torus kinds are retained polymorphically,
-but their missing concrete validity and remaining query dispatches still refuse.
+real-model import. Native cone/cylinder/torus kinds retain their actual concrete
+assertions and revolution parent sequence. Missing periodic/query dispatches still
+refuse; value-owned generator containment does not establish equivalence of the
+original independently corruptible owner/context backlinks.
+
+The independent development angle-unit policy preserves original source defects
+and seals verified dimensional/conversion dependencies; it neither broadens the
+nongeometric policy nor establishes formal AP syntax. The native general route
+can measure final installed trims at identical edge/UV parameters, retaining an
+optional owning receipt. Finite samples do not establish a continuous bound.
+General material measurements, complete acceptance/publication and the remaining
+SDK ledger are still required work.
 
 Owner-scoped ray and coincidence queries now reuse the original algorithms with
 actual typed topology tolerance/cache access. This resolves specific missing

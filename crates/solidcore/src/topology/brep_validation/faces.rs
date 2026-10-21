@@ -288,7 +288,13 @@ pub fn assert_face(
         valid &= super::assert_surface(k, b, id, child_options, report.reports.as_deref_mut())?;
     }
     if options.walk {
-        return Err(local::non_root_walk());
+        valid &= super::assert_subtopology(
+            k,
+            b,
+            EntityRef::Face(id),
+            options.level,
+            report.reports.as_deref_mut(),
+        )?;
     }
     Ok(valid)
 }

@@ -194,3 +194,11 @@ still prevent broader claims. Generic B-spline point solves now carry real face 
 checks without eager trim construction; actual general curve projection remains
 a separate required dependency. See `BREP_VALIDATION.md`; acceptance/publication and the
 remaining full ledger are still required work.
+
+
+Optional root/non-root subgraph collection and local walk dispatch now retain
+native output masks, append seeds, mark epochs, order and failure cleanup.
+Undefined native marked-partial-output accesses remain checked failures; source
+Faceuse marking and duplicate Face behavior are preserved. Whole-root
+coincidence/ray checks and general projection are still separate implementation
+requirements; this does not complete the full migration ledger.

@@ -145,7 +145,13 @@ pub fn assert_loop(
         valid &= uses::assert_loopuse(k, b, lu, child_options, report.reports.as_deref_mut())?;
     }
     if options.walk {
-        return Err(local::non_root_walk());
+        valid &= super::assert_subtopology(
+            k,
+            b,
+            crate::error::EntityRef::Loop(id),
+            options.level,
+            report.reports.as_deref_mut(),
+        )?;
     }
     Ok(valid)
 }

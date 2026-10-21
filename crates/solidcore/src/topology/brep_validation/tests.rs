@@ -9,7 +9,7 @@ use crate::surface::{plane::Plane, surface::Surface};
 use crate::topology::brep_constructor::{BrepConstructor, VertexNode};
 use crate::topology::{LoopuseStart, VertexuseOwner};
 
-pub(super) fn fixture() -> (Brep, FaceId, LoopId, EdgeuseId) {
+pub(crate) fn fixture() -> (Brep, FaceId, LoopId, EdgeuseId) {
     let mut k = Kernel::default();
     let mut builder = BrepConstructor::new().unwrap();
     builder.start_shell().unwrap();

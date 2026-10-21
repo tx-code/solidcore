@@ -14,7 +14,7 @@
 //! A completed local routine is not model/import qualification or repair.
 
 use super::{
-    local, local_base, AssertValidOptions, Brep, CheckLevel, EdgeId, EdgeuseId, Object, Reporter,
+    local_base, AssertValidOptions, Brep, CheckLevel, EdgeId, EdgeuseId, Object, Reporter,
 };
 use crate::curve::{crv_on_surf::CrvOnSurf, curve::Curve};
 use crate::geom::{
@@ -210,7 +210,13 @@ pub fn assert_edge(
         valid &= radial_order(k, b, id, &mut r)?;
     }
     if options.walk {
-        return Err(local::non_root_walk());
+        valid &= super::assert_subtopology(
+            k,
+            b,
+            crate::error::EntityRef::Edge(id),
+            options.level,
+            r.reports.as_deref_mut(),
+        )?;
     }
     Ok(valid)
 }

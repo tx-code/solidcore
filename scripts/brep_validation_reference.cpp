@@ -160,6 +160,8 @@ static void record(std::map<const void *, unsigned long long> &keys, T *p, unsig
     if (p)
         keys[p] = (static_cast<unsigned long long>(p->GetClassType()) << 32) | index;
 }
+#include "brep_subtopology_observer.h"
+
 int main(int argc, char **argv) {
     try {
         std::cout << std::setprecision(17);
@@ -175,7 +177,8 @@ int main(int argc, char **argv) {
         const bool local_mode=mode=="local_bsp";
         const bool root_mode=mode=="assert_root"||mode=="assert_root_walk";
         const bool vertex_mode=(mode.starts_with("assert_vertex")&&!mode.starts_with("assert_vertexuse"))||mode.starts_with("vertex_");
-        const bool topology_mode=vertex_mode||mode.starts_with("assert_region")||mode.starts_with("assert_shell")||mode.starts_with("assert_face")||mode.starts_with("assert_loop")||mode.starts_with("assert_vertexuse")||mode.starts_with("assert_edge");
+        const bool sub_mode=mode.starts_with("sub_");
+        const bool topology_mode=sub_mode||vertex_mode||mode.starts_with("assert_region")||mode.starts_with("assert_shell")||mode.starts_with("assert_face")||mode.starts_with("assert_loop")||mode.starts_with("assert_vertexuse")||mode.starts_with("assert_edge");
 #ifdef _WIN32
         // Synthetic fault inputs must exit on a native access violation without
         // opening an interactive system dialog. Kernel calculations are unchanged.
@@ -321,12 +324,12 @@ int main(int argc, char **argv) {
         require(builder.EndBrep());
         SmShell *target_shell=outer;
         if((mode.starts_with("assert_region")||mode.starts_with("assert_shell")||
-            ((mode.starts_with("assert_vertexuse")||mode.starts_with("assert_edge")||vertex_mode)&&(mode.find("_wire")!=std::string::npos||mode.find("_shellvertex")!=std::string::npos))) &&
-            (mode.find("_vertex")!=std::string::npos || mode.find("_wire")!=std::string::npos)) {
+            ((mode.starts_with("assert_vertexuse")||mode.starts_with("assert_edge")||vertex_mode||sub_mode)&&(mode.find("_wire")!=std::string::npos||mode.find("_shellvertex")!=std::string::npos))) &&
+            (mode.find("_vertex")!=std::string::npos || mode.find("_wire")!=std::string::npos ||mode.find("_shellvertex")!=std::string::npos)) {
             SmVertex *vertex=nullptr;require(b->MakeShellVertexTopology(nullptr,target_shell,vertex));
             if(mode.find("_wire")!=std::string::npos) {
                 SmEdge *wire=nullptr;SmVertex *end=nullptr;require(b->MakeEdgeVertexTopology(nullptr,vertex,wire,end));
-                if(mode.starts_with("assert_edge")){
+                if(mode.starts_with("assert_edge")||mode.find("_geometry")!=std::string::npos){
                     vertex->SetPoint(SmPoint3d(0,0,0));end->SetPoint(SmPoint3d(1,0,0));
                     wire->SetCurve(new(&context)SmLine(vertex->GetPoint(),end->GetPoint(),3,&context));
                     wire->SetInterval(SmExtent1d(0,1));
@@ -359,7 +362,7 @@ int main(int argc, char **argv) {
         SmTArray<SmVertexuse *> vus;
         vs[0]->GetVertexuses(vus);
         auto target_vu=vus[0];
-        if(mode.starts_with("assert_vertexuse")||vertex_mode) {
+        if(mode.starts_with("assert_vertexuse")||vertex_mode||sub_mode) {
             if(mode.find("_vertexloop")!=std::string::npos)target_vu=target_lu->GetVertexuse();
             else if(mode.find("_wire")!=std::string::npos)target_vu=static_cast<SmEdgeuse*>(field<List>(target_shell))->GetVertexuse();
             else if(mode.find("_shellvertex")!=std::string::npos)target_vu=static_cast<SmVertexuse*>(field<List>(target_shell));
@@ -393,7 +396,7 @@ int main(int argc, char **argv) {
             edges[i]->GetEdgeuses(uses);
             for (ULONG j = 0; j < uses.GetSize(); ++j) {
                 record(keys, uses[j], mode.find("_manifold")!=std::string::npos||mode.find("_spine")!=std::string::npos||mode.find("_trihedral")!=std::string::npos?allocated_uses.at(uses[j]):use_index++);
-                record(keys, uses[j]->GetVertexuse(), mode.find("_manifold")!=std::string::npos||mode.find("_spine")!=std::string::npos||mode.find("_trihedral")!=std::string::npos?allocated_uses.at(uses[j]):vertexuse_index++ + (vertex_mode&&mode.find("_wire")!=std::string::npos&&i>=3?1:0));
+                record(keys, uses[j]->GetVertexuse(), mode.find("_manifold")!=std::string::npos||mode.find("_spine")!=std::string::npos||mode.find("_trihedral")!=std::string::npos?allocated_uses.at(uses[j]):vertexuse_index++ + ((vertex_mode||sub_mode)&&mode.find("_wire")!=std::string::npos&&i>=3?1:0));
             }
         }
         for (ULONG i = 0; i < vs.GetSize(); ++i){
@@ -600,7 +603,13 @@ int main(int argc, char **argv) {
         SmBoolean vertex_found=FALSE;double vertex_gap=-1.,vertex_angle=SM_BIG_DOUBLE;SmFace* vertex_face=nullptr;
         SmPoint3d vertex_point;vertex_point.SetUninitialized();SmFace* parallel_f1=nullptr;SmFace* parallel_f2=nullptr;SmPoint2d parallel_uv1,parallel_uv2;
         parallel_uv1.SetUninitialized();parallel_uv2.SetUninitialized();
-        if(topology_mode){
+        SubObserved sub;
+        if(sub_mode){
+            auto edge=mode.find("_wire")!=std::string::npos?static_cast<SmEdgeuse*>(field<List>(target_shell))->GetEdge():edges[0];
+            sub=observe_subtopology(context,keys,SubFixture{b,b->GetInfiniteRegion(),target_shell,f,target_loop,edge,target_vu->GetVertex(),fu,target_lu,first,target_vu},mode,selection);
+            status=sub.status;root_valid=status==SM_SUCCESS;
+        }
+        else if(topology_mode){
             const auto call=[&]{auto walk=mode.ends_with("_walk")?SM_WALK:SM_NO_WALK;auto req=selection.starts_with("given")&&selection!="given_empty"?&requested:nullptr;
                 if(mode.starts_with("assert_region"))return b->GetInfiniteRegion()->AssertValid(target,level,walk,req);
                 if(mode.starts_with("assert_shell"))return target_shell->AssertValid(target,level,walk,req);
@@ -743,6 +752,7 @@ int main(int argc, char **argv) {
                 witness(parallel_f1);std::cout<<',';witness(parallel_f2);std::cout<<",["<<parallel_uv1.x<<','<<parallel_uv1.y<<','<<parallel_uv2.x<<','<<parallel_uv2.y<<"]]";
             }
         }
+        if(sub_mode)std::cout<<",\"sub_output\":"<<sub.output<<",\"sub_advances\":"<<sub.advances<<",\"sub_marks\":"<<sub.marks;
         if(side_mode)std::cout<<",\"side\":["<<(side_inside?"true":"false")<<','<<(side_boundary?"true":"false")<<','<<side_index<<']';
         if(root_mode)std::cout<<",\"root_valid\":"<<(root_valid?"true":"false");
         if(local_mode)std::cout<<",\"local\":["<<(local_found?"true":"false")<<','<<local_solution.m_vStart[0]<<','<<local_solution.m_vStart[1]<<','<<local_solution.m_vStart.m_dSolutionValue<<']';

@@ -54,8 +54,8 @@ The ordered root implementation still reaches missing operations:
 - Ray-based `IsInnerShellOf` and complete coincidence detection.
 - The root `AssertSubTopology` branch now collects the actual stored lists and
   face-derived loops, then runs Region, Shell, Face and Loop checks in native
-  order, followed by the real Edge/Edgeuse and Vertex calls. The non-root
-  `GetSubTopology` branch remains an explicit missing operation. Face execution now includes Plane and
+  order, followed by the real Edge/Edgeuse and Vertex calls. Non-root
+  descendants now use the shared native subgraph collector. Face execution now includes Plane and
   BSplineSurface assertions; other concrete surface subclasses and periodic
   seam classification remain required.
 - Other concrete curve/surface assertion bodies and unavailable geometric
@@ -367,7 +367,7 @@ owning base, curve/context/domain, the real curve and use assertions, length,
 level-two on-face form, alternating orientation, endpoint incidence/gaps and
 manifold/spine radial order. The native numeric-level behavior is retained:
 Given still executes rule13. Child calls keep the requested level but receive
-no parent's Given request array. Non-root walk remains an explicit dependency.
+no parent's Given request array. Non-root walk uses the same source-ordered descendant dispatcher.
 Root walking now invokes these edge routines followed by Vertex validation.
 
 `assert_edgeuse` retains optional context/type checks, the **own stored** UV
@@ -474,3 +474,63 @@ remain separate full-migration requirements.
 cargo build --locked -p solidcore --example brep_validation_probe
 python scripts/brep_vertex_validation_compare.py --cpp <validation-observer> --rust bin/debug/examples/brep_validation_probe.exe --receipt bin/brep-vertex-validity.local.json
 ```
+
+
+## Optional subgraph outputs and non-root walks
+
+`topology_traverser::get_subtopology` follows `SmTopologyTraverser.cpp`1667--2066
+at maintained fork `d8ed45a`. `SubTopology` exposes six optional arrays: None is a
+NULL output, and `all()` requests every array. `SubTopologyOptions` retains reset
+and caller-owned target-mark inputs. An all-None request returns before reading
+the receiver. Invalid use-object receivers clear requested arrays and return
+SM_ERR. Root collection always resets, even when append was requested.
+
+Non-root collection traverses source input seeds as well as the temporary
+receiver. Seeded higher arrays can therefore contribute objects unrelated to the
+receiver. The temporary receiver is removed only after the stages finish; it can
+remain in a requested output on a checked traversal failure. NoMark writes
+arrays directly (the Rust work storage is published on both success and error);
+target-mark mode copies to output only at the source's final transfer step.
+Neither mode sorts or normalizes existing input duplicates.
+
+A work mark is claimed excluding the target mark. The target mark itself is not
+advanced or implicitly locked. Native nested getters may reuse an unlocked
+target; callers that require a stable target epoch must lock it as source usage
+requires. Existing mark primitives and wire/root getters are reused. Work locks
+are released on errors while earlier mark writes, output writes and unrelated
+model metadata are retained.
+
+The source Shell-to-Face guard checks the Face's work mark, then stamps its
+**Faceuse** (line1911). Region/Shell collection can consequently contain duplicate
+Face entries. This behavior and its downstream diagnostic order are preserved;
+the output comment's uniqueness claim is not treated as permission to fix it.
+The marked non-root branch also leaves unrequested work pointers NULL and then
+dereferences all six. Rust returns a checked error with the defined marking
+prefix retained. That native undefined case cannot establish a passing result.
+Root partial marked outputs and invalid-type early returns remain supported.
+
+`assert_subtopology` follows `SmBrep.cpp`35303--35495. It collects every array
+before asserting Region, Shell, Face, Loop, Edge and Vertex in that order. It
+passes no parent Given requests and no recursive walk. Source summary-report and
+composite branches stay disabled. An ordinary collector status is ignored as
+native; checked graph failures and missing geometric dependencies propagate.
+Region, Shell, Face, Loop and Edge walk paths share this dispatcher; the use and
+Vertex routines retain their native ignored-walk behavior. Source geometry and
+parameter definitions are not touched by collection.
+
+The maintained comparison exercises every unmarked output mask, reset/append,
+seed duplicates, all mark types, target lock/no-lock, premarking, repeat calls,
+vertex loops, wire/shell vertices, holes and shared/manifold/spine/trihedral faces.
+Output IDs/order, mark epochs and counter advances are checked. Independent
+triangle invariants and checked-failure/lock-release tests supplement SDK parity.
+Selected local walks still depend on their actual geometric callees and do not
+qualify whole-model or native STEP acceptance.
+
+```text
+cargo build --locked -p solidcore --example brep_validation_probe
+python scripts/brep_subtopology_compare.py --cpp <validation-observer> --rust bin/debug/examples/brep_validation_probe.exe --receipt bin/brep-subtopology.local.json
+```
+
+The plural `GetSubTopologies` entry, including its input distribution and
+input/output-alias behavior, remains a separate migration task. A verified
+single-receiver collector or local walk does not establish that batch API.

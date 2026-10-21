@@ -27,6 +27,9 @@
 
 use std::collections::BTreeMap;
 
+mod subtopology;
+pub use subtopology::{get_subtopology, SubTopology, SubTopologyOptions};
+
 use crate::error::{Result, SolidError};
 use crate::geom::context::{MarkLock, MarkType};
 use crate::kernel::Kernel;

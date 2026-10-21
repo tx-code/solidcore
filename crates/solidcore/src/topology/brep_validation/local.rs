@@ -8,8 +8,8 @@
 //! |------|----------|
 //! | [`assert_region`] | `SmRegion::AssertValid` |
 //! | [`assert_shell`] | `SmShell::AssertValid` |
-//! Deviations: checked ids replace unsafe casts/dereferences; missing non-root
-//! GetSubTopology remains explicit. Shared traversal algorithms retain their
+//! Deviations: checked ids replace unsafe casts/dereferences. Shared
+//! subtopology and traversal algorithms retain their
 //! source order and bound input-driven walks. No geometry is approximated.
 
 use super::{local_base, AssertValidOptions, Brep, CheckLevel, Object, Reporter};
@@ -45,59 +45,20 @@ pub(super) fn root_shells(k: &mut Kernel, b: &mut Brep) -> Result<Vec<ShellId>> 
     result
 }
 
-/// Root branch of `GetSubTopology`, `SmTopologyTraverser.cpp`1720--1790: use
-/// actual stored root lists and face-derived loops before validating ANY child.
-/// Missing local/geometry calls stop the walk explicitly, never count as valid.
+/// Root assertions share the same collector as non-root traversal. The source
+/// gathers every requested array before running any local validator.
 pub(super) fn walk_root(
     k: &mut Kernel,
     b: &mut Brep,
     level: CheckLevel<'_>,
     report: &mut Reporter<'_>,
 ) -> Result<bool> {
-    let regions = super::bp::regions(b, None)?;
-    let shells = root_shells(k, b)?;
-    let faces = super::bp::faces(b, None)?;
-    let mut loops = Vec::new();
-    for face in &faces {
-        loops.extend(crate::topology::face::p2::loops(b, *face, false, None)?);
-    }
-    let edges = super::bp::edges(b, None)?;
-    let vertices = super::bp::vertices(b, None)?;
-    // Native passes the level but no root request array to child AssertValid.
-    let level = if matches!(level, CheckLevel::Given(_)) {
-        CheckLevel::Given(&[])
-    } else {
-        level
-    };
-    let options = AssertValidOptions { level, walk: false };
-    let mut valid = true;
-    for region in regions {
-        valid &= assert_region(k, b, region, options, report.reports.as_deref_mut())?;
-    }
-    for shell in shells {
-        valid &= assert_shell(k, b, shell, options, report.reports.as_deref_mut())?;
-    }
-    for face in faces {
-        valid &= super::assert_face(k, b, face, options, report.reports.as_deref_mut())?;
-    }
-    for loop_ in loops {
-        valid &= super::assert_loop(k, b, loop_, options, report.reports.as_deref_mut())?;
-    }
-    for edge in edges {
-        valid &= super::assert_edge(k, b, edge, options, report.reports.as_deref_mut())?;
-    }
-    for vertex in vertices {
-        valid &= super::assert_vertex(k, b, vertex, options, report.reports.as_deref_mut())?;
-    }
-    Ok(valid)
-}
-
-pub(super) fn non_root_walk() -> SolidError {
-    // UNPORTED(topology.topology_traverser): non-root GetSubTopology; do not
-    // replace its source mark/order semantics with an arbitrary graph scan.
-    SolidError::unported(
-        "SmTopologyTraverser::GetSubTopology (non-root)",
-        "topology.topology_traverser",
+    super::assert_subtopology(
+        k,
+        b,
+        crate::error::EntityRef::Brep(crate::topology::BrepId::from_index(0)),
+        level,
+        report.reports.as_deref_mut(),
     )
 }
 
@@ -111,13 +72,20 @@ pub fn assert_region(
     reports: Option<&mut AssertArray>,
 ) -> Result<bool> {
     b.region(region)?;
-    let valid = if matches!(options.level, CheckLevel::Given(_)) {
+    let mut report = Reporter { reports };
+    let mut valid = if matches!(options.level, CheckLevel::Given(_)) {
         true
     } else {
-        local_base::owning(k, b, Object::Region(region), &mut Reporter { reports })?
+        local_base::owning(k, b, Object::Region(region), &mut report)?
     };
     if options.walk {
-        return Err(non_root_walk());
+        valid &= super::assert_subtopology(
+            k,
+            b,
+            crate::error::EntityRef::Region(region),
+            options.level,
+            report.reports.as_deref_mut(),
+        )?;
     }
     Ok(valid)
 }
@@ -146,7 +114,13 @@ pub fn assert_shell(
     let (local_valid, early_return) = result?;
     valid &= local_valid;
     if !early_return && options.walk {
-        return Err(non_root_walk());
+        valid &= super::assert_subtopology(
+            k,
+            b,
+            crate::error::EntityRef::Shell(shell),
+            options.level,
+            report.reports.as_deref_mut(),
+        )?;
     }
     Ok(valid)
 }

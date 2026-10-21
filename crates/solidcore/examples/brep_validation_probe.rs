@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //! Synthetic required-link observer; successful output is prefix evidence only.
+#[path = "support/brep_subtopology_probe.rs"]
+mod subprobe;
 use serde_json::{json, Value};
 use solidcore::curve::{
     curve::{Curve, CurveKind},
@@ -112,7 +114,9 @@ fn run() -> Result<Value> {
     let root_mode = mode == "assert_root" || mode == "assert_root_walk";
     let vertex_mode = (mode.starts_with("assert_vertex") && !mode.starts_with("assert_vertexuse"))
         || mode.starts_with("vertex_");
-    let topology_mode = vertex_mode
+    let sub_mode = mode.starts_with("sub_");
+    let topology_mode = sub_mode
+        || vertex_mode
         || mode.starts_with("assert_region")
         || mode.starts_with("assert_shell")
         || mode.starts_with("assert_face")
@@ -393,9 +397,10 @@ fn run() -> Result<Value> {
         || mode.starts_with("assert_shell")
         || ((mode.starts_with("assert_vertexuse")
             || mode.starts_with("assert_edge")
-            || vertex_mode)
+            || vertex_mode
+            || sub_mode)
             && (mode.contains("_wire") || mode.contains("_shellvertex"))))
-        && (mode.contains("_vertex") || mode.contains("_wire"))
+        && (mode.contains("_vertex") || mode.contains("_wire") || mode.contains("_shellvertex"))
     {
         let (shell, vertex) =
             solidcore::topology::brep::p2::make_shell_vertex_topology(&mut b, None)?;
@@ -403,7 +408,7 @@ fn run() -> Result<Value> {
         if mode.contains("_wire") {
             let (wire, end) =
                 solidcore::topology::brep::p2::make_edge_vertex_topology(&mut b, None, vertex)?;
-            if mode.starts_with("assert_edge") {
+            if mode.starts_with("assert_edge") || mode.contains("_geometry") {
                 b.vertex_mut(vertex)?.point = Vec3::ZERO;
                 b.vertex_mut(end)?.point = Vec3::X;
                 let mut c = Curve::from(Line::from_points(Vec3::ZERO, Vec3::X, 3));
@@ -440,23 +445,24 @@ fn run() -> Result<Value> {
         .vertexuses
         .first()
         .ok_or("missing fixture vertex use")?;
-    let target_vu =
-        if (mode.starts_with("assert_vertexuse") || vertex_mode) && mode.contains("_vertexloop") {
-            match b.loopuse(target_lu)?.start {
-                LoopuseStart::Vertexuse(Some(vu)) => vu,
-                _ => return Err("missing vertex loop use".into()),
-            }
-        } else if (mode.starts_with("assert_vertexuse") || vertex_mode)
-            && (mode.contains("_wire") || mode.contains("_shellvertex"))
-        {
-            match b.shell(target_shell)?.members {
-                ShellMembers::Vertexuse(vu) => vu,
-                ShellMembers::Edgeuse(eu) => require(b.edgeuse(eu)?.vertexuse)?,
-                _ => return Err("missing shell vertex use".into()),
-            }
-        } else {
-            vu
-        };
+    let target_vu = if (mode.starts_with("assert_vertexuse") || vertex_mode || sub_mode)
+        && mode.contains("_vertexloop")
+    {
+        match b.loopuse(target_lu)?.start {
+            LoopuseStart::Vertexuse(Some(vu)) => vu,
+            _ => return Err("missing vertex loop use".into()),
+        }
+    } else if (mode.starts_with("assert_vertexuse") || vertex_mode || sub_mode)
+        && (mode.contains("_wire") || mode.contains("_shellvertex"))
+    {
+        match b.shell(target_shell)?.members {
+            ShellMembers::Vertexuse(vu) => vu,
+            ShellMembers::Edgeuse(eu) => require(b.edgeuse(eu)?.vertexuse)?,
+            _ => return Err("missing shell vertex use".into()),
+        }
+    } else {
+        vu
+    };
     if (side_mode || mode.starts_with("assert_edge") || vertex_mode) && mode.contains("_uv") {
         for eu in solidcore::topology::edgeuse::p1::loopuse_edgeuses(&b, lu)? {
             solidcore::topology::edgeuse::p3::get_or_create_uv_trim_curve(
@@ -696,6 +702,7 @@ fn run() -> Result<Value> {
     let mut local_output = None;
     let mut root_output = None;
     let mut side_output = None;
+    let mut sub_output = None;
     let mut vertex_query = (
         1000,
         false,
@@ -708,7 +715,42 @@ fn run() -> Result<Value> {
         [solidcore::math::UNDEF_DOUBLE; 4],
     );
     let mut invoke = |reports: Option<&mut AssertArray>| {
-        if raw {
+        if sub_mode {
+            let edge = if mode.contains("_wire") {
+                let ShellMembers::Edgeuse(use_) = b.shell(target_shell)?.members else {
+                    return Err(SolidError::null_pointer("wire fixture"));
+                };
+                b.edgeuse(use_)?
+                    .edge
+                    .ok_or_else(|| SolidError::null_pointer("wire edge"))?
+            } else {
+                *at(&edges, 0).map_err(|_| SolidError::null_pointer("fixture edge"))?
+            };
+            let fixture = subprobe::Fixture {
+                region,
+                shell: target_shell,
+                face,
+                loop_: target_loop,
+                edge,
+                vertex: b
+                    .vertexuse(target_vu)?
+                    .vertex
+                    .ok_or_else(|| SolidError::null_pointer("fixture vertex"))?,
+                fu,
+                lu: target_lu,
+                eu: first,
+                vu: target_vu,
+            };
+            let sub = subprobe::observe(&mut k, &mut b, mode, selection, &fixture)?;
+            let status = sub.status;
+            root_output = Some(status == 1000);
+            sub_output = Some(sub);
+            if status == 1000 {
+                Ok(())
+            } else {
+                Err(SolidError::sm_err("subtopology observer"))
+            }
+        } else if raw {
             Ok(())
         } else if root_mode {
             solidcore::topology::brep_validation::assert_valid(
@@ -1346,6 +1388,11 @@ fn run() -> Result<Value> {
                 ]),
             );
         }
+    }
+    if let Some(sub) = sub_output {
+        output.insert("sub_output".into(), sub.output);
+        output.insert("sub_advances".into(), sub.advances);
+        output.insert("sub_marks".into(), sub.marks);
     }
     if let Some(side) = side_output {
         output.insert("side".into(), side);

@@ -405,6 +405,33 @@ impl AssertArray {
     pub fn set_last_add(&mut self, last_add: bool) {
         self.last_add = last_add;
     }
+
+    /// `SM_ASSERT_REMOVE_CASCADING_REPORT`: preserve report order and `LastAdd`;
+    /// remove only the exact target when the same object's cause report exists.
+    pub(crate) fn remove_cascading(
+        &mut self,
+        object: ObjectKey,
+        cause_class: i64,
+        cause_index: u64,
+        target_class: i64,
+        target_index: u64,
+    ) {
+        let matches = |r: &AssertReport, class, index| {
+            r.reporter == Some(object)
+                && r.reporting_type == class
+                && r.test_index == index
+                && r.owner == Some(object)
+                && r.other.is_none()
+        };
+        if self
+            .reports
+            .iter()
+            .any(|r| matches(r, cause_class, cause_index))
+        {
+            self.reports
+                .retain(|r| !matches(r, target_class, target_index));
+        }
+    }
 }
 
 #[cfg(test)]

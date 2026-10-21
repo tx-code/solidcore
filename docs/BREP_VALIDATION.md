@@ -719,8 +719,8 @@ answer from a stored infinite-region flag.
 
 The public analytic material box completes pointer and LEVEL2 descendant checks
 through this path. Its geometry/topology construction and native validity do not
-establish general STEP acceptance. General B-spline cache-owner routes, periodic
-face classification, concrete primitive assertions, remaining query dispatches
+establish general STEP acceptance. Remaining general point-cache owner routes, periodic
+face classification, other concrete subclass assertions, remaining query dispatches
 and the other documented failure-path limitations still require implementation.
 
 The owning generic ray now builds its surface cache through the live BRep context
@@ -737,3 +737,13 @@ parameter-index behavior is retained; poles/seams use the executing Kernel.
 The legacy context-free comparison refuses a context-dependent branch rather
 than manufacturing a default. Candidate enumeration is not a guarantee of global
 extrema; the independent public maximization limitation is recorded in findings.
+
+Concrete Cone, Cylinder and Torus assertions now execute their own rules and
+the required Revolution/B-spline parent chain, with native Given-level rules,
+report indices and cascading removal. The actual parameterization knot query
+materializes only missing native NURBs and restores their owning slot on failure.
+Nested generator containment is intrinsic to the uniquely value-owned Rust
+representation; conflicting external owner metadata is rejected. This does not
+represent C++ independently corruptible generator/context backlinks. The public
+SDK control comparison covers four actual geometry kinds with and without a
+face owner; it does not qualify every malformed primitive or failure-label path.

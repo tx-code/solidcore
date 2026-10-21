@@ -9,7 +9,8 @@
 //! | [`assert_surface`] | dynamic Surface/BSplineSurface `AssertValid` |
 //! Deviations: owning face supplies missing geometry owner context. Checked
 //! errors replace undefined native access. Other dynamic surface subclass
-//! assertion bodies remain explicit dependencies; no geometry repair is added.
+//! assertion bodies outside the primitive/revolution family remain explicit
+//! dependencies; no geometry repair is added.
 
 use super::{
     local::ignore_native_status, AssertValidOptions, Brep, CheckLevel, FaceId, Object, Reporter,
@@ -29,6 +30,9 @@ use crate::surface::{
     validity,
 };
 
+#[path = "surface_primitives.rs"]
+mod primitives;
+
 fn missing() -> SolidError {
     SolidError::null_pointer("topology::brep_validation::assert_surface")
 }
@@ -40,7 +44,7 @@ fn object(b: &Brep, f: FaceId) -> Result<Object> {
 }
 
 /// Native dynamic assertion, including Plane's own Given/base-chain convention.
-/// Other concrete subclass assertion bodies remain explicit dependencies.
+/// Concrete primitives execute their own assertions and actual parent chain.
 pub fn assert_surface(
     k: &mut Kernel,
     b: &mut Brep,
@@ -48,6 +52,12 @@ pub fn assert_surface(
     options: AssertValidOptions<'_>,
     reports: Option<&mut AssertArray>,
 ) -> Result<bool> {
+    if matches!(
+        surface(b, f)?.kind(),
+        SurfaceKind::Cone(_) | SurfaceKind::Torus(_) | SurfaceKind::SurfOfRevolution(_)
+    ) {
+        return primitives::assert_primitive(k, b, f, options, reports);
+    }
     if matches!(surface(b, f)?.kind(), SurfaceKind::Plane(_)) {
         let mut report = Reporter { reports };
         let mut valid = true;
@@ -80,7 +90,11 @@ fn bspline_assertions(
 ) -> Result<bool> {
     if !matches!(
         surface(b, f)?.kind(),
-        SurfaceKind::BSpline(_) | SurfaceKind::Plane(_) | SurfaceKind::SurfOfRevolution(_)
+        SurfaceKind::BSpline(_)
+            | SurfaceKind::Plane(_)
+            | SurfaceKind::SurfOfRevolution(_)
+            | SurfaceKind::Cone(_)
+            | SurfaceKind::Torus(_)
     ) {
         // UNPORTED(fork.topology_validation): remaining concrete subclass bodies.
         return Err(SolidError::unported(

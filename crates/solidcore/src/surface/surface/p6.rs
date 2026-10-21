@@ -91,7 +91,7 @@ use crate::nurbs::knots::Side;
 use super::p1::CsIntersectEnfo;
 use super::p2::{DerivSurfDefinition, TangencyType};
 use super::p4::{global_point_solve_starts, NoObject};
-use super::p5::DropPointOptions;
+use super::p5::{identical_solutions_with_geometry, DropPointOptions, SolutionGeometry};
 use super::p7::SsGlobalSolver;
 use super::{Surface, SurfaceKind};
 
@@ -607,6 +607,34 @@ impl Surface {
         uv_guess: Point2,
         t_guess: f64,
     ) -> Result<Option<CurveIntersection>> {
+        self.local_curve_intersect_with_context(
+            &Kernel::default(),
+            None,
+            uv_domain,
+            curve,
+            interval,
+            distance_tolerance,
+            uv_guess,
+            t_guess,
+        )
+    }
+
+    /// The same `SmSurface.cpp:24745--24990` body with the owning query's actual
+    /// context and face working tolerance. In particular, the singularity test
+    /// at source line 24894 must resolve the surface owner for `GetSingularities`.
+    /// No owner is cleared and its approximation tolerance remains half the
+    /// actual face tolerance through `surface_approx_tol_3d`.
+    pub(crate) fn local_curve_intersect_with_context(
+        &self,
+        k: &Kernel,
+        face_tolerance: Option<f64>,
+        uv_domain: &Extent2d,
+        curve: &Curve,
+        interval: &Extent1d,
+        distance_tolerance: f64,
+        uv_guess: Point2,
+        t_guess: f64,
+    ) -> Result<Option<CurveIntersection>> {
         // locals for Solver interval and periodicity values (local solvers should not
         // jump over seams)
         let intervals = [
@@ -667,8 +695,20 @@ impl Surface {
         // If we're at a singularity, any value of the degenerate parameter will be a
         // solution: return a parameter value on one end of the degenerate domain,
         // whichever end is closer to the guess point.
-        let (singular, sing_dir) =
-            is_singularity(&Kernel::default(), self, uv, distance_tolerance)?;
+        let (singular, sing_dir) = if let Some(tolerance) = face_tolerance {
+            let result = self.is_singularity_with_owner_tolerance(
+                k,
+                uv,
+                u64::from(crate::surface::offset_surface::SS_UNKNOWN),
+                None,
+                distance_tolerance,
+                false,
+                Some(tolerance),
+            )?;
+            (result.singular, result.direction)
+        } else {
+            is_singularity(k, self, uv, distance_tolerance)?
+        };
         if singular {
             // If one end of the subdomain coincides with an end of the whole domain,
             // use that.
@@ -1484,7 +1524,17 @@ impl<O: SolutionObject> SsGlobalSolver<'_, '_, O> {
         sol2: &Solution<O>,
     ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
         // If the parent thinks they're identical, then they are.
-        let (sp_type, preferred) = self.base.identical_solutions(sol1, sol2)?;
+        let (sp_type, preferred) = identical_solutions_with_geometry(
+            &self.base,
+            sol1,
+            sol2,
+            [
+                self.surface1
+                    .map(|surface| (0, SolutionGeometry::Surface(surface))),
+                self.surface2
+                    .map(|surface| (1, SolutionGeometry::Surface(surface))),
+            ],
+        )?;
         if sp_type == SolutionPairType::Identical {
             return Ok((SolutionPairType::Identical, preferred));
         }

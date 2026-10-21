@@ -56,7 +56,10 @@ use crate::geom::extent1d::Extent1d;
 use crate::geom::extent2d::Extent2d;
 use crate::geom::extent3d::LineHit as BoxHit;
 use crate::geom::geom_utility::p2::ContinuityType;
-use crate::geom::global_solver::{Branch, GlobalSolve, SolverOperation};
+use crate::geom::global_solver::{
+    Branch, GlobalSolve, GlobalSolver, PreferredSolution, SolutionPairType, SolveRequest,
+    SolverOperation,
+};
 use crate::geom::pseudo_box::LineHit as PseudoHit;
 use crate::geom::solution_array::{
     Solution, SolutionArray, SolutionEnd, SolutionObject, SolutionType, SortKey,
@@ -87,6 +90,7 @@ const MAX_GUESSES: usize = 6;
 /// `rdDeviation`), the status checked by the caller (`SER`).
 #[allow(clippy::too_many_arguments)] // upstream's arguments
 fn surface_local_curve_intersect(
+    owner_context: Option<(&Kernel, f64)>,
     surface: &Surface,
     domain: &Extent2d,
     curve: &Curve,
@@ -95,7 +99,20 @@ fn surface_local_curve_intersect(
     uv_guess: Point2,
     t_guess: f64,
 ) -> Result<Option<CurveIntersection>> {
-    surface.local_curve_intersect(domain, curve, interval, tol, uv_guess, t_guess)
+    if let Some((kernel, face_tolerance)) = owner_context {
+        surface.local_curve_intersect_with_context(
+            kernel,
+            Some(face_tolerance),
+            domain,
+            curve,
+            interval,
+            tol,
+            uv_guess,
+            t_guess,
+        )
+    } else {
+        surface.local_curve_intersect(domain, curve, interval, tol, uv_guess, t_guess)
+    }
 }
 
 /// `sm_FilterSolution`: whether to keep a curve/surface solution (`rbKeepSolution`).
@@ -263,6 +280,38 @@ fn pseudo_hit(hit: &Result<PseudoHit>) -> Option<(u32, f64, f64)> {
 
 // ---- SmLSIGlobalSolver::LocalSolve -------------------------------------------------------------
 
+// Query-local owner data deepens the existing LSI execution seam without adding
+// fields to the public solver. Traversal, duplicate comparison, solution order
+// and local numerical bodies are the same for borrowed and owning callers.
+struct LsiOwnerExecution<'a, 't, 's, O> {
+    solver: &'a mut LsiGlobalSolver<'t, 's, O>,
+    kernel: &'a Kernel,
+    face_tolerance: f64,
+}
+
+impl<'t, O: SolutionObject + 't> GlobalSolve<'t, O> for LsiOwnerExecution<'_, 't, '_, O> {
+    fn solver(&self) -> &GlobalSolver<'t, O> {
+        &self.solver.base
+    }
+    fn solver_mut(&mut self) -> &mut GlobalSolver<'t, O> {
+        &mut self.solver.base
+    }
+    fn branch_may_contain_answers(&mut self, branch: &Branch) -> Result<bool> {
+        self.solver.may_contain_answers(branch)
+    }
+    fn local_solve(&mut self, branch: &Branch) -> Result<bool> {
+        self.solver
+            .local_solve_branch_with_owner(branch, Some((self.kernel, self.face_tolerance)))
+    }
+    fn identical_solutions(
+        &self,
+        first: &Solution<O>,
+        second: &Solution<O>,
+    ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
+        self.solver.identical_solutions(first, second)
+    }
+}
+
 /// Read-only state of one leaf solve.
 struct LsiLeaf<'s, O> {
     cache: &'s SurfaceCache<O>,
@@ -344,6 +393,29 @@ impl<'t, 's, O: SolutionObject + 't> LsiGlobalSolver<'t, 's, O> {
     /// and solves; [`SolidError::Unported`] from the calls into units not ported yet.
     #[allow(clippy::too_many_lines)]
     pub fn local_solve_branch(&mut self, branch: &Branch) -> Result<bool> {
+        self.local_solve_branch_with_owner(branch, None)
+    }
+
+    pub(crate) fn solve_with_face_tolerance(
+        &mut self,
+        kernel: &Kernel,
+        face_tolerance: f64,
+        request: &SolveRequest<'_>,
+        solutions: &mut SolutionArray<O>,
+    ) -> Result<()> {
+        LsiOwnerExecution {
+            solver: self,
+            kernel,
+            face_tolerance,
+        }
+        .solve_it(request, solutions)
+    }
+
+    fn local_solve_branch_with_owner(
+        &mut self,
+        branch: &Branch,
+        owner_context: Option<(&Kernel, f64)>,
+    ) -> Result<bool> {
         // locals - apBranch[0] is SurfaceNode
         let surface_node = *self.base.branch_node(branch, 0)?;
         let surface_id = branch
@@ -548,6 +620,7 @@ impl<'t, 's, O: SolutionObject + 't> LsiGlobalSolver<'t, 's, O> {
 
             // pass the call along to local curve intersection
             let Some(hit) = surface_local_curve_intersect(
+                owner_context,
                 leaf.eval,
                 &leaf.domain,
                 &leaf.line,

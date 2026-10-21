@@ -722,3 +722,18 @@ through this path. Its geometry/topology construction and native validity do not
 establish general STEP acceptance. General B-spline cache-owner routes, periodic
 face classification, concrete primitive assertions, remaining query dispatches
 and the other documented failure-path limitations still require implementation.
+
+The owning generic ray now builds its surface cache through the live BRep context
+before entering the shared line/tree solver. Actual Kernel and face tolerance
+reach the LSI leaf's singularity query without changing the public solver layout.
+A B-spline triangle regression covers this route with distinct system and face
+tolerances, including Boolean-delayed cache construction. Typed cache-use metadata
+is checked in its scoped namespace. This does not complete the distinct owning
+point-maximize cache route, periodic gap/classification or full cache-manager reuse.
+
+Surface duplicate comparison now resolves matching non-null tree handles against
+the actual borrowed defining domains. The original native null-object and
+parameter-index behavior is retained; poles/seams use the executing Kernel.
+The legacy context-free comparison refuses a context-dependent branch rather
+than manufacturing a default. Candidate enumeration is not a guarantee of global
+extrema; the independent public maximization limitation is recorded in findings.

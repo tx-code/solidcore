@@ -24,7 +24,7 @@ use crate::geom::object::{ObjectRef, ShapeMember};
 use crate::geom::solution_array::SolutionArray;
 use crate::intersect::point_class::{PointClassType, PointClassification};
 use crate::intersect::topology_solver::p1::{
-    accept_point_face_ray, point_face_ray_candidates, point_vertex_zone_tol_3d,
+    accept_point_face_ray, point_face_ray_request, point_vertex_zone_tol_3d,
     solve_borrowed_point_pair, LocalSolver, LocalSolverKind, PointLocalExecutor,
     RayFaceClassification, TopologyObjects, TopologySolver,
 };
@@ -121,13 +121,16 @@ impl PointLocalExecutor<CacheObject> for RayOwner<'_> {
                 solve_borrowed_point_pair(kernel, &objects, state, local, first, second)
             }
             LocalSolverKind::PointFace => {
-                let candidates = {
+                let request = {
                     let objects = self.objects();
-                    point_face_ray_candidates(kernel, &objects, state, local, first, second)?
+                    point_face_ray_request(&objects, state, local, first, second)?
                 };
-                // The surface borrow has ended. PointClassify may create UV trim
-                // curves and update native caches on this same owning model.
-                if let Some(candidates) = candidates {
+                // Geometry borrows have ended. Both native cache construction
+                // and PointClassify may update this same owning model.
+                if let Some(request) = request {
+                    let solutions =
+                        super::surface_owner::line_intersections(kernel, self.brep, &request)?;
+                    let candidates = request.candidates(solutions);
                     accept_point_face_ray(kernel, state, local, self, &candidates)?;
                 }
                 Ok(())
@@ -460,5 +463,67 @@ mod tests {
                 .iter()
                 .any(|object| matches!(object, Some(CacheObject::Edge(_))))
         }));
+    }
+
+    #[test]
+    fn owned_bspline_triangle_ray_uses_live_cache_topology_and_keeps_its_owner() {
+        check_owned_bspline_triangle_ray(1e-5, 1e-5, false);
+    }
+
+    #[test]
+    fn owned_bspline_triangle_ray_keeps_nondefault_context_and_face_tolerance() {
+        // Distinct system/face tolerances and delayed Boolean cache construction
+        // exercise the caller's context, rather than a replacement default Kernel.
+        check_owned_bspline_triangle_ray(3e-3, 7e-5, true);
+    }
+
+    fn check_owned_bspline_triangle_ray(system_zone: f64, face_tolerance: f64, boolean: bool) {
+        let (mut kernel, mut brep, face) = triangle();
+        kernel.tolerances.zone_tol_3d = system_zone;
+        kernel.context.set_doing_boolean(boolean);
+        brep.face_mut(face).unwrap().tolerance = face_tolerance;
+        let original = brep.face(face).unwrap().surface.as_ref().unwrap();
+        let crate::surface::surface::SurfaceKind::Plane(plane) = original.kind() else {
+            panic!("plane fixture");
+        };
+        // The identical degree-one definition as an explicit NURBS surface,
+        // so the actual generic line/cache path runs instead of Plane's override.
+        let mut surface = Surface::from(plane.base_with_nurb().unwrap().clone_exact());
+        surface.set_owner(original.owner());
+        let owner = surface.owner();
+        brep.face_mut(face).unwrap().surface = Some(surface);
+        let editing = brep.editing_enabled();
+        let tolerance = brep.tolerance();
+        let cache = make_brep_cache(&kernel, CacheSource::Brep(&brep), &arena_identity).unwrap();
+        let direction = [-Vec3::Z];
+        let solutions = point_solve(
+            &kernel,
+            &mut brep,
+            BrepId::from_index(0),
+            &cache,
+            &arena_identity,
+            &|_| None,
+            Point3::new(0.25, 0.25, 1.),
+            TopologySolveOptions {
+                operation: SolverOperation::Rayfire,
+                requested: SolutionRequested::All,
+                tolerance_3d: tolerance,
+                best_answer_so_far_sq: BIG_DOUBLE,
+                opt_vectors: &direction,
+            },
+        )
+        .unwrap();
+        assert!(solutions
+            .as_slice()
+            .iter()
+            .any(|solution| { solution.objects.contains(&Some(CacheObject::Face(face))) }));
+        assert_eq!(
+            brep.face(face).unwrap().surface.as_ref().unwrap().owner(),
+            owner
+        );
+        assert_eq!(brep.editing_enabled(), editing);
+        assert_eq!(brep.tolerance(), tolerance);
+        assert_eq!(brep.face(face).unwrap().tolerance, face_tolerance);
+        assert_eq!(kernel.context.doing_boolean(), boolean);
     }
 }

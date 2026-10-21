@@ -557,7 +557,7 @@ impl<'a, O: SolutionObject + 'a> GlobalSolve<'a, O> for CsiGlobalSolver<'a, '_, 
         first: &Solution<O>,
         second: &Solution<O>,
     ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
-        super::p5::csi_identical_solutions(&self.base, self.surface, first, second)
+        self.surface_identical_solutions(first, second)
     }
 }
 

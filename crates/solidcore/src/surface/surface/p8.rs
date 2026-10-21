@@ -1086,7 +1086,7 @@ impl Surface {
     /// # Errors
     ///
     /// Those of [`Surface::base_global_line_intersect`].
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub fn base_global_line_intersect_in<O: SolutionObject>(
         &self,
         k: &Kernel,
@@ -1104,9 +1104,6 @@ impl Surface {
             return Err(SolidError::invalid_input(OP_LINE, "zero line vector"));
         }
 
-        // init output
-        let mut sols: SolutionArray<O> = SolutionArray::new();
-
         // local Surface Cache
         let built;
         let cache = if let Some(c) = cache {
@@ -1115,6 +1112,39 @@ impl Surface {
             built = self.solve_cache_of(k, surface, OP_LINE)?;
             &built
         };
+        self.base_global_line_intersect_ready_cache(
+            k,
+            surface,
+            cache,
+            None,
+            uv_domain,
+            line_point,
+            line_vector,
+            line_interval,
+            fire_ray,
+            distance_tolerance,
+        )
+    }
+
+    /// The same line/tree numerical body after the original nonzero-direction
+    /// guard and virtual `GetTree`. Native owner adapters build the actual cache
+    /// with their live topology resolver, then enter here without a second
+    /// standalone cache lookup or a change to its plain/trimmed dynamic role.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(crate) fn base_global_line_intersect_ready_cache<O: SolutionObject>(
+        &self,
+        k: &Kernel,
+        surface: Option<O>,
+        cache: &SurfaceCache<O>,
+        face_tolerance: Option<f64>,
+        uv_domain: &Extent2d,
+        line_point: Point3,
+        line_vector: Vec3,
+        line_interval: Option<&Extent1d>,
+        fire_ray: bool,
+        distance_tolerance: f64,
+    ) -> Result<SolutionArray<O>> {
+        let mut sols: SolutionArray<O> = SolutionArray::new();
         let tree = cache.tree().ok_or(SolidError::null_pointer(OP_LINE))?;
         let top = tree.top_node().ok_or(SolidError::null_pointer(OP_LINE))?;
         let tree_box = tree.node(top)?.bbox;
@@ -1143,16 +1173,18 @@ impl Surface {
         // traverse curve and surface sub-division trees
         // for each sub-division leaf pair that has intersecting boundaries
         //   call SmLSIGlobalSolver::LocalSolve()
-        gs.solve_it(
-            &SolveRequest {
-                operation: SolverOperation::Intersect,
-                solution_requested: SolutionRequested::All,
-                tolerance_3d: distance_tolerance,
-                best_answer_so_far_sq: BIG_DOUBLE,
-                opt_vectors: &[],
-            },
-            &mut sols,
-        )?;
+        let request = SolveRequest {
+            operation: SolverOperation::Intersect,
+            solution_requested: SolutionRequested::All,
+            tolerance_3d: distance_tolerance,
+            best_answer_so_far_sq: BIG_DOUBLE,
+            opt_vectors: &[],
+        };
+        if let Some(tolerance) = face_tolerance {
+            gs.solve_with_face_tolerance(k, tolerance, &request, &mut sols)?;
+        } else {
+            gs.solve_it(&request, &mut sols)?;
+        }
         // restore the original scaling to solution parameters
         for ii in 0..sols.len() {
             let sol = sols.get_mut(ii).ok_or(SolidError::null_pointer(OP_LINE))?;

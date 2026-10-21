@@ -4132,6 +4132,67 @@ cases, 169 deferred; `SmSurface::EvaluateNormal` and `DropVectors` now call the
   its fast/local/global solves and their callers. `Surface::cover_other_coincident_surface`
   still calls `convert_domain_from_*` with a default `Kernel`.
 
+- **Open: symmetric planar `GlobalPointSolve_0(MAXIMIZE)` misses the mathematical
+  global maximum (2026-10-21).** Public synthetic reproduction: construct a degree-one
+  bilinear B-spline patch with corners `(0,0,0)`, `(1,0,0)`, `(0,1,0)`, `(1,1,0)`,
+  then call `Surface::global_point_solve_0` over its natural `[0,1] x [0,1]` domain
+  with test point `(0.5,0.5,1)`, `SolverOperation::Maximize`, tolerance `1e-6`,
+  no target distance and `SolutionRequested::All`. Both the Rust focused test
+  and an actual observer linked against the existing C++ SDK returned four UVs
+  `(0,0.5)`, `(0.5,0)`, `(0.5,1)`, `(1,0.5)`, in that order on the C++ side,
+  rather than the four corners. C++ returned `SM_SUCCESS` (1000), distance
+  `1.1180339887498949` for every candidate, two variables and two objects
+  `[NULL point, actual surface]`. On this analytic patch those candidates have
+  squared distance `1.25`; the mathematical maximum is `1.5` at the corners.
+  This remains an unresolved numerical capability shared by the observed
+  implementations, separate from solution-domain dispatch.
+  Maintained-fork source clues: `SmSurface.cpp::sm_LoadGuesses` (line 4117) uses
+  one central grid sample for a 2-by-2 control net and returns one seed;
+  `sm_SpLocalSolve` (4512) then runs one midpoint-seeded local solve per
+  discontinuous boundary, without explicitly enumerating its endpoints.
+  `SmCurve.cpp::SmFindPCExtremaEFO::Evaluate` (18272, especially 18397--18423)
+  negates the Newton derivative for `MAXIMIZE` but accepts a nonzero gap
+  perpendicular to the tangent as a found stationary point; the exact midpoint
+  of each straight boundary already meets that test. The boundary order is
+  lower U, lower V, upper U, upper V. `SmGlobalSolver.cpp::AddSortedSolution`
+  (1778) truncates the sorted candidate list for `SM_SR_SINGLE`; changing
+  `All` to `Single` does not itself supply the missing endpoint seeds.
+  **Observed C++ profile:** existing SMLib SDK version `1.0.0`, Windows x64
+  Release, MSVC toolset `14.50.35717`, C++20, `/MD`, `NDEBUG`, `NL_DEBUG_CODE`,
+  `SM_GRAPHICS_CALLBACKS=1`, `UNICODE` and `_UNICODE`. The one-source observer
+  used `/fp:precise` and the installed headers/import library/DLL; it did not
+  rebuild the SDK. The six checked layout headers (`SmSurface`,
+  `SmBSplineSurface`, `SmContext`, `SmObject`, `SmSolutionArray`, `SmConfig`)
+  matched the current maintained source byte-for-byte. The observed SDK DLL
+  SHA-256 is `38b8fc7e950c5b08b9b3ba44582fb66977ce288599a4a409e1a0d8fe8e8e1e76`.
+  The source reads above are pinned by SHA-256:
+  `SmSurface.cpp` = `218a360a80b68d4dec70a7b3e1cab5d8d89a375f41cd5564e2e058c6629740be`,
+  `SmCurve.cpp` = `d3cc661baf6cac87deb93fcedbc843df05ac0548ccae090887e4beb3464e7e26`,
+  `SmGlobalSolver.cpp` = `d29ec1f4cd1eacd5894db9933a231d8b23a1ac8993b1cee15ab8476bc947ed83`.
+  This establishes agreement only for the stated unowned, bilinear old-point-
+  solver fixture and configuration; it is not full solver, STEP or numerical
+  qualification, and is not a claim that the existing DLL was rebuilt from
+  those source reads. The independent mathematical maximum remains unmet.
+  No solver formula, tolerance, seed, expectation of the mathematical maximum,
+  or qualification gate was changed to make this case pass.
+  The shared-comparison regression checks only that multiple actual candidates
+  retain the native `[NULL point, surface]` object layout and its empty-domain
+  behavior; it does not certify their global-maximum correctness.
+
+- **Open: owning point `MAXIMIZE` still bypasses live cache topology (2026-10-21).**
+  Calling `BrepSurfaceContext::global_point_solve` on an actual face-owned copy of
+  that patch, with its model in editing mode, fails explicitly with
+  `Unported { upstream: "SmFace handle of a surface's face", unit: "topology.face_p2" }`.
+  The `GlobalPointSolve` maximum branch in `surface/surface/p4.rs` calls
+  `global_point_solve_0`, whose `surface/surface/p8.rs::solve_cache_of` uses the
+  standalone cache lookup and reaches `UnresolvedTopology::face`. That branch
+  does not use the live topology already supplied to the outer point adapter.
+  The regression retains this exact failure, the original surface owner and the
+  model's editing state. A separate live `BrepSurfaceContext` cache factory to CS
+  comparison test covers the supported narrower seam; a successful owning ray
+  cache path does not establish this owning point path. No owner is cleared and
+  no default context is substituted.
+
 ## intersect.curve_class_p1 (`SmCurveClassification`, part 1, PR #47 review, 2026-10-14)
 
 - **CI red on clippy with the C++ feature.** `cargo clippy --workspace --all-targets

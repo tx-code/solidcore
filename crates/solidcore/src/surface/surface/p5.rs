@@ -24,11 +24,12 @@
 //! | [`cs_identical_solutions`], [`csi_identical_solutions`] | `SmCSGlobalSolver::IdenticalSolutions`, `SmCSIGlobalSolver::IdenticalSolutions` |
 //!
 //! Deviations:
-//! - **Solver classes without a Rust struct.** `SmCSGlobalSolver` and
-//!   `SmCSIGlobalSolver` have no struct yet (their constructors belong to unit
-//!   `surface.surface_p1`), so their `IdenticalSolutions` are free functions over the
-//!   solver state they read (`SmGlobalSolver` base, surface, tolerance).
-//!   `m_d3dTolerance` of the base class is [`GlobalSolver::tolerance_3d`].
+//! - **Solver objects.** The executing surface solvers resolve non-null solution
+//!   handles through their matching tree owners to their actual borrowed defining
+//!   geometry. The original parameter-to-object dispatch, null entries and natural
+//!   domains remain unchanged. `m_d3dTolerance` is [`GlobalSolver::tolerance_3d`].
+//!   The public CS/CSI free functions retain their signatures for standalone callers;
+//!   the actual solver methods also provide the geometry and current context.
 //! - **File-static functions** take what their callers resolve: `sm_SpLocalSolve` gets
 //!   the surface `sm_GetSurfaceToEvaluate(node, patch surface)` returns (unit
 //!   `surface.surface_p1`) instead of the tree node and Bezier patch.
@@ -44,9 +45,11 @@
 //! - **Debug-only work** (drawing, dumps, assertions) is not ported.
 //! - **Kernel.** `IsSingularity` (through `GetSingularities`' approximation tolerance),
 //!   `EvaluateNormalAtSingularity`, `CoverOtherCoincidentSurface`, `LocalPointSolve` and
-//!   `DropPoint` take the caller's [`Kernel`]. The `IdenticalSolutions` overrides and the image-space
-//!   `LocalSurfaceSurfaceIntersect` have no kernel threaded to them yet and use
-//!   `Kernel::default()` (upstream's global tolerances at their defaults).
+//!   `DropPoint` take the caller's [`Kernel`]. The `IdenticalSolutions` overrides
+//!   use their executing solver's current Kernel for the pole/seam branches. A
+//!   standalone comparison without it reports `Unported` only if that branch is
+//!   reached; it never manufactures a default context. The image-space
+//!   `LocalSurfaceSurfaceIntersect` still uses `Kernel::default()`.
 //! - **`CoverOtherCoincidentSurface`** takes both surfaces `&mut`: the covering surface
 //!   is expanded in place by `CoverCoincidentSurface`, as upstream. A failing
 //!   `CoverCoincidentSurface` leaves `rdMaxDist` at `SM_BIG_DOUBLE` (its first
@@ -68,7 +71,9 @@ use crate::geom::global_solver::{
     GlobalSolver, PreferredSolution, SolutionPairType, SolutionRequested, SolverOperation,
 };
 use crate::geom::local_solve_nd::{BoundaryHandler, LocalSolveNd, TerminationReason};
-use crate::geom::solution_array::{Solution, SolutionArray, SolutionObject, SolutionType};
+use crate::geom::solution_array::{
+    ObjectKind, Solution, SolutionArray, SolutionObject, SolutionType,
+};
 use crate::geom::tol::{are_same, ZONE_TOL_3D};
 use crate::geom::vector2d::Vec2;
 use crate::kernel::Kernel;
@@ -78,7 +83,9 @@ use crate::nurbs::b_spline_surface::SurfParamType;
 use crate::nurbs::b_spline_surface_n_lib::p2::EvaluateFlags;
 use crate::nurbs::knots::Side;
 
-use super::p1::{evaluate_1st_derivatives, get_surface_cache, FindPsNormalEnfo};
+use super::p1::{
+    evaluate_1st_derivatives, get_surface_cache, CsGlobalSolver, CsiGlobalSolver, FindPsNormalEnfo,
+};
 use super::p2::{LsiGlobalSolver, SurfaceEval};
 use super::p4::is_point_on_normal;
 use super::p4::NoObject;
@@ -2125,6 +2132,108 @@ pub fn filter_solution<O: SolutionObject>(
 
 // ---- IdenticalSolutions of the surface global solvers ---------------------------------------------
 
+/// Actual defining geometry of a tree's owner. It is borrowed only for this
+/// comparison; no caller-visible solution handle or geometry is replaced.
+#[derive(Clone, Copy)]
+pub(super) enum SolutionGeometry<'a> {
+    /// The defining curve stored by the owner cache.
+    Curve(&'a Curve),
+    /// The defining surface stored by the owner cache.
+    Surface(&'a Surface),
+}
+
+/// Typed metadata only, for the existing Solution parameter-domain dispatcher.
+#[derive(Clone, Copy, PartialEq)]
+enum ObjectDomain<O> {
+    Opaque(O),
+    Curve(Extent1d),
+    Surface(Extent2d),
+}
+
+impl<O: SolutionObject> SolutionObject for ObjectDomain<O> {
+    fn kind(&self) -> ObjectKind {
+        match self {
+            Self::Opaque(object) => object.kind(),
+            Self::Curve(_) => ObjectKind::Curve,
+            Self::Surface(_) => ObjectKind::Surface,
+        }
+    }
+
+    fn natural_interval(&self) -> Option<Extent1d> {
+        match self {
+            Self::Opaque(object) => object.natural_interval(),
+            Self::Curve(interval) => Some(*interval),
+            Self::Surface(_) => None,
+        }
+    }
+
+    fn natural_uv_domain(&self) -> Option<Extent2d> {
+        match self {
+            Self::Opaque(object) => object.natural_uv_domain(),
+            Self::Surface(domain) => Some(*domain),
+            Self::Curve(_) => None,
+        }
+    }
+}
+
+/// The native parent comparison with actual tree-owner geometry metadata.
+///
+/// `geometry[object_index]` identifies that solution object's owning tree and
+/// its actual defining geometry. Only existing non-null matching owners are
+/// resolved. The maintained fork's `SmSolutionArray.cpp::GetParameterInterval`
+/// and `GetObjectIndexForParameterIndex` remain the sole parameter-to-object
+/// mapping: in particular, their null-object behavior and their repeated read
+/// of object zero before a match are preserved. Query domains are never used
+/// as natural domains, and native NULL point/line entries stay NULL.
+pub(super) fn identical_solutions_with_geometry<O: SolutionObject>(
+    base: &GlobalSolver<'_, O>,
+    sol1: &Solution<O>,
+    sol2: &Solution<O>,
+    geometry: [Option<(usize, SolutionGeometry<'_>)>; 2],
+) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
+    GlobalSolver::identical_solutions_with_intervals(sol1, sol2, |solution, parameter| {
+        let mut typed = Solution::new();
+        typed.num_objects = solution.num_objects;
+        typed.num_variables = solution.num_variables;
+        for (index, (target, source)) in typed
+            .objects
+            .iter_mut()
+            .zip(solution.objects.iter())
+            .enumerate()
+        {
+            *target = source.map(ObjectDomain::Opaque);
+            if index >= solution.num_objects {
+                continue;
+            }
+            let Some(object) = source else {
+                continue;
+            };
+            let Some((tree, defining)) = geometry.get(index).copied().flatten() else {
+                continue;
+            };
+            if tree >= base.num_trees {
+                continue;
+            }
+            if Some(*object) == base.tree(tree)?.owner_object()? {
+                *target = Some(match defining {
+                    SolutionGeometry::Curve(curve) => ObjectDomain::Curve(curve.natural_interval()),
+                    SolutionGeometry::Surface(surface) => {
+                        ObjectDomain::Surface(surface.natural_uv_domain())
+                    }
+                });
+            }
+        }
+        typed.parameter_interval(parameter)
+    })
+}
+
+/// The surface and context already held by the executing native solver.
+struct SurfaceComparison<'a> {
+    surface: Option<&'a Surface>,
+    kernel: Option<&'a Kernel>,
+    geometry: [Option<(usize, SolutionGeometry<'a>)>; 2],
+}
+
 /// The shared body of the four `IdenticalSolutions` overrides: the parent's verdict, then
 /// the singularity/seam rules for solutions whose parameters differ.
 ///
@@ -2133,14 +2242,14 @@ pub fn filter_solution<O: SolutionObject>(
 /// `SM_ST_SINGLE_VALUE` condition of the curve/surface solvers.
 fn surface_identical_solutions<O: SolutionObject>(
     base: &GlobalSolver<'_, O>,
-    surface: Option<&Surface>,
+    context: &SurfaceComparison<'_>,
     sol1: &Solution<O>,
     sol2: &Solution<O>,
     uv_at: usize,
     require_single: bool,
 ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
     // If the parent thinks they're identical, then they are.
-    let (pair, preferred) = base.identical_solutions(sol1, sol2)?;
+    let (pair, preferred) = identical_solutions_with_geometry(base, sol1, sol2, context.geometry)?;
     if pair == SolutionPairType::Identical {
         return Ok((pair, preferred));
     }
@@ -2150,7 +2259,7 @@ fn surface_identical_solutions<O: SolutionObject>(
             || (sol1.solution_type == SolutionType::SingleValue
                 && sol2.solution_type == SolutionType::SingleValue))
     {
-        let surf = surface.ok_or(SolidError::null_pointer(OP_SING))?;
+        let surf = context.surface.ok_or(SolidError::null_pointer(OP_SING))?;
 
         // At a singularity, the same 3d point can have different uv values.
         let uv1 = Point2::new(sol1.start.param(uv_at)?, sol1.start.param(uv_at + 1)?);
@@ -2167,23 +2276,36 @@ fn surface_identical_solutions<O: SolutionObject>(
 
         // 3d points are the same. Need to check seams and poles. Check poles first,
         // it's a cheaper check. If either is nonsingular, they're distinct.
-        if !surf
-            .is_singularity(&Kernel::default(), uv1, EFF_ZERO, false)?
-            .singular
-        {
+        // Native IsSingularity/IsOnSeam reach the surface's current context.
+        // Constructors without a caller Kernel can still perform the parent
+        // and position comparisons above; context-dependent work must not
+        // manufacture a default Kernel or cache a stale tolerance snapshot.
+        let is_singular = |uv| -> Result<bool> {
+            // SmPlane's virtual override needs no context and always returns
+            // false. A legacy context-free comparison retains that call.
+            if let SurfaceKind::Plane(plane) = surf.kind() {
+                Ok(plane.is_singularity().0)
+            } else {
+                let k = context
+                    .kernel
+                    .ok_or_else(|| SolidError::unported("SmObject::GetContext", "geom.object"))?;
+                Ok(surf.is_singularity(k, uv, EFF_ZERO, false)?.singular)
+            }
+        };
+        if !is_singular(uv1)? {
             return Ok((SolutionPairType::DiffParameters, None));
         }
-        if !surf
-            .is_singularity(&Kernel::default(), uv2, EFF_ZERO, false)?
-            .singular
-        {
+        if !is_singular(uv2)? {
             return Ok((SolutionPairType::DiffParameters, None));
         }
 
         // We're at a pole. Distinct only if they're both on a seam. When one is on a seam
         // prefer that. Else prefer the best solution.
-        let on_seam1 = surf.is_on_seam(&Kernel::default(), uv1, None)?.on_seam;
-        let on_seam2 = surf.is_on_seam(&Kernel::default(), uv2, None)?.on_seam;
+        let k = context
+            .kernel
+            .ok_or_else(|| SolidError::unported("SmObject::GetContext", "geom.object"))?;
+        let on_seam1 = surf.is_on_seam(k, uv1, None)?.on_seam;
+        let on_seam2 = surf.is_on_seam(k, uv2, None)?.on_seam;
         if on_seam1 && !on_seam2 {
             return Ok((SolutionPairType::Identical, Some(PreferredSolution::First)));
         }
@@ -2209,28 +2331,94 @@ fn surface_identical_solutions<O: SolutionObject>(
 ///
 /// # Errors
 ///
-/// Those of the parent and of the singularity and seam tests.
+/// Those of the parent and of the singularity and seam tests. The legacy free
+/// function has no context argument; a pole/seam test needing that context returns
+/// [`SolidError::Unported`]. Executing CS solvers provide their actual Kernel.
 pub fn cs_identical_solutions<O: SolutionObject>(
     base: &GlobalSolver<'_, O>,
     surface: Option<&Surface>,
     sol1: &Solution<O>,
     sol2: &Solution<O>,
 ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
-    surface_identical_solutions(base, surface, sol1, sol2, 1, true)
+    surface_identical_solutions(
+        base,
+        &SurfaceComparison {
+            surface,
+            kernel: None,
+            geometry: [None; 2],
+        },
+        sol1,
+        sol2,
+        1,
+        true,
+    )
 }
 
 /// `SmCSIGlobalSolver::IdenticalSolutions`: as [`cs_identical_solutions`].
 ///
 /// # Errors
 ///
-/// Those of the parent and of the singularity and seam tests.
+/// Those of [`cs_identical_solutions`]. Executing CSI solvers provide their actual
+/// defining curve, surface and Kernel through their own comparison method.
 pub fn csi_identical_solutions<O: SolutionObject>(
     base: &GlobalSolver<'_, O>,
     surface: Option<&Surface>,
     sol1: &Solution<O>,
     sol2: &Solution<O>,
 ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
-    surface_identical_solutions(base, surface, sol1, sol2, 1, true)
+    cs_identical_solutions(base, surface, sol1, sol2)
+}
+
+impl<O: SolutionObject> CsGlobalSolver<'_, '_, O> {
+    /// The existing CS comparison with its actual defining objects and context.
+    pub(super) fn surface_identical_solutions(
+        &self,
+        sol1: &Solution<O>,
+        sol2: &Solution<O>,
+    ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
+        surface_identical_solutions(
+            &self.base,
+            &SurfaceComparison {
+                surface: self.surface,
+                kernel: self.kernel,
+                geometry: [
+                    self.curve.map(|curve| (0, SolutionGeometry::Curve(curve))),
+                    self.surface
+                        .map(|surface| (1, SolutionGeometry::Surface(surface))),
+                ],
+            },
+            sol1,
+            sol2,
+            1,
+            true,
+        )
+    }
+}
+
+impl<O: SolutionObject> CsiGlobalSolver<'_, '_, O> {
+    /// The existing CSI comparison with its actual defining objects and context.
+    pub(super) fn surface_identical_solutions(
+        &self,
+        sol1: &Solution<O>,
+        sol2: &Solution<O>,
+    ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
+        surface_identical_solutions(
+            &self.base,
+            &SurfaceComparison {
+                surface: self.surface,
+                kernel: self.kernel,
+                geometry: [
+                    self.curve.map(|curve| (0, SolutionGeometry::Curve(curve))),
+                    self.surface
+                        .map(|surface| (1, SolutionGeometry::Surface(surface))),
+                ],
+            },
+            sol1,
+            sol2,
+            1,
+            true,
+        )
+    }
 }
 
 impl<O: SolutionObject> LsiGlobalSolver<'_, '_, O> {
@@ -2244,7 +2432,22 @@ impl<O: SolutionObject> LsiGlobalSolver<'_, '_, O> {
         sol1: &Solution<O>,
         sol2: &Solution<O>,
     ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
-        surface_identical_solutions(&self.base, self.surface, sol1, sol2, 1, true)
+        surface_identical_solutions(
+            &self.base,
+            &SurfaceComparison {
+                surface: self.surface,
+                kernel: self.kernel,
+                geometry: [
+                    None,
+                    self.surface
+                        .map(|surface| (0, SolutionGeometry::Surface(surface))),
+                ],
+            },
+            sol1,
+            sol2,
+            1,
+            true,
+        )
     }
 }
 
@@ -2259,7 +2462,22 @@ impl<O: SolutionObject> SpGlobalSolver<'_, '_, O> {
         sol1: &Solution<O>,
         sol2: &Solution<O>,
     ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
-        surface_identical_solutions(&self.base, self.surface, sol1, sol2, 0, false)
+        surface_identical_solutions(
+            &self.base,
+            &SurfaceComparison {
+                surface: self.surface,
+                kernel: self.kernel,
+                geometry: [
+                    None,
+                    self.surface
+                        .map(|surface| (1, SolutionGeometry::Surface(surface))),
+                ],
+            },
+            sol1,
+            sol2,
+            0,
+            false,
+        )
     }
 }
 
@@ -2267,8 +2485,395 @@ impl<O: SolutionObject> SpGlobalSolver<'_, '_, O> {
 mod tests {
     use super::*;
     use crate::curve::line::Line;
+    use crate::geom::global_solver::GlobalSolve;
     use crate::geom::solution_array::ObjectKind;
+    use crate::geom::tree::{Tree, TreeOwner};
+    use crate::nurbs::b_spline_curve::{BSplineCurveForm, CanonicalData, KnotType};
+    use crate::nurbs::b_spline_surface::BSplineSurface;
     use crate::surface::plane::Plane;
+
+    /// Deliberately opaque output labels, as used by internal drop callers.
+    #[derive(Clone, Copy, PartialEq)]
+    struct Opaque(u8);
+
+    impl SolutionObject for Opaque {
+        fn kind(&self) -> ObjectKind {
+            ObjectKind::Curve
+        }
+    }
+
+    fn unit_patch() -> Surface {
+        BSplineSurface::create_bilinear_surface(Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::X + Vec3::Y)
+            .unwrap()
+            .into()
+    }
+
+    #[test]
+    fn public_surface_point_solver_preserves_native_null_point_object_layout() {
+        let surface = unit_patch();
+        let solutions = surface
+            .global_point_solve_0(
+                &Kernel::default(),
+                Opaque(0),
+                &surface.natural_uv_domain(),
+                SolverOperation::Maximize,
+                Vec3::new(0.5, 0.5, 1.),
+                1e-6,
+                None,
+                SolutionRequested::All,
+            )
+            .unwrap();
+        // Multiple actual candidates exercise the shared comparison. This is
+        // only a metadata/layout test: the delivered C++ sm_SpLocalSolve uses
+        // one interior seed and one midpoint seed per discontinuous boundary;
+        // LocalPointSolve accepts a stationary point even for MAXIMIZE. It
+        // does not explicitly enumerate this square's corner maxima. The
+        // unresolved global-maximum case is recorded in plan/findings.md;
+        // neither its mathematical oracle nor acceptance checks are relaxed.
+        assert!(solutions.len() > 1);
+        for solution in solutions.as_slice() {
+            assert_eq!(solution.num_objects, 2);
+            assert!(solution.objects[0].is_none());
+            assert!(solution.objects[1] == Some(Opaque(0)));
+            // SmSolutionArray.cpp returns SM_ERR at the native NULL point.
+            // Providing actual surface metadata must not invent a new domain.
+            assert!(solution.parameter_interval(0).unwrap().is_none());
+            assert!(solution.parameter_interval(1).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn public_curve_surface_solver_resolves_both_actual_geometry_kinds() {
+        let surface = unit_patch();
+        // x=t, y=1/2, z=(t-1/5)(t-1/2)(t-4/5): three transverse
+        // intersections, so duplicate comparisons must resolve real objects.
+        let curve = Curve::from(
+            BSplineCurve::create_canonical(&CanonicalData {
+                dim: 3,
+                degree: 3,
+                control_points: &[
+                    Vec3::new(0., 0.5, -0.08),
+                    Vec3::new(1. / 3., 0.5, 0.14),
+                    Vec3::new(2. / 3., 0.5, -0.14),
+                    Vec3::new(1., 0.5, 0.08),
+                ],
+                form: BSplineCurveForm::Unspecified,
+                knot_multiplicities: &[4, 4],
+                knots: &[0., 1.],
+                knot_type: KnotType::Unspecified,
+                weights: None,
+                trim: None,
+            })
+            .unwrap(),
+        );
+        let solutions = surface
+            .global_curve_intersect(
+                &Kernel::default(),
+                [Opaque(0), Opaque(1)],
+                &surface.natural_uv_domain(),
+                &curve,
+                &curve.natural_interval(),
+                1e-6,
+            )
+            .unwrap();
+        let mut parameters = solutions
+            .as_slice()
+            .iter()
+            .map(|solution| {
+                assert!(solution.objects[0] == Some(Opaque(0)));
+                assert!(solution.objects[1] == Some(Opaque(1)));
+                solution.start.parameters[0]
+            })
+            .collect::<Vec<_>>();
+        parameters.sort_by(f64::total_cmp);
+        assert_eq!(parameters.len(), 3);
+        for (actual, expected) in parameters.iter().zip([0.2, 0.5, 0.8]) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn cs_and_csi_comparisons_keep_actual_natural_domains_and_native_index_mapping() {
+        let kernel = Kernel::default();
+        let surface = unit_patch();
+        let natural_interval = Extent1d::from_min_max(2., 6.);
+        let curve = Curve::from(
+            Line::create_line_segment(3, Vec3::ZERO, Vec3::X, Some(&natural_interval)).unwrap(),
+        );
+        let curve_cache =
+            crate::curve::curve::p5::make_curve_cache(&kernel, &curve, Some(Opaque(0))).unwrap();
+        let surface_cache =
+            super::super::p1::make_surface_cache(&kernel, &surface, Some(Opaque(1))).unwrap();
+        let query_interval = Extent1d::from_min_max(3., 5.);
+        let query_domain = Extent2d::from_bounds(0.4, 0.4, 0.6, 0.6);
+        let mut cs = CsGlobalSolver::new(
+            curve_cache.tree().unwrap(),
+            surface_cache.tree().unwrap(),
+            Some(&surface),
+            query_interval,
+            query_domain,
+        );
+        cs.curve = Some(&curve);
+        cs.surface_cache = Some(&surface_cache);
+        cs.kernel = Some(&kernel);
+        let mut csi = CsiGlobalSolver::new(
+            curve_cache.tree().unwrap(),
+            surface_cache.tree().unwrap(),
+            Some(&surface),
+            false,
+            query_interval,
+            query_domain,
+        );
+        csi.curve = Some(&curve);
+        csi.surface_cache = Some(&surface_cache);
+        csi.kernel = Some(&kernel);
+        let mut a = Solution::new();
+        a.num_variables = 3;
+        a.num_objects = 2;
+        a.solution_type = SolutionType::SingleValue;
+        a.objects[0] = Some(Opaque(0));
+        a.objects[1] = Some(Opaque(1));
+        a.start.parameters[..3].copy_from_slice(&[4., 0.5, 0.5]);
+        let mut b = a;
+        b.start.parameters[0] += 0.0003;
+        b.start.parameters[1] += 0.00005;
+        // Preserve the source dispatch's repeated object-zero read: for this
+        // curve/surface layout, parameter 2 resolves to the curve's interval.
+        // This test records the delivered native behavior, not an intended
+        // [curve-t, surface-u, surface-v] reinterpretation.
+        b.start.parameters[2] += 0.0003;
+        assert_eq!(
+            cs.identical_solutions(&a, &b).unwrap().0,
+            SolutionPairType::Identical
+        );
+        assert_eq!(
+            csi.identical_solutions(&a, &b).unwrap().0,
+            SolutionPairType::Identical
+        );
+        a.objects[0] = Some(Opaque(2));
+        b.objects[0] = Some(Opaque(2));
+        assert!(matches!(
+            csi.identical_solutions(&a, &b),
+            Err(SolidError::Unported {
+                upstream: "SmCurve::GetNaturalInterval",
+                ..
+            })
+        ));
+    }
+
+    fn owned_unit_patch() -> (Kernel, crate::topology::Brep, crate::topology::FaceId) {
+        use crate::nurbs::b_spline_surface_n_lib::p2::OrientType;
+        use crate::topology::brep_constructor::{BrepConstructor, VertexNode};
+
+        let mut kernel = Kernel::default();
+        let mut builder = BrepConstructor::new().unwrap();
+        builder.start_shell().unwrap();
+        let face = builder.start_face(OrientType::Same).unwrap();
+        let surface = unit_patch();
+        let domain = surface.natural_uv_domain();
+        builder.set_face_surface(surface, domain).unwrap();
+        builder.start_loop(OrientType::Same).unwrap();
+        let points = [Vec3::ZERO, Vec3::X, Vec3::X + Vec3::Y, Vec3::Y];
+        let vertices = points
+            .iter()
+            .map(|point| builder.start_vertex_of_loop(*point).unwrap())
+            .collect::<Vec<_>>();
+        for index in 0..4 {
+            let next = (index + 1) % 4;
+            builder
+                .start_edge(
+                    &kernel,
+                    OrientType::Same,
+                    None,
+                    Some(vertices[index]),
+                    Some(vertices[next]),
+                )
+                .unwrap();
+            builder
+                .set_edge_curve(
+                    &kernel,
+                    Line::from_points(points[index], points[next], 3).into(),
+                    false,
+                )
+                .unwrap();
+            builder
+                .set_limits(
+                    &kernel,
+                    VertexNode::Parameter(0.),
+                    VertexNode::Parameter(1.),
+                )
+                .unwrap();
+            builder.end_edge().unwrap();
+        }
+        builder.end_loop().unwrap();
+        builder.end_face().unwrap();
+        builder.end_shell(&mut kernel, false).unwrap();
+        let mut brep = builder.finish().unwrap();
+        // Exercise the native plain-cache branch on an actual owning face.
+        // Editing is an explicit model mode; its source topology is retained.
+        brep.set_editing_enabled(true);
+        (kernel, brep, face)
+    }
+
+    #[test]
+    fn owned_point_maximize_keeps_explicit_missing_cache_owner_and_original_surface_owner() {
+        use crate::error::EntityRef;
+        use crate::topology::surface_cache::BrepSurfaceContext;
+
+        let (kernel, mut brep, face) = owned_unit_patch();
+        let surface = brep
+            .face(face)
+            .unwrap()
+            .surface
+            .as_ref()
+            .unwrap()
+            .clone_for_evaluation()
+            .unwrap();
+        let domain = surface.natural_uv_domain();
+        let owner = surface.owner();
+        let result = PointDropContext::<EntityRef>::global_point_solve(
+            &mut BrepSurfaceContext {
+                brep: &mut brep,
+                face,
+            },
+            &kernel,
+            &surface,
+            &domain,
+            SolverOperation::Maximize,
+            Vec3::new(0.5, 0.5, 1.),
+            1e-6,
+        );
+        // Still unimplemented: the MAXIMIZE fallback in GlobalPointSolve
+        // calls GlobalPointSolve_0's standalone cache lookup, bypassing this
+        // live topology adapter. Keep the exact failure and retain ownership;
+        // a successful ray-cache bridge does not establish this point path.
+        assert!(matches!(
+            result,
+            Err(SolidError::Unported {
+                upstream: "SmFace handle of a surface's face",
+                unit: "topology.face_p2",
+            })
+        ));
+        assert_eq!(surface.owner(), owner);
+        assert_eq!(
+            brep.face(face).unwrap().surface.as_ref().unwrap().owner(),
+            owner
+        );
+        assert!(brep.editing_enabled());
+    }
+
+    #[test]
+    fn owned_curve_surface_comparison_resolves_live_cache_geometry_without_losing_owners() {
+        use crate::error::EntityRef;
+        use crate::topology::surface_cache::BrepSurfaceContext;
+
+        let (kernel, mut brep, face) = owned_unit_patch();
+        let surface = brep
+            .face(face)
+            .unwrap()
+            .surface
+            .as_ref()
+            .unwrap()
+            .clone_for_evaluation()
+            .unwrap();
+        let surface_owner = surface.owner();
+        let surface_cache = super::super::p1::make_surface_cache_with_topology(
+            &kernel,
+            &surface,
+            Some(EntityRef::Face(face)),
+            &mut BrepSurfaceContext {
+                brep: &mut brep,
+                face,
+            },
+        )
+        .unwrap();
+        let edge = brep.edge_list()[0];
+        let curve = brep.edge(edge).unwrap().curve.as_ref().unwrap();
+        let curve_owner = curve.owner();
+        let curve_cache =
+            crate::curve::curve::p5::make_curve_cache(&kernel, curve, Some(EntityRef::Edge(edge)))
+                .unwrap();
+        let mut solver = CsGlobalSolver::new(
+            curve_cache.tree().unwrap(),
+            surface_cache.tree().unwrap(),
+            Some(&surface),
+            curve.natural_interval(),
+            surface.natural_uv_domain(),
+        );
+        solver.curve = Some(curve);
+        solver.surface_cache = Some(&surface_cache);
+        solver.kernel = Some(&kernel);
+        let mut a = Solution::new();
+        a.solution_type = SolutionType::SingleValue;
+        a.num_objects = 2;
+        a.num_variables = 3;
+        a.objects[0] = Some(EntityRef::Edge(edge));
+        a.objects[1] = Some(EntityRef::Face(face));
+        // Two nearby genuine points on the first (x-axis) edge and surface.
+        // Topology output labels must resolve to the actual defining Curve
+        // and Surface domains, as the native cache-owner pointers do.
+        a.start.parameters[..3].copy_from_slice(&[0.5, 0.5, 0.]);
+        let mut b = a;
+        b.start.parameters[0] += 0.00005;
+        b.start.parameters[1] += 0.00005;
+        assert_eq!(
+            solver.identical_solutions(&a, &b).unwrap().0,
+            SolutionPairType::Identical
+        );
+        assert_eq!(surface.owner(), surface_owner);
+        assert_eq!(
+            brep.face(face).unwrap().surface.as_ref().unwrap().owner(),
+            surface_owner
+        );
+        assert_eq!(
+            brep.edge(edge).unwrap().curve.as_ref().unwrap().owner(),
+            curve_owner
+        );
+        assert!(brep.editing_enabled());
+    }
+
+    #[test]
+    fn pole_comparison_requires_the_actual_executing_kernel() {
+        // v=0 is a pole, and the patch has no closed natural boundary at this
+        // fixture's two interior-u pole parameters. The native branch therefore
+        // coalesces them and prefers the second, equal-valued solution.
+        let surface = Surface::from(
+            BSplineSurface::create_bilinear_surface(Vec3::ZERO, Vec3::ZERO, Vec3::X, Vec3::Y)
+                .unwrap(),
+        );
+        let mut kernel = Kernel::default();
+        kernel.tolerances.zone_tol_3d = 0.01;
+        let point_tree = Tree::from_point(Vec3::ZERO, 0., false);
+        let mut surface_tree = Tree::new(Some(TreeOwner::SurfaceCache));
+        surface_tree.set_owner_surface(Some(Opaque(1)));
+        let mut solver = SpGlobalSolver::new(
+            &point_tree,
+            &surface_tree,
+            Some(&surface),
+            surface.natural_uv_domain(),
+        );
+        solver.base.tolerance_3d = 1e-6;
+        let mut a = Solution::new();
+        a.num_objects = 2;
+        a.num_variables = 2;
+        a.solution_type = SolutionType::SingleValue;
+        a.objects[1] = Some(Opaque(1));
+        a.start.parameters[0] = 0.25;
+        let mut b = a;
+        b.start.parameters[0] = 0.75;
+        assert!(matches!(
+            solver.identical_solutions(&a, &b),
+            Err(SolidError::Unported {
+                upstream: "SmObject::GetContext",
+                ..
+            })
+        ));
+        solver.kernel = Some(&kernel);
+        assert_eq!(
+            solver.identical_solutions(&a, &b).unwrap(),
+            (SolutionPairType::Identical, Some(PreferredSolution::Second))
+        );
+    }
 
     /// A solution object for the tests.
     #[derive(Debug, Clone, Copy, PartialEq)]

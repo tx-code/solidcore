@@ -1776,6 +1776,36 @@ pub(crate) struct PointFaceRayCandidates<O> {
     ray: Vec3,
 }
 
+/// Owned inputs for the line/surface query. An owning caller can end the
+/// immutable topology borrow before asking its live surface-cache context.
+pub(crate) struct PointFaceRayRequest<O> {
+    pub(crate) face: O,
+    pub(crate) face_surface: O,
+    pub(crate) domain: Extent2d,
+    pub(crate) point: Point3,
+    pub(crate) direction: Vec3,
+    pub(crate) fire_ray: bool,
+    pub(crate) tolerance: f64,
+    surface: O,
+    names: [Option<O>; MAX_TREES],
+    count: usize,
+    ray: Vec3,
+}
+
+impl<O> PointFaceRayRequest<O> {
+    pub(crate) fn candidates(self, solutions: SolutionArray<O>) -> PointFaceRayCandidates<O> {
+        PointFaceRayCandidates {
+            solutions,
+            face: self.face,
+            surface: self.surface,
+            face_surface: self.face_surface,
+            names: self.names,
+            count: self.count,
+            ray: self.ray,
+        }
+    }
+}
+
 /// `SmTLSPointFace::SolveIt`, maintained SmTopologySolver.cpp:668--767: collect
 /// the ray/surface candidates without retaining references to the model.
 pub(crate) fn point_face_ray_candidates<O: SolutionObject>(
@@ -1786,6 +1816,31 @@ pub(crate) fn point_face_ray_candidates<O: SolutionObject>(
     first: Option<O>,
     second: Option<O>,
 ) -> Result<Option<PointFaceRayCandidates<O>>> {
+    let Some(request) = point_face_ray_request(objects, state, local, first, second)? else {
+        return Ok(None);
+    };
+    let solutions = objects
+        .surface(request.face_surface)?
+        .global_line_intersect(
+            kernel,
+            request.face_surface,
+            &request.domain,
+            request.point,
+            request.direction,
+            None,
+            request.fire_ray,
+            request.tolerance,
+        )?;
+    Ok(Some(request.candidates(solutions)))
+}
+
+pub(crate) fn point_face_ray_request<O: SolutionObject>(
+    objects: &dyn TopologyObjects<O>,
+    state: &GlobalSolver<'_, O>,
+    local: &LocalSolver<'_, O>,
+    first: Option<O>,
+    second: Option<O>,
+) -> Result<Option<PointFaceRayRequest<O>>> {
     let mut names = [None; MAX_TREES];
     let mut count = 0;
     let surface;
@@ -1820,21 +1875,15 @@ pub(crate) fn point_face_ray_candidates<O: SolutionObject>(
     let face_surface = objects.face_surface(face)?;
     let domain = objects.face_uv_domain(face)?;
     let face_tolerance = objects.face_tolerance(face)?;
-    let solutions = objects.surface(face_surface)?.global_line_intersect(
-        kernel,
-        face_surface,
-        &domain,
-        local.point,
-        line_vec,
-        None,
-        ray_fire,
-        state.tolerance_3d + face_tolerance,
-    )?;
-    Ok(Some(PointFaceRayCandidates {
-        solutions,
+    Ok(Some(PointFaceRayRequest {
         face,
-        surface,
         face_surface,
+        domain,
+        point: local.point,
+        direction: line_vec,
+        fire_ray: ray_fire,
+        tolerance: state.tolerance_3d + face_tolerance,
+        surface,
         names,
         count,
         ray,

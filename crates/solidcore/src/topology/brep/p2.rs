@@ -66,6 +66,7 @@
 
 mod ray_owner;
 pub mod runtime;
+mod surface_owner;
 pub use runtime::notify as notify_owned;
 pub use runtime::{object_ref, root_ref, NotificationState};
 

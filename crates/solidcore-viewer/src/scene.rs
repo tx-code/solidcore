@@ -8,9 +8,11 @@ use solidcore::math::Vec2;
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::surface::surface::SurfaceKind;
 use solidcore::topology::edgeuse::p1 as eu;
+use solidcore::topology::{EdgeId, FaceId, VertexId};
 use solidcore_step::{planar, semantics};
 use solidcore_step_native::{Candidate, Options};
 use std::io::Read;
+use std::ops::Range;
 use std::path::Path;
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
@@ -30,6 +32,9 @@ pub(crate) struct Scene {
     pub center_mm: DVec3,
     pub radius_mm: f64,
     pub role: String,
+    pub face_ranges: Vec<(FaceId, Range<usize>)>,
+    pub edge_ranges: Vec<(EdgeId, Range<usize>)>,
+    pub vertices: Vec<(VertexId, Vertex)>,
 }
 
 fn native_point(value: solidcore::math::Vec3) -> Result<DVec3> {
@@ -51,7 +56,11 @@ pub(crate) fn load(path: &Path, progress: impl Fn(&str) -> Result<()>) -> Result
         .take(input_limit.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    let source = solidcore_step::inspect(bytes, limits);
+    from_bytes(bytes, progress)
+}
+
+pub(crate) fn from_bytes(bytes: Vec<u8>, progress: impl Fn(&str) -> Result<()>) -> Result<Scene> {
+    let source = solidcore_step::inspect(bytes, solidcore_step::Limits::planar_fixtures());
     if source.status != solidcore_step::Status::Inspected {
         return Err(format!(
             "Source {:?}: {:?}",
@@ -116,6 +125,8 @@ pub(crate) fn from_candidate(owner: Candidate) -> Result<Scene> {
     let mut triangles = Vec::new();
     let mut lines = Vec::new();
     let mut bounds = Vec::new();
+    let mut face_ranges = Vec::new();
+    let mut edge_ranges = Vec::new();
     for id in owner.edges().values() {
         let edge = brep.edge(*id).map_err(|e| e.to_string())?;
         let curve = edge.curve.as_ref().ok_or("Missing native defining curve")?;
@@ -124,7 +135,9 @@ pub(crate) fn from_candidate(owner: Candidate) -> Result<Scene> {
         };
         let a = native_point(line.evaluate_point(edge.interval.min()))?;
         let b = native_point(line.evaluate_point(edge.interval.max()))?;
+        let start = lines.len();
         lines.extend([a, b]);
+        edge_ranges.push((*id, start..lines.len()));
         bounds.extend([a, b]);
     }
     for face_id in owner.faces().values() {
@@ -201,6 +214,7 @@ pub(crate) fn from_candidate(owner: Candidate) -> Result<Scene> {
             0.49 + 0.22 * light,
             0.68 + 0.22 * light,
         ];
+        let start = triangles.len();
         for index in indices {
             triangles.push((
                 *points
@@ -209,6 +223,7 @@ pub(crate) fn from_candidate(owner: Candidate) -> Result<Scene> {
                 color,
             ));
         }
+        face_ranges.push((*face_id, start..triangles.len()));
     }
     let first = *bounds
         .first()
@@ -230,11 +245,19 @@ pub(crate) fn from_candidate(owner: Candidate) -> Result<Scene> {
         position: ((position - center_mm) / radius_mm).as_vec3().to_array(),
         color,
     };
+    let mut vertices = Vec::new();
+    for id in owner.vertices().values() {
+        let point = native_point(owner.brep().vertex(*id).map_err(|e| e.to_string())?.point)?;
+        vertices.push((*id, vertex(point, [0.8, 0.8, 0.8])));
+    }
     Ok(Scene {
         owner,
         center_mm,
         radius_mm,
         role,
+        face_ranges,
+        edge_ranges,
+        vertices,
         triangles: triangles.into_iter().map(|(p, c)| vertex(p, c)).collect(),
         lines: lines
             .into_iter()

@@ -3,8 +3,114 @@
 //! Camera in normalized display coordinates; never edits the native geometry.
 use glam::{
     camera::rh::{proj::directx, view},
-    Vec3,
+    DMat4, DVec2, DVec3, DVec4, Vec3,
 };
+
+#[derive(Clone, Copy)]
+pub(crate) struct Frame {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub pixels_per_point: f32,
+    pub matrix: [f32; 16],
+}
+#[derive(Clone, Copy)]
+pub(crate) struct Projection {
+    pub pixel: DVec2,
+    pub depth: f64,
+    pub w: f64,
+}
+
+impl Frame {
+    fn transform(self) -> DMat4 {
+        DMat4::from_cols_array(&self.matrix.map(f64::from))
+    }
+    pub fn contains(self, p: DVec2) -> bool {
+        p.x >= f64::from(self.x)
+            && p.x <= f64::from(self.x + self.width)
+            && p.y >= f64::from(self.y)
+            && p.y <= f64::from(self.y + self.height)
+    }
+    fn projected(self, p: DVec4) -> Option<Projection> {
+        if !p.is_finite() || p.w <= 0. {
+            return None;
+        }
+        let ndc = p.truncate() / p.w;
+        // This is only a display-coordinate allowance after homogeneous
+        // clipping, never a source/native acceptance or working tolerance.
+        if !ndc.is_finite() || !(-1e-10..=1. + 1e-10).contains(&ndc.z) {
+            return None;
+        }
+        Some(Projection {
+            pixel: DVec2::new(
+                f64::from(self.x) + (ndc.x + 1.) * 0.5 * f64::from(self.width),
+                f64::from(self.y) + (1. - ndc.y) * 0.5 * f64::from(self.height),
+            ),
+            depth: ndc.z.clamp(0., 1.),
+            w: p.w,
+        })
+    }
+    pub fn project(self, normalized: DVec3) -> Option<Projection> {
+        self.projected(self.transform() * normalized.extend(1.))
+    }
+    pub fn ray(self, p: DVec2) -> Option<(DVec3, DVec3)> {
+        if !self.contains(p) {
+            return None;
+        }
+        let inverse = self.transform().inverse();
+        let x = 2. * (p.x - f64::from(self.x)) / f64::from(self.width) - 1.;
+        let y = 1. - 2. * (p.y - f64::from(self.y)) / f64::from(self.height);
+        let a = inverse * DVec4::new(x, y, 0., 1.);
+        let b = inverse * DVec4::new(x, y, 1., 1.);
+        if !a.is_finite() || !b.is_finite() || a.w == 0. || b.w == 0. {
+            return None;
+        }
+        let origin = a.truncate() / a.w;
+        let end = b.truncate() / b.w;
+        let direction = (end - origin).normalize_or_zero();
+        if direction.length_squared() == 0. {
+            None
+        } else {
+            Some((origin, direction))
+        }
+    }
+    pub fn segment(self, a: DVec3, b: DVec3) -> Option<(Projection, Projection, f64, f64)> {
+        let a = self.transform() * a.extend(1.);
+        let b = self.transform() * b.extend(1.);
+        let mut low = 0.0_f64;
+        let mut high = 1.0_f64;
+        // Clip the original native LINE interval, retaining its parameter
+        // fractions for perspective-correct native curve evaluation.
+        for (x, y) in [
+            (a.w + a.x, b.w + b.x),
+            (a.w - a.x, b.w - b.x),
+            (a.w + a.y, b.w + b.y),
+            (a.w - a.y, b.w - b.y),
+            (a.z, b.z),
+            (a.w - a.z, b.w - b.z),
+        ] {
+            if x < 0. && y < 0. {
+                return None;
+            }
+            if x < 0. {
+                low = low.max(x / (x - y));
+            }
+            if y < 0. {
+                high = high.min(x / (x - y));
+            }
+        }
+        if low > high {
+            return None;
+        }
+        Some((
+            self.projected(a.lerp(b, low))?,
+            self.projected(a.lerp(b, high))?,
+            low,
+            high,
+        ))
+    }
+}
 
 pub(crate) struct Camera {
     yaw: f32,
@@ -23,6 +129,23 @@ impl Default for Camera {
 }
 
 impl Camera {
+    pub fn frame(&self, viewport: egui::Rect, pixels_per_point: f32, size: [u32; 2]) -> Frame {
+        let [width, height] = size;
+        let width = width.max(1) as f32;
+        let height = height.max(1) as f32;
+        let x = (viewport.left() * pixels_per_point).clamp(0., width - 1.);
+        let y = (viewport.top() * pixels_per_point).clamp(0., height - 1.);
+        let width = (viewport.width() * pixels_per_point).clamp(1., width - x);
+        let height = (viewport.height() * pixels_per_point).clamp(1., height - y);
+        Frame {
+            x,
+            y,
+            width,
+            height,
+            pixels_per_point,
+            matrix: self.matrix(width / height),
+        }
+    }
     pub fn fit(&mut self) {
         *self = Self::default();
     }
@@ -64,5 +187,25 @@ mod tests {
         }
         camera.fit();
         assert!(camera.matrix(2.).into_iter().all(f32::is_finite));
+    }
+    #[test]
+    fn render_frame_projection_dpi_ray_and_near_clip_agree() {
+        for scale in [1., 1.5, 2.] {
+            let frame = Camera::default().frame(
+                egui::Rect::from_min_max(egui::pos2(300., 0.), egui::pos2(1180., 800.)),
+                scale,
+                [(1180. * scale) as u32, (800. * scale) as u32],
+            );
+            let center = frame.project(DVec3::ZERO).unwrap();
+            let (origin, direction) = frame.ray(center.pixel).unwrap();
+            assert!((origin - direction * origin.dot(direction)).length() < 1e-10);
+            let (a, b, low, high) = frame
+                .segment(origin - direction, origin + direction)
+                .unwrap();
+            assert!(low > 0. && low < 1. && high <= 1.);
+            assert!(a.depth >= 0. && b.depth <= 1.);
+            assert!(a.pixel.distance(center.pixel) < 1e-8);
+            assert!(frame.ray(DVec2::new(0., 0.)).is_none());
+        }
     }
 }

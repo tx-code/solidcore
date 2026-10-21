@@ -4,6 +4,7 @@
 use crate::{
     camera::Camera,
     capture,
+    picking::Selection,
     scene::{Result, Scene, Vertex},
     UserEvent,
 };
@@ -21,12 +22,15 @@ pub(crate) struct Gpu {
     depth: wgpu::TextureView,
     faces: wgpu::RenderPipeline,
     edges: wgpu::RenderPipeline,
+    points: wgpu::RenderPipeline,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     triangles: Option<wgpu::Buffer>,
     lines: Option<wgpu::Buffer>,
+    markers: Option<wgpu::Buffer>,
     triangle_count: u32,
     line_count: u32,
+    marker_count: u32,
     gui: egui_wgpu::Renderer,
     repaint: EventLoopProxy<UserEvent>,
     screenshot: Option<capture::Request>,
@@ -114,8 +118,9 @@ impl Gpu {
             bind_group_layouts: &[Some(&bindings)],
             immediate_size: 0,
         });
-        let faces = pipeline(&device, &shader, &layout, config.format, false);
-        let edges = pipeline(&device, &shader, &layout, config.format, true);
+        let faces = pipeline(&device, &shader, &layout, config.format, Pass::Faces);
+        let edges = pipeline(&device, &shader, &layout, config.format, Pass::Edges);
+        let points = pipeline(&device, &shader, &layout, config.format, Pass::Points);
         let gui = egui_wgpu::Renderer::new(
             &device,
             config.format,
@@ -131,12 +136,15 @@ impl Gpu {
             depth,
             faces,
             edges,
+            points,
             uniform,
             bind_group,
             triangles: None,
             lines: None,
+            markers: None,
             triangle_count: 0,
             line_count: 0,
+            marker_count: 0,
             gui,
             repaint: proxy,
             screenshot: None,
@@ -160,6 +168,8 @@ impl Gpu {
         self.lines = None;
         self.triangle_count = 0;
         self.line_count = 0;
+        self.markers = None;
+        self.marker_count = 0;
         self.cancel_screenshot();
     }
 
@@ -224,7 +234,7 @@ impl Gpu {
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("native faces"),
                     contents: &triangles,
-                    usage: wgpu::BufferUsages::VERTEX,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 }),
         );
         self.lines = Some(
@@ -232,9 +242,73 @@ impl Gpu {
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("native defining edges"),
                     contents: &lines,
-                    usage: wgpu::BufferUsages::VERTEX,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 }),
         );
+        self.markers = None;
+        self.marker_count = 0;
+        Ok(())
+    }
+
+    pub fn highlight(&mut self, scene: &Scene, selection: &Selection) -> Result<()> {
+        use solidcore::error::EntityRef;
+        let color = |entity: EntityRef| {
+            if selection.selected.contains(&entity) {
+                Some([0.95, 0.46, 0.055])
+            } else if selection.hovered() == Some(entity) {
+                Some([0.16, 0.8, 0.52])
+            } else {
+                None
+            }
+        };
+        let mut triangles = scene.triangles.clone();
+        let mut lines = scene.lines.clone();
+        for (id, range) in &scene.face_ranges {
+            if let Some(color) = color(EntityRef::Face(*id)) {
+                for vertex in triangles
+                    .get_mut(range.clone())
+                    .ok_or("Face highlight range")?
+                {
+                    vertex.color = color;
+                }
+            }
+        }
+        for (id, range) in &scene.edge_ranges {
+            if let Some(color) = color(EntityRef::Edge(*id)) {
+                for vertex in lines.get_mut(range.clone()).ok_or("Edge highlight range")? {
+                    vertex.color = color;
+                }
+            }
+        }
+        if let Some(buffer) = &self.triangles {
+            self.queue.write_buffer(buffer, 0, &encode(&triangles));
+        }
+        if let Some(buffer) = &self.lines {
+            self.queue.write_buffer(buffer, 0, &encode_edges(&lines)?);
+        }
+        let markers: Vec<_> = scene
+            .vertices
+            .iter()
+            .filter_map(|(id, vertex)| {
+                color(EntityRef::Vertex(*id)).map(|color| Vertex {
+                    position: vertex.position,
+                    color,
+                })
+            })
+            .collect();
+        self.marker_count = u32::try_from(markers.len()).map_err(|e| e.to_string())?;
+        self.markers = if markers.is_empty() {
+            None
+        } else {
+            Some(
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("native selected vertices"),
+                        contents: &encode(&markers),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    }),
+            )
+        };
         Ok(())
     }
 
@@ -318,15 +392,20 @@ impl Gpu {
         let commands =
             self.gui
                 .update_buffers(&self.device, &self.queue, &mut encoder, jobs, &screen);
-        let x = (viewport.left() * pixels_per_point).clamp(0., self.config.width as f32 - 1.);
-        let y = (viewport.top() * pixels_per_point).clamp(0., self.config.height as f32 - 1.);
-        let width = (viewport.width() * pixels_per_point).clamp(1., self.config.width as f32 - x);
-        let height =
-            (viewport.height() * pixels_per_point).clamp(1., self.config.height as f32 - y);
-        let uniform: Vec<u8> = camera
-            .matrix(width / height)
+        let frame_view = camera.frame(
+            viewport,
+            pixels_per_point,
+            [self.config.width, self.config.height],
+        );
+        let uniform: Vec<u8> = frame_view
+            .matrix
             .into_iter()
-            .chain([width, height, (2. * pixels_per_point).clamp(2., 4.), 0.])
+            .chain([
+                frame_view.width,
+                frame_view.height,
+                (2. * pixels_per_point).clamp(2., 4.),
+                0.,
+            ])
             .flat_map(f32::to_ne_bytes)
             .collect();
         self.queue.write_buffer(&self.uniform, 0, &uniform);
@@ -357,7 +436,14 @@ impl Gpu {
                 }),
                 ..Default::default()
             });
-            pass.set_viewport(x, y, width, height, 0., 1.);
+            pass.set_viewport(
+                frame_view.x,
+                frame_view.y,
+                frame_view.width,
+                frame_view.height,
+                0.,
+                1.,
+            );
             pass.set_bind_group(0, &self.bind_group, &[]);
             if let Some(buffer) = &self.triangles {
                 pass.set_pipeline(&self.faces);
@@ -368,6 +454,11 @@ impl Gpu {
                 pass.set_pipeline(&self.edges);
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..6, 0..self.line_count);
+            }
+            if let Some(buffer) = &self.markers {
+                pass.set_pipeline(&self.points);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..6, 0..self.marker_count);
             }
         }
         {
@@ -479,17 +570,27 @@ fn depth(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgpu::Te
         .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
+#[derive(Clone, Copy)]
+enum Pass {
+    Faces,
+    Edges,
+    Points,
+}
 fn pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
     layout: &wgpu::PipelineLayout,
     format: wgpu::TextureFormat,
-    edges: bool,
+    kind: Pass,
 ) -> wgpu::RenderPipeline {
+    let edges = matches!(kind, Pass::Edges);
+    let points = matches!(kind, Pass::Points);
     let face_attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3];
     let edge_attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x3];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(if edges {
+        label: Some(if points {
+            "native vertices"
+        } else if edges {
             "native edges"
         } else {
             "native faces"
@@ -497,11 +598,17 @@ fn pipeline(
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: Some(if edges { "edge" } else { "vertex" }),
+            entry_point: Some(if points {
+                "point"
+            } else if edges {
+                "edge"
+            } else {
+                "vertex"
+            }),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: if edges { 36 } else { 24 },
-                step_mode: if edges {
+                step_mode: if edges || points {
                     wgpu::VertexStepMode::Instance
                 } else {
                     wgpu::VertexStepMode::Vertex
@@ -515,7 +622,7 @@ fn pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fragment"),
+            entry_point: Some(if points { "point_fragment" } else { "fragment" }),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
@@ -530,15 +637,15 @@ fn pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: Some(!edges),
+            depth_write_enabled: Some(!edges && !points),
             depth_compare: Some(wgpu::CompareFunction::LessEqual),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState {
-                constant: if edges { 0 } else { 2 },
+                constant: if edges || points { 0 } else { 2 },
                 // Leave edge depth unchanged. A face-only, pixel-scale bias
                 // prevents its own boundary from z-fighting, while LessEqual
                 // continues to reject segments behind foreground geometry.
-                slope_scale: if edges { 0. } else { 2. },
+                slope_scale: if edges || points { 0. } else { 2. },
                 clamp: 0.,
             },
         }),

@@ -7,9 +7,11 @@ mod camera;
 mod capture;
 mod fonts;
 mod gpu;
+mod picking;
 mod scene;
 
 use camera::Camera;
+use glam::DVec2;
 use scene::{Result, Scene};
 use std::path::PathBuf;
 use std::sync::{
@@ -21,7 +23,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 struct Cli {
@@ -118,6 +120,10 @@ struct App {
     repaint_at: Option<Instant>,
     captures: capture::State,
     closing: bool,
+    selection: picking::Selection,
+    pick_error: Option<String>,
+    press: Option<DVec2>,
+    modifiers: ModifiersState,
 }
 
 impl App {
@@ -142,6 +148,10 @@ impl App {
             repaint_at: None,
             captures: capture::State::default(),
             closing: false,
+            selection: picking::Selection::default(),
+            pick_error: None,
+            press: None,
+            modifiers: ModifiersState::empty(),
         }
     }
 
@@ -150,6 +160,8 @@ impl App {
             return;
         }
         self.scene = None;
+        self.selection = picking::Selection::default();
+        self.pick_error = None;
         if let Some(gpu) = &mut self.gpu {
             gpu.clear();
         }
@@ -195,6 +207,12 @@ impl App {
         let raw = input.take_egui_input(window);
         let mut start = false;
         let mut fit = false;
+        let mut clear_selection = false;
+        let inspection = self
+            .scene
+            .as_ref()
+            .map(|scene| picking::details(scene, &self.selection))
+            .transpose();
         let mut output=self.ctx.run_ui(raw,|ui| {
             egui::Panel::left("model-hud").resizable(false).exact_size(300.).show(ui,|ui| {
                 egui::ScrollArea::vertical().auto_shrink([false,false]).show(ui,|ui| {
@@ -224,7 +242,11 @@ impl App {
                 ui.small("Explicit synthetic limits / quality / working tolerance. No production preset is inferred.");
                 ui.separator();ui.label("Drag left: orbit\nWheel: zoom\nF / Home: fit\nEsc: close");
                 ui.add_space(6.);ui.small("LINE / PLANE trims only. Shading and native boundary edges are derived display output.");
-                ui.small("Hover, selection and measurement: pending.");
+                ui.small("Hover to inspect · Click to select · Ctrl-click two vertices to measure");
+                if let Ok(Some(rows))=&inspection {for row in rows {ui.label(row);}}
+                if let Err(error)=&inspection {ui.colored_label(egui::Color32::LIGHT_RED,error);}
+                if let Some(error)=&self.pick_error {ui.colored_label(egui::Color32::LIGHT_RED,format!("Native query unavailable: {error}"));}
+                if !self.selection.selected.is_empty(){clear_selection=ui.button("Clear selection").clicked();}
                 if let Some(gpu)=&self.gpu{ui.add_space(8.);ui.small(&gpu.adapter);}
                 });
             });
@@ -252,6 +274,7 @@ impl App {
                 let _ = self.proxy.send_event(UserEvent::GpuError(error.clone()));
                 self.error = Some(error);
                 self.scene = None;
+                self.selection = picking::Selection::default();
                 gpu.clear();
             }
         } else {
@@ -264,8 +287,59 @@ impl App {
             self.camera.fit();
             window.request_redraw();
         }
+        if fit {
+            self.update_hover();
+        }
+        if clear_selection {
+            self.selection.selected.clear();
+            self.refresh_highlights();
+        }
         if start {
             self.start_load();
+        }
+    }
+
+    fn refresh_highlights(&mut self) {
+        if let (Some(scene), Some(gpu)) = (&self.scene, &mut self.gpu) {
+            if let Err(error) = gpu.highlight(scene, &self.selection) {
+                self.pick_error = Some(error);
+            }
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn update_hover(&mut self) {
+        let result = if let (Some(scene), Some(window), Some((x, y))) =
+            (&mut self.scene, &self.window, self.cursor)
+        {
+            let size = window.inner_size();
+            if size.width == 0 || size.height == 0 {
+                Ok(None)
+            } else {
+                let frame = self.camera.frame(
+                    self.viewport,
+                    window.scale_factor() as f32,
+                    [size.width, size.height],
+                );
+                picking::pick(scene, frame, DVec2::new(x, y))
+            }
+        } else {
+            Ok(None)
+        };
+        let changed = match result {
+            Ok(hit) => {
+                self.pick_error = None;
+                self.selection.hover(hit)
+            }
+            Err(error) => {
+                self.pick_error = Some(error);
+                self.selection.hover(None)
+            }
+        };
+        if changed {
+            self.refresh_highlights();
         }
     }
 
@@ -368,6 +442,8 @@ impl ApplicationHandler<UserEvent> for App {
                         match upload {
                             Ok(()) => {
                                 self.scene = Some(scene);
+                                self.selection = picking::Selection::default();
+                                self.pick_error = None;
                                 self.camera.fit();
                                 self.progress = "Native geometry ready for inspection".into();
                                 if let Some(path) = self.cli.screenshot.clone() {
@@ -404,6 +480,7 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::GpuError(error) => {
                 self.error = Some(format!("GPU: {error}"));
                 self.scene = None;
+                self.selection = picking::Selection::default();
                 if let Some(gpu) = &mut self.gpu {
                     gpu.clear();
                 }
@@ -501,12 +578,26 @@ impl ApplicationHandler<UserEvent> for App {
                 ..
             } => {
                 if state == ElementState::Released {
+                    let click = self.press.take().is_some() && !self.dragging && !consumed;
                     self.dragging = false;
+                    self.update_hover();
+                    if click {
+                        self.selection.click(self.modifiers.control_key());
+                        self.refresh_highlights();
+                    }
                 } else if !consumed {
-                    self.dragging = true;
+                    self.dragging = false;
+                    self.press = self.cursor.map(|(x, y)| DVec2::new(x, y));
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                let cursor = DVec2::new(position.x, position.y);
+                if self
+                    .press
+                    .is_some_and(|p| p.distance(cursor) > 4. * window.scale_factor())
+                {
+                    self.dragging = true;
+                }
                 if self.dragging {
                     if let Some((x, y)) = self.cursor {
                         self.camera
@@ -515,6 +606,13 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 self.cursor = Some((position.x, position.y));
+                if self.dragging {
+                    if self.selection.hover(None) {
+                        self.refresh_highlights();
+                    }
+                } else {
+                    self.update_hover();
+                }
             }
             WindowEvent::MouseWheel { delta, .. } if !consumed => {
                 let steps = match delta {
@@ -522,6 +620,7 @@ impl ApplicationHandler<UserEvent> for App {
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.02,
                 };
                 self.camera.zoom(steps);
+                self.update_hover();
                 window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
@@ -535,12 +634,25 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     PhysicalKey::Code(KeyCode::KeyF | KeyCode::Home) => {
                         self.camera.fit();
+                        self.update_hover();
                         window.request_redraw();
                     }
                     _ => {}
                 }
             }
-            WindowEvent::Focused(false) => self.dragging = false,
+            WindowEvent::Focused(false) => {
+                self.dragging = false;
+                self.press = None;
+                if self.selection.hover(None) {
+                    self.refresh_highlights();
+                }
+            }
+            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::CursorLeft { .. } => {
+                if self.selection.hover(None) {
+                    self.refresh_highlights();
+                }
+            }
             WindowEvent::Occluded(false) => window.request_redraw(),
             _ => {
                 if consumed {

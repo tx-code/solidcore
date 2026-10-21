@@ -56,3 +56,31 @@ struct Output {
     output.position = point;
     return output;
 }
+
+struct PointOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+};
+@vertex fn point(@builtin(vertex_index) corner: u32,
+    @location(0) position: vec3<f32>, @location(1) color: vec3<f32>) -> PointOutput {
+    var output: PointOutput;
+    output.color = color;
+    var uv = vec2<f32>(-1.0,-1.0);
+    switch corner {
+        case 1u,4u: {uv = vec2<f32>(1.0,-1.0);}
+        case 2u,3u: {uv = vec2<f32>(-1.0,1.0);}
+        case 5u: {uv = vec2<f32>(1.0,1.0);}
+        default: {}
+    }
+    var clip = camera.view_projection * vec4<f32>(position,1.0);
+    output.uv = uv;
+    clip.x += uv.x * max(camera.line_width * 3.0,6.0) / camera.viewport.x * clip.w;
+    clip.y += uv.y * max(camera.line_width * 3.0,6.0) / camera.viewport.y * clip.w;
+    output.position = clip;
+    return output;
+}
+@fragment fn point_fragment(input: PointOutput) -> @location(0) vec4<f32> {
+    if dot(input.uv,input.uv) > 1.0 {discard;}
+    return vec4<f32>(input.color,1.0);
+}

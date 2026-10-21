@@ -24,7 +24,12 @@ native working tolerance. These are development values, **not production default
 General-purpose application configuration and broader native import are future work.
 
 The viewport starts with shaded faces and dark native defining edges. Left drag
-orbits, the wheel zooms, F/Home fits and Escape closes. The 300-point HUD occupies
+orbits, the wheel zooms, F/Home fits and Escape closes. A click selects a native
+face, edge or vertex; Ctrl-click keeps up to two selections. Two selected native
+vertices show their distance in mm. A selected LINE shows its original native curve
+interval length, a vertex shows its native coordinates, and a face shows its PLANE
+surface normal (not an inferred material/outward normal). Area/volume measurements
+are not provided. The Clear selection button clears selections. The 300-point HUD occupies
 its own area and reports original roles, executed checks, loading stages and errors.
 Resize and display scaling rebuild the viewport/depth buffer. Camera near/far planes
 follow zoom; f64 centering and normalization precede GPU f32 narrowing, preserving
@@ -79,9 +84,18 @@ stage delivery and drops unpublished results. The worker checks cancellation bet
 stages. This does not promise interruption inside a native kernel operation or a hard
 CPU/memory limit. No private file, inventory or derived data is uploaded.
 
+Interaction is limited to the same LINE/PLANE profile. Display triangles only
+nominate a face; a native plane intersection and owner-bound trimmed-face query
+confirm it. Original LINE/vertex positions confirm features, with foreground native
+faces rejecting occluded selections. Missing kernel queries are shown as unavailable
+and never replaced with mesh classification. Pixel and float-depth allowances are
+interaction settings, not import acceptance budgets. Rendering and picking share
+one viewport/matrix, including DPI and near clipping. Queries never use a default
+Kernel, cleared geometry owner or cloned model.
+
 This increment does **not** complete general STEP/native import, 100 real models,
-hover, face/edge/vertex selection or measurement. Native identities and ownership stay
-available in `Scene` for those next capabilities. A viewer screenshot does not establish
+general curved picking or general area/volume measurement. Native identities and ownership stay
+available in `Scene`. A viewer screenshot does not establish
 source equivalence, material-solid semantics, accepted import or query coverage.
 
 Versions were checked against the published crate sources: [wgpu 30.0.1](https://docs.rs/wgpu/30.0.1/wgpu/),

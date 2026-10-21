@@ -18,6 +18,7 @@ workspace = true
 [features]
 default = []
 cli = []
+general-development = []
 
 [[bin]]
 name = "step-native-import"

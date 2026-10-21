@@ -13,8 +13,15 @@
 
 mod bounds;
 mod certify;
+#[cfg(feature = "general-development")]
+mod general;
 mod plan;
 pub use certify::{AcceptanceQuality, Certificate, Imported};
+#[cfg(feature = "general-development")]
+pub use general::{
+    construct_general, GeneralLoopMapping, GeneralObservations, GeneralQuality, GeneralReport,
+    ParameterMapping, UnitConversion,
+};
 
 use plan::{ExactPoint, Plan};
 
@@ -47,6 +54,22 @@ pub struct Options {
 /// Construction error; no partial native candidate accompanies a failure.
 #[derive(Debug)]
 pub enum Error {
+    /// General source checking failed; original source diagnostics are retained.
+    Source {
+        /// Actual source-check status, independent of native errors.
+        status: s::Status,
+        /// Original typed source diagnostics, without fabricated model errors.
+        diagnostics: Vec<s::Diagnostic>,
+    },
+    /// A source-addressed general construction or qualification failure.
+    General {
+        /// Stable maintained-fork diagnostic identity.
+        key: &'static str,
+        /// Original source record index.
+        record: usize,
+        /// Unsupported scope, unresolved numerical evidence or failed postcheck.
+        kind: GeneralFailureKind,
+    },
     /// The source did not finish the required planar checkpoint.
     Upstream,
     /// Construction capability is not implemented for this source shape.
@@ -63,6 +86,16 @@ pub enum Error {
     Postcheck(&'static str, usize),
     /// Required continuous evidence could not be established or exceeded budget.
     Evidence(&'static str),
+}
+/// Classification of a general source-to-native failure, never a source rewrite.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GeneralFailureKind {
+    /// Required source conversion is not implemented for this explicit path.
+    Unsupported,
+    /// Required numerical evidence could not be established.
+    Indeterminate,
+    /// A supported native/source correspondence check failed.
+    Postcheck,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -86,7 +119,7 @@ impl From<p::ExactError> for Error {
 pub struct Candidate {
     brep: Brep,
     kernel: Kernel,
-    plan: Plan,
+    plan: SourcePlan,
     vertices: BTreeMap<usize, VertexId>,
     edges: BTreeMap<usize, EdgeId>,
     faces: BTreeMap<usize, FaceId>,
@@ -94,6 +127,20 @@ pub struct Candidate {
     operation_limit: usize,
     native_checks: Option<NativeChecks>,
     initial_work_tolerance_mm: f64,
+}
+enum SourcePlan {
+    Planar(Box<Plan>),
+    #[cfg(feature = "general-development")]
+    General(Box<general::Plan>),
+}
+impl SourcePlan {
+    fn source(&self) -> &s::Snapshot {
+        match self {
+            Self::Planar(plan) => plan.source(),
+            #[cfg(feature = "general-development")]
+            Self::General(plan) => plan.source(),
+        }
+    }
 }
 /// Actual executed native checks, independent of source/continuous acceptance.
 #[derive(Clone, Copy, Debug)]
@@ -104,6 +151,40 @@ pub struct NativeChecks {
     pub deep_reports: usize,
 }
 impl Candidate {
+    #[cfg_attr(
+        not(feature = "general-development"),
+        expect(
+            clippy::unnecessary_wraps,
+            reason = "The same certificate interface must refuse general candidates when that feature is enabled"
+        )
+    )]
+    fn planar_plan(&self) -> Result<&Plan> {
+        match &self.plan {
+            SourcePlan::Planar(plan) => Ok(plan),
+            #[cfg(feature = "general-development")]
+            SourcePlan::General(_) => Err(Error::Unsupported(
+                "general development data has no planar certificate",
+            )),
+        }
+    }
+    /// Actual observations from the explicit general development constructor.
+    /// They are not continuous certificates and do not establish accepted import.
+    #[cfg(feature = "general-development")]
+    pub fn general_observations(&self) -> Option<GeneralObservations> {
+        match &self.plan {
+            SourcePlan::General(plan) => Some(plan.observations()),
+            SourcePlan::Planar(_) => None,
+        }
+    }
+    /// Borrow the original general source and native construction observations.
+    /// A view never upgrades a development candidate to an accepted import.
+    #[cfg(feature = "general-development")]
+    pub fn general_report(&self) -> Option<GeneralReport<'_>> {
+        match &self.plan {
+            SourcePlan::General(plan) => Some(plan.report()),
+            SourcePlan::Planar(_) => None,
+        }
+    }
     /// Borrow the actual Rust topology/geometry, not a mesh or reconstructed view.
     pub fn brep(&self) -> &Brep {
         &self.brep
@@ -484,7 +565,7 @@ pub fn construct_planar(checked: &p::Outcome, options: Options) -> Result<Candid
     Ok(Candidate {
         brep,
         kernel,
-        plan,
+        plan: SourcePlan::Planar(Box::new(plan)),
         vertices,
         edges,
         faces,

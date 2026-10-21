@@ -458,6 +458,13 @@ impl Snapshot {
     pub fn source(&self) -> &SourceSnapshot {
         &self.data.source
     }
+    /// Resolve a source reference value through the original immutable index.
+    /// Aggregate members use the same identity interpretation as bound scalar
+    /// fields; a non-reference or missing identity is never a fabricated target.
+    pub fn reference_target(&self, value: &Value) -> Option<usize> {
+        (value.kind == crate::ValueKind::Reference).then_some(())?;
+        self.data.source.data.index.get(&value.text).copied()
+    }
     /// Selected fixed profile.
     pub fn profile(&self) -> &Profile {
         &self.data.profile

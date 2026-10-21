@@ -246,7 +246,7 @@ fn correspondence(model: &Candidate, face: &solidcore_step::planar::FaceEvidence
                 .edge_orientations
                 .get(i)
                 .ok_or(Error::Evidence("source loop direction"))?;
-            let definition = model.plan.edge(record)?;
+            let definition = model.planar_plan()?.edge(record)?;
             let expected = if forward {
                 orientation == definition.same_sense
             } else {
@@ -258,7 +258,7 @@ fn correspondence(model: &Candidate, face: &solidcore_step::planar::FaceEvidence
         }
     }
     for (record, id) in &model.edges {
-        let definition = model.plan.edge(*record)?;
+        let definition = model.planar_plan()?.edge(*record)?;
         let edge = brep.edge(*id)?;
         let lo = *model
             .vertices
@@ -297,7 +297,7 @@ impl Candidate {
         {
             return Err(Error::Invalid("explicit positive quality budgets required"));
         }
-        if self.plan.evidence().faces.len() != 1
+        if self.planar_plan()?.evidence().faces.len() != 1
             || self
                 .source()
                 .part_definition()
@@ -323,7 +323,7 @@ impl Candidate {
         let mut model = self.validate_native()?;
         let mut cert = Certificate::default();
         let face = model
-            .plan
+            .planar_plan()?
             .evidence()
             .faces
             .first()
@@ -431,7 +431,7 @@ impl Candidate {
             }
         }
         for (source_id, native_id) in &model.vertices {
-            let exact = model.plan.vertex(*source_id)?;
+            let exact = model.planar_plan()?.vertex(*source_id)?;
             cert.definition_mm = cert.definition_mm.max(b::norm_upper(b::sub(
                 b::exact(exact),
                 b::native(model.brep.vertex(*native_id)?.point),
@@ -442,7 +442,7 @@ impl Candidate {
                 "vertex working tolerance",
             )?;
         }
-        for source_edge in &model.plan.evidence().edges {
+        for source_edge in &model.planar_plan()?.evidence().edges {
             let id = *model
                 .edges
                 .get(&source_edge.edge)
@@ -453,7 +453,7 @@ impl Candidate {
                     .as_ref()
                     .ok_or(Error::Evidence("missing defining curve"))?,
             )?;
-            let definition = model.plan.edge(source_edge.edge)?;
+            let definition = model.planar_plan()?.edge(source_edge.edge)?;
             let low = definition.minimum_vertex;
             let high = definition.maximum_vertex;
             let a = b::exact(definition.minimum_mm);

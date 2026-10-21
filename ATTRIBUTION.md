@@ -127,6 +127,17 @@ These are fetched at run time (never committed) and used only by difftest's
 
 ## Progress site
 
+### Microsoft STL numerical helper
+
+The general STEP constructor's three-coordinate `norm` follows `_Hypot3` from
+MSVC 14.50.35717, `crt/src/stl/special_math.cpp:483–509`, to retain the maintained
+Windows C++ fork's floating-point operation and branch order. Copyright (c)
+Microsoft Corporation; Apache-2.0 WITH LLVM-exception. The full license is retained
+in [LICENSES/Microsoft-STL.txt](LICENSES/Microsoft-STL.txt), obtained from the
+[Microsoft STL source](https://github.com/microsoft/STL/blob/main/LICENSE.txt).
+The helper is a safe Rust translation; no Microsoft binary or private CAD input
+is included in this repository.
+
 ### d3-force
 
 - Packages: `d3-force` 3.0.0 with its dependencies `d3-dispatch` 3.0.1, `d3-quadtree` 3.0.1

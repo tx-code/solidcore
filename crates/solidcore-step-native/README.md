@@ -91,6 +91,53 @@ nonfinite values, subnormals and threshold neighbors. Kernel coincidence checks
 have separate native differential evidence; they do not establish all native
 failure-path equivalence or real STEP model coverage.
 
+## Explicit general development construction
+
+`general-development` adds `construct_general` through a separate source route.
+It always executes the complete typed source checks with `GeneralBrep` scope,
+including geometry dependencies and part/dependency closure; caller flags cannot
+disable these checks. It does not borrow the P0 planar profile's qualification.
+The current construction increment requires one material-solid closed shell.
+An identical surface-model boundary remains a surface model and is refused by
+this material-only route rather than promoted.
+
+The owning candidate retains the original source outcome and diagnostics, exact
+unit dependencies, defining curve parameter mappings, directed loop occurrences,
+shared native vertex/edge identities, and computational chart-cut correspondence.
+LINE, conics, trimmed conics and supported rational B-splines are materialized as
+defining native curves. Supported receivers retain their actual plane, cylinder,
+cone, torus or B-spline kind. Derived UV observations and native tolerance/growth
+checks are separate from continuous approximation bounds. No fitting or repair is
+silently substituted. Unsupported required content returns an error with no model.
+
+Use `--features cli,general-development` for the CLI route, then explicitly select
+`--general-development --quality FILE.json`. Quality JSON contains exactly these
+eight **string** fields: `id`, `definition_mm`, `consistency_mm`, `derived_uv_mm`,
+`query_mm`, `initial_work_tolerance_mm`, `maximum_work_tolerance_mm`, and
+`maximum_tolerance_growth_mm`. All lengths are millimeters; the growth allowance
+may be zero. The named configuration and source uncertainty remain distinct.
+
+General interoperability is also opt-in: `--interop` selects the existing proven
+nongeometric exceptions, and `--ap214-unregistered-as-2010` requests the existing
+unverified schema interpretation. Independently selected `--opaque-header-name`,
+`--opaque-data-strings`, and `--level1-as-corrected-encoding` require general plus
+interoperability mode. They select the existing source reader's byte-preservation
+and interpretation receipts. Opaque bytes do not become invented text or approved
+typed fields; a level-1 declaration remains unchanged and unverified. Interop alone
+does not enable any carrier option. Physical unit/type checks remain in force.
+
+This increment still returns an unpublished **candidate**. General final-trim
+checks, material measurements, complete continuous correspondence qualification,
+application cancellation/publication, and several kernel back-edges remain to be
+migrated. Concrete cone/torus validators do not acquire a pass from an inherited
+B-spline validator. The optional CLI keeps `accepted_import:false`. Neither this
+route nor a viewer screenshot counts toward a real-model import acceptance target.
+
+```sh
+cargo test -p solidcore-step-native --features cli,general-development
+cargo clippy -p solidcore-step-native --all-targets --features cli,general-development -- -D warnings
+```
+
 Authoritative references are the maintained C++ fork at `d8ed45a`,
 `source/STEP_IMPORT/README.md`, `StepImportPlan.cpp`, `StepImportNative.cpp` and
 `StepImportInterval.h`; the source checkpoint contract remains in

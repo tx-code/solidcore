@@ -12,6 +12,8 @@ use super::{
 };
 use crate::{Error, Execution, Result};
 use solidcore::curve::curve::CurveKind;
+use solidcore::curve::{curve::Curve, ellipse::Ellipse, line::Line};
+use solidcore::geom::extent1d::Extent1d;
 use solidcore::geom::extent2d::Extent2d;
 use solidcore::math::{Vec2, Vec3, EFF_ZERO};
 use solidcore::nurbs::b_spline_curve::KnotType;
@@ -27,10 +29,57 @@ use solidcore::surface::{
 use std::collections::BTreeMap;
 use std::f64::consts::{PI, TAU};
 
+mod toroidal;
+
 pub(super) struct Seam {
     pub vertices: [usize; 2],
     pub endpoints: [Vec3; 2],
     angle: f64,
+    minor_arc: Option<toroidal::MinorArc>,
+}
+
+impl Seam {
+    /// Construct only the derived cut: original STEP edge definitions stay in
+    /// `Pieces`. A toroidal meridian is a circular arc, never the straight chord
+    /// used for cylindrical/conical generators. Keep the old LINE charges and
+    /// [0,1] interval unchanged; conic native parameters are not STEP angles.
+    pub(super) fn make_curve(
+        &self,
+        kernel: &solidcore::kernel::Kernel,
+        execution: &mut Execution,
+    ) -> Result<(Curve, Extent1d)> {
+        execution.step()?;
+        if let Some(arc) = &self.minor_arc {
+            let circle = Ellipse::create_canonical_circle(
+                kernel,
+                &arc.frame.native(),
+                arc.radius_mm,
+                Some(&arc.step_interval_deg),
+                Some(arc.reversed),
+            )?;
+            let curve: Curve = circle.into();
+            let interval = curve.natural_interval();
+            for (parameter, endpoint) in [interval.min(), interval.max()]
+                .into_iter()
+                .zip(self.endpoints)
+            {
+                execution.step()?;
+                let point = curve.evaluate_point(kernel, parameter)?;
+                need(
+                    norm(point - endpoint) <= arc.consistency_mm,
+                    "GeneralToroidalSeamEndpoint",
+                    arc.source_face,
+                )?;
+            }
+            Ok((curve, interval))
+        } else {
+            let [a, b] = self.endpoints;
+            Ok((
+                Line::from_points(a, b, 3).into(),
+                Extent1d::from_min_max(0., 1.),
+            ))
+        }
+    }
 }
 /// A cut in the original second-ring parameter chart, before any curve transfer.
 /// Neither defining coefficients nor the original closed-edge anchor changes.
@@ -292,6 +341,7 @@ fn implicit_rings(
             vertices: [first.vertex, second.vertex],
             endpoints: [actual_a, actual_b],
             angle: radial.dot(frame.y).atan2(radial.dot(frame.x)),
+            minor_arc: None,
         },
         rings: [first, second],
         aligned,
@@ -502,6 +552,7 @@ fn cone_pole_seam(
             vertices: [ring, pole],
             endpoints: [point_on_ring, pole_point],
             angle: radial.dot(frame.y).atan2(radial.dot(frame.x)),
+            minor_arc: None,
         },
         inner.record,
     )))
@@ -774,15 +825,26 @@ pub(super) fn make(
     let pad = Vec3::new(padding, padding, padding);
     min -= pad;
     max += pad;
+    let torus_band = if g.is(record, "TOROIDAL_SURFACE") {
+        toroidal::latitude_band(g, face, edges, vertices, frame, quality)?
+    } else {
+        None
+    };
+    let (torus_domain, torus_seam) = torus_band.map_or((None, None), |band| {
+        (Some(band.domain_deg), Some(band.seam))
+    });
     let pole_cut = cone_pole_seam(g, face, edges, vertices, frame, quality)?;
     let pole_bound = pole_cut.as_ref().map(|(_, bound)| *bound);
-    let seam = if let Some((seam, _)) = pole_cut {
+    let seam = if let Some(seam) = torus_seam {
+        Some(seam)
+    } else if let Some((seam, _)) = pole_cut {
         Some(seam)
     } else if let Some(plan) = ring_plan {
         Some(Seam {
             vertices: plan.source_vertices,
             endpoints: plan.seam_endpoints,
             angle: plan.seam_angle_rad,
+            minor_arc: None,
         })
     } else {
         missing_seam(g, face, edges, vertices, frame, quality)?
@@ -871,6 +933,7 @@ pub(super) fn make(
         if major <= EFF_ZERO || minor <= EFF_ZERO {
             return Err(unsupported("GeneralToroidalKernelRadiusRange", record));
         }
+        let domain = torus_domain.unwrap_or(Extent2d::from_bounds(0., 0., 360., 360.));
         execution.step()?;
         Torus::create_canonical(
             g.kernel(),
@@ -878,7 +941,7 @@ pub(super) fn make(
             major,
             minor,
             TorusOptions::default(),
-            Some(&Extent2d::from_bounds(0., 0., 360., 360.)),
+            Some(&domain),
         )?
         .into()
     } else {

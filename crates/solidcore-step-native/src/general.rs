@@ -1218,13 +1218,15 @@ fn append_seam(
     )?;
     if existing.is_none() {
         builder.brep_mut().edge_mut(id)?.tolerance = tolerance;
-        let [a, b] = seam.endpoints;
+        let (curve, interval) = seam.make_curve(kernel, execution)?;
         execution.step()?;
-        let curve = solidcore::curve::line::Line::from_points(a, b, 3);
+        builder.set_edge_curve(kernel, curve, false)?;
         execution.step()?;
-        builder.set_edge_curve(kernel, curve.into(), false)?;
-        execution.step()?;
-        builder.set_limits(kernel, VertexNode::Parameter(0.), VertexNode::Parameter(1.))?;
+        builder.set_limits(
+            kernel,
+            VertexNode::Parameter(interval.min()),
+            VertexNode::Parameter(interval.max()),
+        )?;
     }
     execution.step()?;
     builder.end_edge()?;

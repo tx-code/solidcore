@@ -171,6 +171,24 @@ equivalent apex references, axis and direction changes, units and budgets, with
 independent analytic material truth. This code path does not grant a continuous
 general certificate or accepted import.
 
+An aligned two-latitude toroidal band has a separate, restricted chart path.
+Both boundaries must be complete closed source CIRCLE edges coaxial with a ring
+torus (`major_radius > minor_radius > 0`). Their normal-primary directed uses
+select the increasing minor-angle interval, including a long arc when required;
+the constructor never substitutes the shortest arc. A whole-circle support screen
+accounts for centre offset, circle-plane tilt and meridian support residual.
+The paired computational cut is an actual minor-circle arc on that support,
+with its own native parameter interval and checked endpoints. It retains both
+original source vertices, complete circles, occurrences and source-loop receipts.
+The selected finite torus chart is constructed directly; native conic parameters
+are never treated as source angles or assigned directly to surface UV values.
+Nonaligned ring phases and nonlatitude circular boundaries remain explicitly
+unsupported by this normalization. Other toroidal source regions retain their
+existing construction/check behavior; a successful support factory alone does
+not qualify them. Public analytic controls exercise direction, reference frames,
+units, source roles and operation budgets. Native/UV/material observations remain
+separate from continuous source equivalence and accepted import.
+
 LINE, conics, trimmed conics and supported rational B-splines are materialized as
 defining native curves. Supported receivers retain their actual plane, cylinder,
 cone, torus or B-spline kind. Derived UV observations and native tolerance/growth

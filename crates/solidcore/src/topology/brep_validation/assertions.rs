@@ -40,10 +40,6 @@ impl Default for AssertValidOptions<'_> {
     }
 }
 
-fn missing(symbol: &'static str) -> SolidError {
-    SolidError::unported(symbol, "fork.topology_validation")
-}
-
 /// Execute the actual root gate. Keep reports even when the returned boolean is
 /// true: source pointer/tolerance routines may report without failing status,
 /// and root test21 is warning-only. Validation may materialize caches/UV data
@@ -164,7 +160,7 @@ pub fn assert_valid(
     // This explicit SM_ASSERT_TEST_NEED guard is important: Release's report
     // macro alone ignores Given requests. Do not run an expensive unselected query.
     if coincidence_selected(options.level) {
-        let coincident = contains_coincident_topology(k, b)?;
+        let coincident = super::coincidence::first(k, b, &mut report)?;
         valid &= root_pred(&mut report, 15, !coincident)?;
     }
     for _ in &shells {
@@ -277,10 +273,6 @@ fn inner_shell_of(_k: &mut Kernel, _b: &Brep, _inner: ShellId, _outer: ShellId) 
         "SmShell::IsInnerShellOf",
         "topology.shell",
     ))
-}
-fn contains_coincident_topology(_k: &mut Kernel, _b: &mut Brep) -> Result<bool> {
-    // UNPORTED(fork.topology_validation): exact LEVEL2 coincidence predicate.
-    Err(missing("SmBrep::ContainsCoincidentTopology"))
 }
 fn assert_sub_topology(
     k: &mut Kernel,
@@ -412,7 +404,7 @@ mod tests {
             None
         )
         .unwrap());
-        let error = assert_valid(
+        assert!(assert_valid(
             &mut Kernel::default(),
             &mut b,
             AssertValidOptions {
@@ -421,14 +413,30 @@ mod tests {
             },
             None,
         )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            SolidError::Unported {
-                upstream: "SmBrep::ContainsCoincidentTopology",
-                ..
-            }
-        ));
+        .unwrap());
+        let ids = b.vertex_list().to_vec();
+        let first = *ids.first().unwrap();
+        let second = *ids.get(1).unwrap();
+        b.vertex_mut(second).unwrap().point = b.vertex(first).unwrap().point;
+        let mut reports = AssertArray::new();
+        assert!(!assert_valid(
+            &mut Kernel::default(),
+            &mut b,
+            AssertValidOptions {
+                level: CheckLevel::Given(&[15]),
+                walk: false
+            },
+            Some(&mut reports)
+        )
+        .unwrap());
+        assert!(reports
+            .reports()
+            .iter()
+            .any(|r| r.list_index == 3 && r.test_index == 0));
+        assert!(reports
+            .reports()
+            .iter()
+            .any(|r| r.list_index == 0 && r.test_index == 15));
     }
 
     #[test]

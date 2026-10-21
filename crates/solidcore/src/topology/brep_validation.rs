@@ -21,6 +21,7 @@
 //! explicit errors. See `docs/BREP_VALIDATION.md` for qualification boundaries.
 
 mod assertions;
+mod coincidence;
 #[cfg(test)]
 mod curve_tests;
 mod curves;
@@ -230,6 +231,37 @@ impl Reporter<'_> {
             }
         }
         Ok(passed)
+    }
+    // SmBrep::ContainsCoincidentTopology, SM_LIST_3. Witness truth is kept
+    // separate from report selection; suppressing a report never changes it.
+    fn coincidence_pair(
+        &mut self,
+        test: u64,
+        owner: Object,
+        other: Object,
+        tol: f64,
+        value: f64,
+    ) -> Result<()> {
+        if let Some(reports) = self.reports.as_deref_mut() {
+            let (ty, _, name) = owner.identity();
+            let (other_ty, _, other_name) = other.identity();
+            reports.add_unique_delete_duplicate(AssertReport::new(ReportSpec {
+                reporter: Some(Object::Brep.key()),
+                test_index: test,
+                test_class: labels::BREP_TYPE,
+                owner: Some(owner.key()),
+                owner_type: ty,
+                owner_type_string: Some(name),
+                other: Some(other.key()),
+                other_type: other_ty,
+                other_type_string: Some(other_name),
+                tol3d: tol,
+                value,
+                list_index: 3,
+                ..ReportSpec::default()
+            })?);
+        }
+        Ok(())
     }
     fn class_predicate(
         &mut self,

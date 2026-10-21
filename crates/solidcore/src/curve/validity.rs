@@ -54,6 +54,16 @@ pub(crate) fn materialize_bspline(k: &Kernel, curve: &mut Curve) -> Result<()> {
 }
 
 impl Curve {
+    /// Materialize this actual object's B-spline representation, preserving its
+    /// analytic kind, owner, parameters and any already stored NURB. This is the
+    /// explicit Rust owning counterpart of native lazy `GetOrCreate` queries.
+    ///
+    /// # Errors
+    /// The concrete materializer's errors, or an unsupported non-B-spline family.
+    pub fn materialize_stored_bspline(&mut self, k: &Kernel) -> Result<()> {
+        materialize_bspline(k, self)
+    }
+
     /// `SmBSplineCurve::AssertNoPeriodicJump` on a stored B-spline-derived UV
     /// curve. Two-control-point curves retain the native exemption. This only
     /// diagnoses jumps; it never unwraps UV coordinates or changes parameters.

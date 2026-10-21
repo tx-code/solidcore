@@ -676,3 +676,26 @@ operations, never a count of successfully imported STEP models.
 ```text
 python scripts/brep_iso_cache_compare.py --cpp <drop-curve-observer> --rust bin/debug/examples/brep_drop_curve_probe.exe --receipt bin/brep-iso-cache.local.json
 ```
+
+## Root first-coincidence query
+
+The root LEVEL2 gate now executes its actual first-witness coincidence search.
+A private typed witness separates ordered geometry traversal from the single
+native report mapping. Reports do not determine the truth value. Vertex equality
+at the root tolerance remains inclusive, while each edge/face test retains its
+own native strict comparison and subordinate combined tolerance. Pair traversal,
+first-hit exit and no-report behavior are independent of the diagnostic sink.
+
+The selected root SDK comparison now completes all of its cases, including the
+previously deferred LEVEL2 root guard. Separate Rust regressions exercise a real
+duplicate vertex, first-pair order, equality and the original root/list3 report
+identities. These do not qualify every coincidence kind or malformed-geometry
+failure path. The native public all-witness/independent-output-array interface is
+not implemented by this private root helper. Edge/face `CurveOnClassify` remains
+an explicit dependency. Native's ignored peer surface-evaluation failure can
+continue with a retained output point; this helper currently stops that receiver
+search instead, so complete failure-path equivalence remains unestablished.
+
+```text
+python scripts/brep_root_validation_compare.py --cpp <validation-observer> --rust bin/debug/examples/brep_validation_probe.exe --receipt bin/brep-root-validation.local.json
+```

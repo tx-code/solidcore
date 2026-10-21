@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Mutating reverse-direction validity check of B-spline-derived curves.
+//! Shared stored-representation queries and validity operations for curve families.
 //! Upstream: `SmBSplineCurve.cpp::PassesValidityCheck(SM_VC_REVERSE_DIRECTION)` at
 //! `d8ed45a`, including the virtual lazy NURB creation through analytic kinds.
 //! Returns the native front/back failure bits; they remain set after correction.
@@ -8,46 +8,149 @@
 //! | Rust | Upstream |
 //! |------|----------|
 //! | [`Curve::check_reverse_direction`] | `SmBSplineCurve::PassesValidityCheck(SM_VC_REVERSE_DIRECTION)` |
+//! | [`Curve::has_internal_pole`] | `SmBSplineCurve.cpp`3701--3779; `SmCurve.h`744 |
 //!
 //! Deviations: the native warning result is a bit mask; checked failures are Rust
 //! errors. The owned original curve is mutated, not a temporary approximation.
 use super::curve::{Curve, CurveKind};
-use crate::error::Result;
+use crate::error::{Result, SolidError};
 use crate::kernel::Kernel;
+use crate::nurbs::b_spline_curve::BSplineCurve;
+
+/// Stored B-spline base, without making a new representation or running Copy.
+pub(crate) fn bspline_base(curve: &Curve) -> Result<&BSplineCurve> {
+    match curve.kind() {
+        CurveKind::BSpline(c) => Ok(c),
+        CurveKind::Line(c) => Ok(c.base()),
+        CurveKind::Ellipse(c) => Ok(c.base()),
+        CurveKind::Hyperbola(c) => Ok(c.base()),
+        CurveKind::Parabola(c) => Ok(c.base()),
+        _ => Err(SolidError::unported(
+            "non-B-spline curve validity base",
+            "fork.topology_validation",
+        )),
+    }
+}
+
+/// Materialize the actual stored representation once. Existing NURBs (including
+/// conflicts with analytic data) are retained for diagnostics, never regenerated.
+pub(crate) fn materialize_bspline(k: &Kernel, curve: &mut Curve) -> Result<()> {
+    if bspline_base(curve)?.gw_nurb().is_some() {
+        return Ok(());
+    }
+    let owner = curve.owner();
+    match curve.kind_mut() {
+        CurveKind::BSpline(c) => c.make_nurb(),
+        CurveKind::Line(c) => c.make_nurb_owned(owner),
+        CurveKind::Ellipse(c) => c.make_nurb_owned(k, owner),
+        CurveKind::Hyperbola(c) => c.make_nurb(owner),
+        CurveKind::Parabola(c) => c.make_nurb(owner),
+        _ => Err(SolidError::unported(
+            "concrete curve validity materialization",
+            "fork.topology_validation",
+        )),
+    }
+}
 
 impl Curve {
+    /// Native `SmBSplineCurve::HasInternalPole`: any active degree-plus-one
+    /// coincident control-point sequence, except a wholly degenerate curve.
+    /// Missing stored NURB returns false; the query never materializes or repairs.
+    pub fn has_internal_pole(&self, tol: f64) -> Result<bool> {
+        if !matches!(
+            self.kind(),
+            CurveKind::BSpline(_)
+                | CurveKind::Line(_)
+                | CurveKind::Ellipse(_)
+                | CurveKind::Hyperbola(_)
+                | CurveKind::Parabola(_)
+        ) {
+            // SmCurve.h744 has a literal FALSE default for these receivers.
+            return Ok(false);
+        }
+        let base = bspline_base(self)?;
+        let Some(nurb) = base.gw_nurb() else {
+            return Ok(false);
+        };
+        if self.is_degenerate(tol, None)? {
+            return Ok(false);
+        }
+        let (knots, mults) = self.knots(None)?;
+        let tolerance = if tol > 0. {
+            tol
+        } else {
+            crate::geom::tol::ZONE_TOL_3D
+        };
+        let degree = nurb.degree();
+        let mut knot_count = 0usize;
+        for mult in mults.iter().take(knots.len().saturating_sub(1)) {
+            knot_count = knot_count.checked_add(*mult).ok_or_else(|| {
+                SolidError::invalid_input(
+                    "curve::validity::has_internal_pole",
+                    "knot count overflow",
+                )
+            })?;
+            let first = knot_count
+                .checked_sub(1)
+                .and_then(|v| v.checked_sub(degree))
+                .ok_or_else(|| {
+                    SolidError::invalid_input(
+                        "curve::validity::has_internal_pole",
+                        "invalid control point index",
+                    )
+                })?;
+            let points = nurb
+                .cpts()
+                .get(
+                    first..=first.checked_add(degree).ok_or_else(|| {
+                        SolidError::invalid_input(
+                            "curve::validity::has_internal_pole",
+                            "index overflow",
+                        )
+                    })?,
+                )
+                .ok_or_else(|| {
+                    SolidError::invalid_input(
+                        "curve::validity::has_internal_pole",
+                        "short control polygon",
+                    )
+                })?;
+            let p = points
+                .first()
+                .ok_or_else(|| SolidError::null_pointer("curve::validity::has_internal_pole"))?
+                .to_euclid();
+            if points
+                .iter()
+                .skip(1)
+                .all(|v| p.closer_than(tolerance, v.to_euclid()))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     /// Check and correct control-polygon reversal as native
     /// `PassesValidityCheck(SM_VC_REVERSE_DIRECTION)` does. A nonzero result means
     /// the check failed, even though the control points have been changed.
     /// Curves not derived from a B-spline use the native base's successful check.
     pub fn check_reverse_direction(&mut self, k: &Kernel) -> Result<u8> {
-        let owner = self.owner();
+        if !matches!(
+            self.kind(),
+            CurveKind::BSpline(_)
+                | CurveKind::Line(_)
+                | CurveKind::Ellipse(_)
+                | CurveKind::Hyperbola(_)
+                | CurveKind::Parabola(_)
+        ) {
+            return Ok(0);
+        }
+        materialize_bspline(k, self)?;
         let base = match self.kind_mut() {
             CurveKind::BSpline(b) => b,
-            CurveKind::Line(c) => {
-                if c.base().gw_nurb().is_none() {
-                    c.make_nurb_owned(owner)?;
-                }
-                c.base_mut()
-            }
-            CurveKind::Ellipse(c) => {
-                if c.base().gw_nurb().is_none() {
-                    c.make_nurb_owned(k, owner)?;
-                }
-                c.base_mut()
-            }
-            CurveKind::Hyperbola(c) => {
-                if c.base.gw_nurb().is_none() {
-                    c.make_nurb(owner)?;
-                }
-                &mut c.base
-            }
-            CurveKind::Parabola(c) => {
-                if c.base().gw_nurb().is_none() {
-                    c.make_nurb(owner)?;
-                }
-                c.base_mut()
-            }
+            CurveKind::Line(c) => c.base_mut(),
+            CurveKind::Ellipse(c) => c.base_mut(),
+            CurveKind::Hyperbola(c) => &mut c.base,
+            CurveKind::Parabola(c) => c.base_mut(),
             _ => return Ok(0),
         };
         base.get_or_create_gw_nurb()?.end_reversal(true)

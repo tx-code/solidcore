@@ -70,6 +70,9 @@ each deliverable increment. Preserve fork commits and published history; use
 merge commits for upstream integration, then rerun validation for the affected
 contracts. Fast-forward local `main` only to verified commits. Do not push remote
 `main` or create/update PRs under the current delivery policy.
+After verified fast-forward integration, remove merged local checkpoint branches
+that no worktree uses. Keep unmerged work and worktree-owned branches; maintain
+recovery references locally when pruning a batch.
 
 ## Current partial state
 
@@ -163,3 +166,11 @@ context transform entry are preserved. External borrowed aliases, const-copy
 source-cache changes, geometry notifications, full Edge/Vertex/curve assertions
 and the remaining native import pipeline are still required work; see
 [validation scope](BREP_VALIDATION.md).
+
+The actual Curve/B-spline/Line assertion chain now retains its owned NURB,
+ordered diagnostics and fallback property analysis. The curve-property solver
+uses its borrowed geometry's natural parameter domain for duplicate comparison,
+including calls without an output handle. This does not complete Edge/Vertex
+assertions or other concrete curve subclasses. Portable software interval
+arithmetic covers the bounded Bezier proof; nondefault native floating-control
+and cache-side-effect parity still need separate qualification.

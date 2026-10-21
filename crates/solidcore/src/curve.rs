@@ -20,5 +20,6 @@ pub mod line;
 pub mod offset_curve;
 pub mod parabola;
 pub mod projected_curve;
+pub(crate) mod regularity;
 pub mod tangent_field;
 pub mod validity;

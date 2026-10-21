@@ -22,6 +22,9 @@
 
 mod assertions;
 #[cfg(test)]
+mod curve_tests;
+mod curves;
+#[cfg(test)]
 mod face_loop_tests;
 mod face_tests;
 mod faces;
@@ -38,6 +41,7 @@ mod tolerances;
 mod uses;
 
 pub use assertions::{assert_valid, AssertValidOptions};
+pub use curves::{assert_edge_curve, assert_uv_curve};
 pub use faces::assert_face;
 pub use local::{assert_region, assert_shell};
 pub use loops::assert_loop;
@@ -136,6 +140,7 @@ enum Object {
     Placement(FaceId),
     Surface(FaceId, &'static str),
     UvCurve(EdgeuseId, &'static str),
+    Curve(EdgeId, &'static str),
 }
 impl Object {
     const fn identity(self) -> (i64, u32, &'static str) {
@@ -154,6 +159,7 @@ impl Object {
             Self::Placement(id) => (labels::AXIS2_PLACEMENT_TYPE, id.index(), "SmAxis2Placement"),
             Self::Surface(id, name) => (labels::SURFACE_TYPE, id.index(), name),
             Self::UvCurve(id, name) => (labels::B_SPLINE_CURVE_TYPE, id.index(), name),
+            Self::Curve(id, name) => (labels::B_SPLINE_CURVE_TYPE, id.index(), name),
         }
     }
     fn key(self) -> ObjectKey {
@@ -163,6 +169,7 @@ impl Object {
             Self::Placement(id) => return ObjectKey((1_u64 << 61) | u64::from(id.index())),
             Self::Surface(id, _) => return ObjectKey((1_u64 << 63) | u64::from(id.index())),
             Self::UvCurve(id, _) => return ObjectKey((3_u64 << 62) | u64::from(id.index())),
+            Self::Curve(id, _) => return ObjectKey((1_u64 << 62) | u64::from(id.index())),
             _ => {}
         }
         let (ty, index, _) = self.identity();

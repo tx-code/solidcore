@@ -3510,6 +3510,33 @@ impl<'t, O: SolutionObject + 't> CurvePropertyGs<'t, O> {
 }
 
 impl<'t, O: SolutionObject + 't> GlobalSolve<'t, O> for CurvePropertyGs<'t, O> {
+    fn identical_solutions(
+        &self,
+        a: &Solution<O>,
+        b: &Solution<O>,
+    ) -> Result<(
+        crate::geom::global_solver::SolutionPairType,
+        Option<crate::geom::global_solver::PreferredSolution>,
+    )> {
+        // SmCurvePropertyGS::LocalSolve always names the actual curve. The
+        // public Rust handle is optional output metadata, not absence of that
+        // geometry. GetParameterInterval therefore uses its NATURAL domain,
+        // retaining SmGlobalSolver's 1/10000 domain rule without a new epsilon.
+        GlobalSolver::identical_solutions_with_intervals(a, b, |solution, index| {
+            if index == 0
+                && solution.num_objects == 1
+                && solution.objects.first().copied().flatten()
+                    == self.base.tree(0)?.owner_object()?
+            {
+                let curve = self.curve.ok_or_else(|| {
+                    SolidError::invalid_input(OP_GS, "curve-property solver has no owning curve")
+                })?;
+                Ok(Some(curve.natural_interval()))
+            } else {
+                solution.parameter_interval(index)
+            }
+        })
+    }
     fn solver(&self) -> &GlobalSolver<'t, O> {
         &self.base
     }

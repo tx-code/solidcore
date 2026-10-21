@@ -301,3 +301,59 @@ python scripts/build_brep_constructor_reference.py --source <cpp-checkout> --sdk
 python scripts/brep_curve_surface_compare.py --cpp bin/curve-surface-reference/brep-curve-reference.exe --rust bin/debug/examples/brep_curve_probe.exe --receipt bin/brep-curve-surface.local.json
 python scripts/brep_vertexuse_validation_compare.py --cpp <validation-observer> --rust bin/debug/examples/brep_validation_probe.exe --receipt bin/brep-vertexuse.local.json
 ```
+
+## Owned curve assertions and property-solver domains
+
+`assert_edge_curve` and `assert_uv_curve` execute the stored curve's actual
+Curve -> BSplineCurve -> Line chain. The UV entry checks only its own stored
+curve, without a mate fallback. The Line Given override skips its parent and may
+keep an absent NURB; the B-spline Given routine still executes its numerical
+checks. Other concrete curve assertion bodies remain explicit dependencies.
+These methods do not assert the edge/use or establish import qualification.
+
+The B-spline body retains prefix early returns, end/internal knot multiplicities,
+representation counts, endpoint/control-point coincidence, one-sided derivative
+and kink checks, global speed/radius analysis and internal poles. Source rule4
+uses the start-pair predicate/value even when only the end pair coincides;
+both one-sided zero-derivative branches use indices5/6. These source quirks are
+preserved, not used to redefine mathematical validity. The final pole tolerance
+is the SDK's fixed `SM_ZONE_TOL_3D/10`, not an import-quality default.
+
+Radius rules13/14 have the maintained fork's explicit request guard: Heal and
+unrelated Given requests skip that search. Release macros for the other rules
+retain their original numeric level behavior. GPA's initialized partial outputs
+survive ordinary status failures. Missing dependencies or inaccessible failed
+evaluation outputs remain errors rather than fabricated numerical evidence.
+Reports receive owner parameters and final values only after a successful new
+insertion; duplicate reports keep their original metadata.
+
+The bounded Bezier proof handles only concrete B-splines with already-separated
+degree1--3 spans (at most16 spans, depth3). It never inserts knots, fits geometry,
+rejects a curve or invents a worst-case parameter. Inconclusive bounds retain the
+original GPA path. Pinned `softfloat`1.0.0 performs the same binary64 operations
+and outward one-ULP expansions without depending on hardware rounding/FTZ/DAZ
+state. Default-environment native operations are compared separately; this does
+not qualify the native SSE control-state guard or all cache side effects in
+nondefault environments. Algebraic line/parabola and arithmetic-boundary tests
+supplement operation comparisons; sampled results are not continuous proofs.
+
+`GlobalSolver` now shares its original duplicate comparison through an internal
+domain-provider seam. `CurvePropertyGs` supplies the actual borrowed curve's
+natural domain, independently of optional output-handle metadata. The source
+`1/10000` natural-domain rule is unchanged. This resolves the small-scale
+near-cusp case where missing domain data previously left several approximate
+minima ahead of the tighter midpoint candidate. An unrelated solver still uses
+the existing handle-based default and its original failure behavior.
+
+Shared curve materialization uses the actual owner and context, preserves
+existing representations, and serves both assertion and reverse-direction checks.
+Internal-pole queries never create a missing NURB; the native base `SmCurve`
+receivers retain their literal false default. Geometry attributes, warning-stream
+transport, other subclass assertions and complete Edge/Vertex validation remain
+required SDK work.
+
+```text
+cargo build --locked -p solidcore --example brep_curve_validation_probe
+python scripts/build_brep_constructor_reference.py --source <cpp-checkout> --sdk <release-sdk> --toolchain-env <msvc-env.json> --output bin/curve-validation-reference --probe curve_validation
+python scripts/brep_curve_validation_compare.py --cpp bin/curve-validation-reference/brep-curve_validation-reference.exe --rust bin/debug/examples/brep_curve_validation_probe.exe --receipt bin/brep-curve-validity.local.json
+```

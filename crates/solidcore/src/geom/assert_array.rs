@@ -365,6 +365,12 @@ impl AssertArray {
         &self.reports
     }
 
+    /// Native post-report macros modify only a newly added report, never a
+    /// duplicate already held by the caller.
+    pub(crate) fn last_added_mut(&mut self) -> Option<&mut AssertReport> {
+        self.last_add.then(|| self.reports.last_mut()).flatten()
+    }
+
     /// `SmAssertArray::Contains`: `true` when a report equal to `report` (see
     /// `PartialEq for AssertReport`) is already in the array.
     #[must_use]

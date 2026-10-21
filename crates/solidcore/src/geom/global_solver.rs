@@ -1125,6 +1125,17 @@ impl<'t, O: SolutionObject> GlobalSolver<'t, O> {
         sol1: &Solution<O>,
         sol2: &Solution<O>,
     ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
+        Self::identical_solutions_with_intervals(sol1, sol2, Solution::parameter_interval)
+    }
+
+    /// The same native comparison with an owning solver supplying actual
+    /// geometry domains. An opaque/absent caller handle must not discard a
+    /// curve already borrowed by that solver or replace its domain by zero.
+    pub(crate) fn identical_solutions_with_intervals(
+        sol1: &Solution<O>,
+        sol2: &Solution<O>,
+        mut interval: impl FnMut(&Solution<O>, usize) -> Result<Option<crate::geom::extent1d::Extent1d>>,
+    ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
         const OP: &str = "geom::global_solver::GlobalSolver::identical_solutions";
 
         // different ObjectCounts, VariableCounts, SolutionValues, SolutionTypes
@@ -1151,8 +1162,8 @@ impl<'t, O: SolutionObject> GlobalSolver<'t, O> {
 
         // ParameterValues off by more than ScaledZero or more than 1/10000th of the parameter length
         for i in 0..sol1.num_variables {
-            let ivl1 = sol1.parameter_interval(i)?;
-            let ivl2 = sol2.parameter_interval(i)?;
+            let ivl1 = interval(sol1, i)?;
+            let ivl2 = interval(sol2, i)?;
             let length1 = ivl1.map_or(0.0, |ivl| 0.0001 * ivl.length());
             let length2 = ivl2.map_or(0.0, |ivl| 0.0001 * ivl.length());
 

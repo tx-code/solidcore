@@ -2111,7 +2111,7 @@ impl Curve {
         min_segments: u64,
     ) -> Result<Tessellation> {
         match self.kind() {
-            CurveKind::Line(l) => Ok(l.tessellate(
+            CurveKind::Line(l) => l.tessellate(
                 interval,
                 min_segments,
                 TessellationRequest {
@@ -2119,7 +2119,7 @@ impl Curve {
                     points: true,
                     tangents: true,
                 },
-            )),
+            ),
             CurveKind::BSpline(c) => c.tessellate(
                 k,
                 interval,

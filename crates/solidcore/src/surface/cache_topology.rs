@@ -125,6 +125,28 @@ pub trait CacheTopology<O: Copy + PartialEq> {
     fn face(&mut self, surface: &Surface) -> Result<Option<O>>;
     /// `SmTol::GetZoneTol3d(pFace)`.
     fn face_tolerance(&mut self, face: O) -> Result<f64>;
+    /// Optional live tolerance for the new surface-point solver. None supplies
+    /// no owner resolution; standalone solver behavior remains unchanged.
+    fn point_solver_face_tolerance(&mut self, _surface: &Surface) -> Result<Option<f64>> {
+        Ok(None)
+    }
+    /// Native cache lookup for `GlobalPointSolve`'s fast-result trim check.
+    /// It is deliberately lazy: generic numerical solving does not need it.
+    fn point_solver_cache(
+        &mut self,
+        k: &Kernel,
+        surface: &Surface,
+    ) -> Result<OwnedSurfaceCache<O>> {
+        crate::surface::surface::p1::get_surface_cache(
+            k,
+            surface,
+            None::<crate::surface::surface::p4::NoObject>,
+        )?;
+        Err(SolidError::unported(
+            "SmFace::PointClassify",
+            "query.face_p2",
+        ))
+    }
     /// Native pole calculation using the actual face tolerance where owned.
     fn singularities(&mut self, k: &Kernel, surface: &Surface) -> Result<u32> {
         let value = if let Some(face) = self.face(surface)? {

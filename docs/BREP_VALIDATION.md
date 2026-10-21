@@ -54,8 +54,8 @@ The ordered root implementation still reaches missing operations:
 - Ray-based `IsInnerShellOf` and complete coincidence detection.
 - The root `AssertSubTopology` branch now collects the actual stored lists and
   face-derived loops, then runs Region, Shell, Face and Loop checks in native
-  order, followed by the real Edge/Edgeuse calls. Vertex validation and the non-root `GetSubTopology` branch
-  remain explicit missing operations. Face execution now includes Plane and
+  order, followed by the real Edge/Edgeuse and Vertex calls. The non-root
+  `GetSubTopology` branch remains an explicit missing operation. Face execution now includes Plane and
   BSplineSurface assertions; other concrete surface subclasses and periodic
   seam classification remain required.
 - Other concrete curve/surface assertion bodies and unavailable geometric
@@ -179,7 +179,7 @@ Face remains partial: remaining concrete surface subclass assertions and periodi
 FaceProps seam classification are explicit dependencies, as are unavailable
 coincidence failure outputs. Selected planar calls and their non-Given Plane/BSplineSurface assertions can
 finish; Given still does not include skipped base chains. Root walk reaches these actual
-dependencies, or Edge/Vertex after completed selected Face/Loop checks, rather
+dependencies after completed selected Face/Loop checks, rather
 than stopping at an unexecuted blanket Face placeholder. Non-root walk remains
 unported. Complete migration and native import acceptance remain unestablished.
 
@@ -284,9 +284,9 @@ chain except for Given, optional target context/type checks, the real missing-se
 query and the face-or-wire attachment test. It ignores walk as the source does.
 Disabled fresh-gap and broad sector tests stay disabled. Checked arena failures
 and missing dependencies propagate; they cannot yield a complete validity result.
-The Edge/Vertex base membership adapters do not imply their full local validators
-are implemented. Root traversal now executes Edge/Edgeuse and stops at Vertex
-validation on the qualified planar graph; other geometry can stop earlier.
+The base membership adapters are distinct from the local validators. Root
+traversal now executes Edge/Edgeuse and Vertex on the qualified planar graph;
+other geometry can still stop at explicit dependencies.
 
 The native observer uses public synthetic Plane, rotated Plane and bilinear
 surface receivers, all ownership flags, copies, identity/rotation/scales, failed
@@ -350,7 +350,7 @@ Shared curve materialization uses the actual owner and context, preserves
 existing representations, and serves both assertion and reverse-direction checks.
 Internal-pole queries never create a missing NURB; the native base `SmCurve`
 receivers retain their literal false default. Geometry attributes, warning-stream
-transport, other subclass assertions and complete Vertex validation remain
+transport and other subclass assertions remain
 required SDK work.
 
 ```text
@@ -368,7 +368,7 @@ level-two on-face form, alternating orientation, endpoint incidence/gaps and
 manifold/spine radial order. The native numeric-level behavior is retained:
 Given still executes rule13. Child calls keep the requested level but receive
 no parent's Given request array. Non-root walk remains an explicit dependency.
-Root walking now invokes these edge routines before reaching Vertex validation.
+Root walking now invokes these edge routines followed by Vertex validation.
 
 `assert_edgeuse` retains optional context/type checks, the **own stored** UV
 owner/length/periodic/parameter rules, loop/wire membership, reciprocal corners,
@@ -392,7 +392,7 @@ materialization on the actual owned curve (`SmGap.cpp`1730--1743 and
 Binormal projection uses the real face-owned cache getter; cache construction may
 create other trims even for a 3D-only request. Missing geometry and inaccessible
 failed-binormal outputs still return explicit errors. Shared cache identity,
-registration, checkout, other subclass assertions and Vertex remain incomplete;
+registration, checkout and other subclass assertions remain incomplete;
 a completed local comparison cannot qualify whole-model acceptance or import.
 
 The maintained comparison uses actual constructor-built lamina, two-face manifold,
@@ -406,4 +406,71 @@ source's V-direction quirk. Native-unsafe graphs are not used as a validity orac
 cargo build --locked -p solidcore --example brep_validation_probe --example brep_edge_queries_probe
 python scripts/build_brep_constructor_reference.py --source <cpp-checkout> --sdk <release-sdk> --toolchain-env <msvc-env.json> --output bin/edge-queries-reference --probe edge_queries
 python scripts/brep_edge_validation_compare.py --cpp <validation-observer> --rust bin/debug/examples/brep_validation_probe.exe --queries-cpp bin/edge-queries-reference/brep-edge_queries-reference.exe --queries-rust bin/debug/examples/brep_edge_queries_probe.exe --receipt bin/brep-edge-validity.local.json
+```
+
+
+## Vertex assertions and corner queries
+
+`assert_vertex` executes `SmVertex.cpp`2550--2579 and2711--2776 at `d8ed45a`:
+the owning base (except Given), the unconditional face-gap/corner helper, rule2
+incidence checks, then actual Vertexuse assertions. Child Given calls receive
+no parent's request array. Walk is ignored as native; root descendants now run
+Vertices after Edges. The obsolete tolerance-consistency rule remains disabled
+under the selected SDK build macros.
+
+`vertex::validity::check_pointers` preserves the separate shell-vertex,
+vertex-loop, wire and loop-corner branches (1446--1707), including reciprocal
+mate/loop/face links and the original empty-use-list result. Owning-base checks
+remain separate. It introduces no extra vertex-loop cardinality rule or repair.
+Checked ids replace undefined native accesses; raw runtime validators are not
+hostile-container parsers.
+
+`within_faces` uses the original **strict** gap `<` model intersection threshold,
+clearing all relevant caches first when forced. Vertex rule1 only reports when
+the largest observed face gap is **greater** than that threshold at level2 or
+above. At equality, the within predicate is false but no Vertex rule1 is added.
+A failed tight-corner predicate alone can similarly leave the local Boolean true.
+These behaviors are source compatibility, not import acceptance policy.
+
+`has_parallel_faces` retains oriented-normal angles, last-wins equal-gap selection
+and the shared `GetVertexuseOfFace` accessor's source quirk (the face argument is
+ignored). `calc_corner_from_faces` retains every branch: no face, offset parallel
+midpoint, one-surface drop, two-surface refinement and three-surface intersection.
+Nonparallel targets are selected in source use order with its one-degree test;
+later uses still execute their UV/normal checks but do not add a fourth target.
+The disabled residual scan stays disabled. Outside the parallel branch, its gap
+is movement to the solution on the first target surface and its max-face witness
+usually remains unset. It is not a certificate over every attached surface.
+`is_on_face_corner` retains native true for a no-answer result. No defining
+vertex is moved; temporary midpoint evaluation bypasses Notify and restores the
+point and invalidates the same caches on success or failure.
+
+The point-drop pipeline now accepts an explicit `PointDropContext`. Default and
+face-lookup entries share the same fast/local/global phases and result selection.
+`surface_cache::drop_face_point` supplies the actual model's working tolerance
+and global cache/classification environment. Fast success does not build a cache
+or generate trims. Normalized edgeuse evaluation reacquires borrowed geometry
+after model mutation. The two-pole recovery keeps its already-rescued unowned
+surface, rather than reattaching a face and causing trim-generation recursion.
+The new global solver receives actual owner tolerance in seam tests and local
+refinement. Native cache acquisition stays inside GlobalPointSolve's fast-result
+trim branch (`SmSurface.cpp`20065); generic numerical solving does not eagerly
+generate UV. Point minimization and corner queries are the qualified modes here; directed
+owned bounds and shared cache identity retain their own dependencies.
+Cold and pretrimmed concrete B-spline receivers retain their type,
+parameters and source checks. General curve projection remains a separate
+dependency where actually reached, never a Plane substitution.
+
+Selected SDK comparisons cover all topology roles, source rule levels, scalar
+faults, repeated arrays, returned corner/face witnesses, original vertex points,
+cache state and marks. Single/two/three-plane analytic truth is checked separately
+with a declared1e-14 fixture bound; the subsequent SDK comparison keeps1e-9
+relative with no absolute floor. Native access-violation inputs are listed
+explicitly and not counted as pass or deferred. Complete coincidence/ray checks,
+other geometric dependencies, shared cache ownership and native STEP publication
+remain separate full-migration requirements.
+
+```text
+cargo build --locked -p solidcore --example brep_validation_probe
+python scripts/brep_vertex_validation_compare.py --cpp <validation-observer> --rust bin/debug/examples/brep_validation_probe.exe --receipt bin/brep-vertex-validity.local.json
 ```

@@ -22,6 +22,10 @@
 #include "SmTrimSrfCache.h"
 #include "SmVertex.h"
 #include "SmVertexuse.h"
+#include "SmGap.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <algorithm>
 #include <array>
 #include <functional>
@@ -67,6 +71,7 @@ FIELD(LuMate, SmLoopuse, m_pLUMate, SmLoopuse *)
 FIELD(LoopStart, SmLoopuse, m_pEUorVU, SmTopology *)
 FIELD(Curve, SmEdge, m_pCurve, SmCurve *)
 FIELD(VertexUse, SmEdgeuse, m_pVU, SmVertexuse *)
+FIELD(VertexGap,SmVertexuse,m_sVertexFaceGap3d,SmVertexFaceGap)
 FIELD(UvCurve, SmEdgeuse, m_pUVTrimCurve, SmBSplineCurve *)
 FIELD(EuOwner, SmEdgeuse, m_pSorLU, SmTopology *)
 FIELD(Ccw, SmEdgeuse, m_pCCW, SmEdgeuse *)
@@ -169,7 +174,13 @@ int main(int argc, char **argv) {
         const bool cache_mode=mode.starts_with("cache_");
         const bool local_mode=mode=="local_bsp";
         const bool root_mode=mode=="assert_root"||mode=="assert_root_walk";
-        const bool topology_mode=mode.starts_with("assert_region")||mode.starts_with("assert_shell")||mode.starts_with("assert_face")||mode.starts_with("assert_loop")||mode.starts_with("assert_vertexuse")||mode.starts_with("assert_edge");
+        const bool vertex_mode=(mode.starts_with("assert_vertex")&&!mode.starts_with("assert_vertexuse"))||mode.starts_with("vertex_");
+        const bool topology_mode=vertex_mode||mode.starts_with("assert_region")||mode.starts_with("assert_shell")||mode.starts_with("assert_face")||mode.starts_with("assert_loop")||mode.starts_with("assert_vertexuse")||mode.starts_with("assert_edge");
+#ifdef _WIN32
+        // Synthetic fault inputs must exit on a native access violation without
+        // opening an interactive system dialog. Kernel calculations are unchanged.
+        SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
+#endif
         const bool side_mode=mode.starts_with("edge_side")||mode.starts_with("loop_side");
         SmContext context;
         SmBrepConstructor builder;
@@ -205,9 +216,10 @@ int main(int argc, char **argv) {
             // mate. Radial list order can start at either member of this pair.
             std::sort(fresh.begin(),fresh.end(),[=](auto a,auto b){return a->GetOrientation()==created_orientation&&b->GetOrientation()!=created_orientation;});
             for(auto use:fresh)allocated_uses[use]=unsigned(allocated_uses.size());};
-        SmEdge* shared_edge=nullptr;
+        SmEdge* shared_edge=nullptr;std::array<SmEdge*,3> initial_edges{};
         for (size_t i = 0; i < 3; ++i) {
             auto created_edge=builder.StartEdge(SM_OT_SAME, nullptr, vertices[i], vertices[(i + 1) % 3]);
+            initial_edges[i]=created_edge;
             if(i==0)shared_edge=created_edge;
             if (!created_edge)
                 throw std::runtime_error("edge");
@@ -268,6 +280,23 @@ int main(int argc, char **argv) {
         SmLoop *vertex_loop=nullptr;
         if(mode.find("vertexloop")!=std::string::npos)vertex_loop=builder.StartAndEndSingleVertexLoop(SmPoint3d(.2,.2,0));
         require(builder.EndFace());
+        if(mode.find("_trihedral")!=std::string::npos){
+            SmVertex* zv=nullptr;SmEdge* ze=nullptr;
+            for(int n=0;n<2;++n){
+                builder.StartFace(SM_OT_SAME);
+                SmVector3d u=n==0?SmVector3d(0,0,1):SmVector3d(0,1,0),v=n==0?SmVector3d(1,0,0):SmVector3d(0,0,1);
+                require(builder.SetFaceSurface(new(&context)SmPlane(points[0],u,v,SmVector2d(1,1),domain,&context),domain));
+                builder.StartLoop(SM_OT_SAME);if(n==0)zv=builder.StartVertexOfLoop(SmPoint3d(0,0,1));
+                SmVertex* vv[]={vertices[0],n==0?zv:vertices[2],n==0?vertices[1]:zv};
+                SmPoint3d pp[]={points[0],n==0?SmPoint3d(0,0,1):points[2],n==0?points[1]:SmPoint3d(0,0,1)};
+                SmEdge* existing[]={n==0?nullptr:initial_edges[2],nullptr,n==0?initial_edges[0]:ze};
+                for(size_t j=0;j<3;++j){auto sense=existing[j]?SM_OT_OPPOSITE:SM_OT_SAME;
+                    auto edge=builder.StartEdge(sense,existing[j],vv[j],vv[(j+1)%3]);if(!edge)throw std::runtime_error("trihedral edge");
+                    if(!existing[j]){require(builder.SetEdgeCurve(new(&context)SmLine(pp[j],pp[(j+1)%3],3,&context),FALSE));require(builder.SetLimits(SmVertexNode(0.),SmVertexNode(1.)));}
+                    if(n==0&&j==0)ze=edge;require(builder.EndEdge());capture_uses(edge,sense);}
+                require(builder.EndLoop());require(builder.EndFace());
+            }
+        }
         if(mode.find("_manifold")!=std::string::npos||mode.find("_spine")!=std::string::npos){
             const int count=mode.find("_spine")!=std::string::npos?2:1;
             for(int n=0;n<count;++n){
@@ -292,7 +321,7 @@ int main(int argc, char **argv) {
         require(builder.EndBrep());
         SmShell *target_shell=outer;
         if((mode.starts_with("assert_region")||mode.starts_with("assert_shell")||
-            ((mode.starts_with("assert_vertexuse")||mode.starts_with("assert_edge"))&&(mode.find("_wire")!=std::string::npos||mode.find("_shellvertex")!=std::string::npos))) &&
+            ((mode.starts_with("assert_vertexuse")||mode.starts_with("assert_edge")||vertex_mode)&&(mode.find("_wire")!=std::string::npos||mode.find("_shellvertex")!=std::string::npos))) &&
             (mode.find("_vertex")!=std::string::npos || mode.find("_wire")!=std::string::npos)) {
             SmVertex *vertex=nullptr;require(b->MakeShellVertexTopology(nullptr,target_shell,vertex));
             if(mode.find("_wire")!=std::string::npos) {
@@ -330,7 +359,7 @@ int main(int argc, char **argv) {
         SmTArray<SmVertexuse *> vus;
         vs[0]->GetVertexuses(vus);
         auto target_vu=vus[0];
-        if(mode.starts_with("assert_vertexuse")) {
+        if(mode.starts_with("assert_vertexuse")||vertex_mode) {
             if(mode.find("_vertexloop")!=std::string::npos)target_vu=target_lu->GetVertexuse();
             else if(mode.find("_wire")!=std::string::npos)target_vu=static_cast<SmEdgeuse*>(field<List>(target_shell))->GetVertexuse();
             else if(mode.find("_shellvertex")!=std::string::npos)target_vu=static_cast<SmVertexuse*>(field<List>(target_shell));
@@ -350,7 +379,7 @@ int main(int argc, char **argv) {
         if(mode.find("_hole")!=std::string::npos){SmTArray<SmLoop*> all;f->GetLoops(all);
             for(ULONG i=1;i<all.GetSize();++i){record(keys,all[i],i);auto use=all[i]->GetLoopuse();record(keys,use,2*i);record(keys,use->GetOtherLoopuse(),2*i+1);}}
         if(vertex_loop){record(keys,vertex_loop,1);record(keys,target_lu,2);record(keys,target_mate_lu,3);}
-        if(mode.find("_manifold")!=std::string::npos||mode.find("_spine")!=std::string::npos){
+        if(mode.find("_manifold")!=std::string::npos||mode.find("_spine")!=std::string::npos||mode.find("_trihedral")!=std::string::npos){
             SmTArray<SmFace*> faces;b->GetFaces(faces);
             for(ULONG i=1;i<faces.GetSize();++i){auto face=faces[i];record(keys,face,i);keys[face->GetSurface()]=(1ULL<<63)|i;
                 auto up=face->GetUpwardFaceuse();record(keys,up,2*i);record(keys,up->GetMate(),2*i+1);
@@ -363,8 +392,8 @@ int main(int argc, char **argv) {
             SmTArray<SmEdgeuse *> uses;
             edges[i]->GetEdgeuses(uses);
             for (ULONG j = 0; j < uses.GetSize(); ++j) {
-                record(keys, uses[j], mode.find("_manifold")!=std::string::npos||mode.find("_spine")!=std::string::npos?allocated_uses.at(uses[j]):use_index++);
-                record(keys, uses[j]->GetVertexuse(), mode.find("_manifold")!=std::string::npos||mode.find("_spine")!=std::string::npos?allocated_uses.at(uses[j]):vertexuse_index++);
+                record(keys, uses[j], mode.find("_manifold")!=std::string::npos||mode.find("_spine")!=std::string::npos||mode.find("_trihedral")!=std::string::npos?allocated_uses.at(uses[j]):use_index++);
+                record(keys, uses[j]->GetVertexuse(), mode.find("_manifold")!=std::string::npos||mode.find("_spine")!=std::string::npos||mode.find("_trihedral")!=std::string::npos?allocated_uses.at(uses[j]):vertexuse_index++ + (vertex_mode&&mode.find("_wire")!=std::string::npos&&i>=3?1:0));
             }
         }
         for (ULONG i = 0; i < vs.GetSize(); ++i){
@@ -372,14 +401,21 @@ int main(int argc, char **argv) {
             SmTArray<SmVertexuse*> uses;vs[i]->GetVertexuses(uses);
             for(ULONG j=0;j<uses.GetSize();++j)if(!keys.contains(uses[j]))record(keys,uses[j],vertexuse_index++);
         }
-        if((side_mode||mode.starts_with("assert_edge")) && mode.find("_uv")!=std::string::npos){SmTArray<SmEdgeuse*> uses;lu->GetEdgeuses(uses);
+        if((side_mode||mode.starts_with("assert_edge")||vertex_mode) && mode.find("_uv")!=std::string::npos){SmTArray<SmEdgeuse*> uses;lu->GetEdgeuses(uses);
             for(ULONG i=0;i<uses.GetSize();++i){SmBSplineCurve *curve=nullptr;require(uses[i]->GetOrCreateUVTrimCurve(curve));}}
+        if(defect=="warm_bspline"){
+            // Receiver fixture: retain existing exact trims and use the same
+            // analytic plane's NURB as a concrete generic B-spline receiver.
+            auto old=f->GetSurface();auto raw=static_cast<SmBSplineSurface*>(old)->GetOrCreateGwNurbPointer();
+            auto replacement=new(&context)SmBSplineSurface(raw);replacement->SetOwner(f);
+            field<Surface>(f)=replacement;old->SetOwner(nullptr);delete old;
+        }
         const SmMarkType mark_types[]={SM_MT_MARK,SM_MT_MARK2,SM_MT_MARK3,SM_MT_MARKIO,SM_MT_MARKASSERT};
         std::array<ULONG,5> before_marks{};
         for(size_t i=0;i<5;++i)before_marks[i]=context.GetCurrentMark(mark_types[i]);
         Restore restore;
         auto apply = [&](const std::string &name) {
-            if (name == "none" || name == "surface_offset" || name == "trim_failure" || name == "edge_no_uses" || name.starts_with("reverse_") || name.starts_with("bspline_"))
+            if (name == "none" || name == "surface_offset" || name == "trim_failure" || name == "edge_no_uses" || name=="warm_bspline" || name.starts_with("reverse_") || name.starts_with("bspline_"))
                 return;
             if(name=="face_domain_outside"||name=="face_domain_line") {
                 auto saved=field<FaceDomain>(f);restore.actions.emplace_back([f,saved]{field<FaceDomain>(f)=saved;});
@@ -495,6 +531,7 @@ int main(int argc, char **argv) {
                 field<VertexTol>(vs[0]) = 0.;
             else if (name == "vertex_high_tolerance")
                 field<VertexTol>(vs[0]) = .1;
+            else if(name=="vertex_shift")vs[0]->SetPoint(SmPoint3d(.0003,.0004,.0005));
             else if (name == "root_zero_tolerance")
                 field<RootTol>(b) = 0.;
             else if(name=="initial_validate_only")field<ValidateOnly>(b)=TRUE;
@@ -560,6 +597,9 @@ int main(int argc, char **argv) {
             if(selection=="given15") {level=SM_LEVEL_GIVEN;requested.ReSet();requested.Add(15);}
             root_valid=call();if(selection=="repeat")root_valid=call();
         }
+        SmBoolean vertex_found=FALSE;double vertex_gap=-1.,vertex_angle=SM_BIG_DOUBLE;SmFace* vertex_face=nullptr;
+        SmPoint3d vertex_point;vertex_point.SetUninitialized();SmFace* parallel_f1=nullptr;SmFace* parallel_f2=nullptr;SmPoint2d parallel_uv1,parallel_uv2;
+        parallel_uv1.SetUninitialized();parallel_uv2.SetUninitialized();
         if(topology_mode){
             const auto call=[&]{auto walk=mode.ends_with("_walk")?SM_WALK:SM_NO_WALK;auto req=selection.starts_with("given")&&selection!="given_empty"?&requested:nullptr;
                 if(mode.starts_with("assert_region"))return b->GetInfiniteRegion()->AssertValid(target,level,walk,req);
@@ -568,6 +608,13 @@ int main(int argc, char **argv) {
                 if(mode.starts_with("assert_face"))return f->AssertValid(target,level,walk,req);
                 if(mode.starts_with("assert_loopuse"))return (mode.find("_mate")!=std::string::npos?target_mate_lu:target_lu)->AssertValid(target,level,walk,req);
                 if(mode.starts_with("assert_vertexuse"))return target_vu->AssertValid(target,level,walk,req);
+                auto vertex=target_vu->GetVertex();
+                if(mode.starts_with("assert_vertex"))return vertex->AssertValid(target,level,walk,req);
+                if(mode.starts_with("vertex_pointers"))return vertex->CheckPointers();
+                if(mode.starts_with("vertex_within"))return vertex->IsWithinXSectTol3dOfFaces(&vertex_gap,&vertex_face,mode.find("_force")!=std::string::npos);
+                if(mode.starts_with("vertex_on_corner"))return vertex->IsOnFaceCorner(&vertex_found,&vertex_gap,&vertex_point);
+                if(mode.starts_with("vertex_corner")){query_status=vertex->CalcCornerFromFaces(vertex_found,vertex_gap,vertex_face,vertex_point);return SmBoolean(query_status==SM_SUCCESS);}
+                if(mode.starts_with("vertex_parallel"))return vertex->HasParallelFaces(nullptr,&vertex_angle,&vertex_gap,&parallel_f1,&parallel_f2,&parallel_uv1,&parallel_uv2);
                 if(mode.starts_with("assert_edgeuse")){auto use=mode.find("_wire")!=std::string::npos?static_cast<SmEdgeuse*>(field<List>(target_shell)):first;return (mode.find("_mate")!=std::string::npos?use->GetMate():use)->AssertValid(target,level,walk,req);}
                 if(mode.starts_with("assert_edge")){auto edge=mode.find("_wire")!=std::string::npos?static_cast<SmEdgeuse*>(field<List>(target_shell))->GetEdge():edges[0];return edge->AssertValid(target,level,walk,req);}
                 return target_loop->AssertValid(target,level,walk,req);};
@@ -628,7 +675,7 @@ int main(int argc, char **argv) {
             std::cout << ',';
             quote(r->m_pMessage);
             std::cout << ',' << r->m_sTol3d << ',' << r->m_dValue << ',';quote(r->m_sOwnerTypeString);
-            if(mode.starts_with("assert_edge"))std::cout<<",["<<r->m_sOwnerParam.x<<','<<r->m_sOwnerParam.y<<']';
+            if(mode.starts_with("assert_edge")||vertex_mode)std::cout<<",["<<r->m_sOwnerParam.x<<','<<r->m_sOwnerParam.y<<']';
             std::cout<<']';
         }
         std::cout << "]";
@@ -684,6 +731,17 @@ int main(int argc, char **argv) {
             for(size_t i=0;i<uses.size();++i){if(i)std::cout<<',';auto use=uses[i];auto uv=field<UvCurve>(use);
                 std::cout<<'['<<(keys.at(use)&0xffffffffULL)<<','<<(uv?"true":"false")<<','<<(uv&&uv->GetGwNurbPointer()?"true":"false")<<','<<(use->IsMaxEdgeFaceGapInit()?"true":"false")<<']';}
             std::cout<<']';
+        }
+        if(vertex_mode){
+            auto vertex=target_vu->GetVertex();std::cout<<",\"vertex_point\":["<<vertex->GetPoint().x<<','<<vertex->GetPoint().y<<','<<vertex->GetPoint().z<<']';
+            std::cout<<",\"vertex_state\":[";SmTArray<SmVertexuse*> uses;vertex->GetVertexuses(uses);
+            for(ULONG i=0;i<uses.GetSize();++i){if(i)std::cout<<',';auto g=field<VertexGap>(uses[i]);auto uv=g.GetFaceUV();
+                std::cout<<'['<<(keys.at(uses[i])&0xffffffffULL)<<','<<(g.IsInit()?"true":"false")<<','<<g.GetLength()<<','<<uv.x<<','<<uv.y<<']';}std::cout<<']';
+            if(mode.starts_with("vertex_")){
+                std::cout<<",\"vertex_query\":["<<query_status<<','<<(vertex_found?"true":"false")<<','<<vertex_gap<<',';
+                witness(vertex_face);std::cout<<",["<<vertex_point.x<<','<<vertex_point.y<<','<<vertex_point.z<<"],"<<vertex_angle<<',';
+                witness(parallel_f1);std::cout<<',';witness(parallel_f2);std::cout<<",["<<parallel_uv1.x<<','<<parallel_uv1.y<<','<<parallel_uv2.x<<','<<parallel_uv2.y<<"]]";
+            }
         }
         if(side_mode)std::cout<<",\"side\":["<<(side_inside?"true":"false")<<','<<(side_boundary?"true":"false")<<','<<side_index<<']';
         if(root_mode)std::cout<<",\"root_valid\":"<<(root_valid?"true":"false");

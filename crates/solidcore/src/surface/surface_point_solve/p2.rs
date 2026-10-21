@@ -1035,7 +1035,7 @@ impl SurfPtGlobalSolver<'_> {
                 op,
                 pt_for_local,
                 uv_guess,
-                &sol,
+                self.face_tolerance,
             ) {
                 Ok((found, s)) => {
                     found_answer = found;
@@ -1107,7 +1107,7 @@ impl SurfPtGlobalSolver<'_> {
                         op,
                         pt_for_local,
                         uv_guess,
-                        &sol,
+                        self.face_tolerance,
                     ) {
                         Ok((found, s)) => {
                             found_answer = found;
@@ -1237,11 +1237,11 @@ fn local_point_solve<O: SolutionObject>(
     op: SolverOperation,
     point: Point3,
     guess: Point2,
-    _sol: &Solution<O>,
+    face_tolerance: Option<f64>,
 ) -> Result<(bool, Solution<O>)> {
     // (upstream's LocalPointSolve overwrites the solution with its own, default when
     // nothing was found)
-    let r = surface.local_point_solve::<O>(k, domain, op, point, guess)?;
+    let r = surface.local_point_solve_for_face::<O>(k, domain, op, point, guess, face_tolerance)?;
     let mut solution = r.solution;
     // LocalPointSolve_1 sets m_lNumObjects = 1 and m_apObjects[0] = this; the
     // LocalPointSolve_0 path (MAXIMIZE) leaves both at their defaults.

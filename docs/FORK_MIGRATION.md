@@ -178,9 +178,19 @@ and cache-side-effect parity still need separate qualification.
 
 The actual Edge/Edgeuse local assertion bodies now follow the stored curve/use,
 UV ownership/parameterization, endpoint-gap, manifold/spine sector and radial
-ordering paths. Root descendants invoke them before the remaining Vertex gate.
+ordering paths. Root descendants invoke them before the actual Vertex assertions.
 Periodic-jump and near-pole polygon queries execute over original definitions;
 owned gap sampling and binormal cache creation retain their lazy side effects.
 Source-native unsafe graphs and unresolved geometry/non-root traversal calls
 remain separate evidence categories. See `BREP_VALIDATION.md`; this does not
 complete native import, topology validation or the full SDK migration.
+
+
+Vertex local assertions now execute their real incidence and face-gap/corner
+callees, including the one/two/three-surface target branches and owner-bound
+point-drop context. The qualified planar root walk completes all descendants;
+missing coincidence/ray predicates, non-root traversal and general projection
+still prevent broader claims. Generic B-spline point solves now carry real face tolerance through seam/local
+checks without eager trim construction; actual general curve projection remains
+a separate required dependency. See `BREP_VALIDATION.md`; acceptance/publication and the
+remaining full ledger are still required work.

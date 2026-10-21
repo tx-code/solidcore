@@ -200,22 +200,46 @@ struct DropPointOut {
 /// (`SM_SO_MINIMIZE`, no guess).
 fn surface_drop_point(
     k: &Kernel,
-    b: &Brep,
+    b: &mut Brep,
+    face: crate::topology::FaceId,
+    point: Point3,
+    domain: &crate::geom::extent2d::Extent2d,
+) -> Result<DropPointOut> {
+    let r = crate::topology::surface_cache::drop_face_point(
+        k,
+        b,
+        face,
+        point,
+        domain,
+        &crate::surface::surface::p5::DropPointOptions::default(),
+    )?;
+    Ok(DropPointOut {
+        found: r.success,
+        uv: r.result_uv,
+    })
+}
+
+// CreateUVTrimCurve's two-pole recovery operates on its temporary unowned
+// solve surface. It must not reacquire the attached face here: that would undo
+// the source owner rescue and introduce trim-generation recursion.
+fn detached_surface_drop_point(
+    k: &Kernel,
+    _b: &Brep,
     surface: &Surface,
     point: Point3,
     domain: &crate::geom::extent2d::Extent2d,
 ) -> Result<DropPointOut> {
-    let lookup = |owner: ObjectRef| {
-        let index = u32::try_from(owner.key.0)
-            .map_err(|_| SolidError::invalid_input(OP, "face owner key is not an arena id"))?;
-        crate::topology::face::p2::tolerance(b, crate::topology::FaceId::from_index(index))
-    };
-    let r = surface.drop_point_with_face_lookup::<NoObject>(
+    if surface.face()?.is_some() {
+        return Err(SolidError::invalid_input(
+            OP,
+            "two-pole recovery needs its rescued surface",
+        ));
+    }
+    let r = surface.drop_point::<NoObject>(
         k,
         point,
         domain,
         &crate::surface::surface::p5::DropPointOptions::default(),
-        Some(&lookup),
     )?;
     Ok(DropPointOut {
         found: r.success,
@@ -1097,7 +1121,7 @@ fn two_singular_end_points(
     let end_point = ignored(curve.evaluate_point(edge_domain.max()))?.unwrap_or(Vec3::UNDEF);
 
     // drop curve endpoints onto surface
-    let start_drop = ignored(surface_drop_point(
+    let start_drop = ignored(detached_surface_drop_point(
         k,
         b,
         surface,
@@ -1107,7 +1131,7 @@ fn two_singular_end_points(
     if let Some(d) = start_drop.filter(|d| d.found) {
         start_singularity = surface_is_singularity(k, surface, d.uv)?.0;
         if start_singularity {
-            let end_drop = ignored(surface_drop_point(
+            let end_drop = ignored(detached_surface_drop_point(
                 k,
                 b,
                 surface,
@@ -2216,13 +2240,8 @@ pub fn normalized_evaluate(
                     normalized_evaluate_3d(b, eu, orient, normalized_parameter, want_first_deriv)?;
                 let f = crate::topology::edgeuse::p1::face(b, eu)?
                     .ok_or_else(|| null("NormalizedEvaluate: edge use without face"))?;
-                let surf = b
-                    .face(f)?
-                    .surface
-                    .as_ref()
-                    .ok_or_else(|| SolidError::null_pointer(OP))?; // NER(pSurf)
-                let domain = surf.natural_uv_domain();
-                let drop = surface_drop_point(k, b, surf, three_d.point, &domain)?;
+                let domain = crate::topology::surface_cache::natural_domain_owned(k, b, f)?;
+                let drop = surface_drop_point(k, b, f, three_d.point, &domain)?;
                 if !drop.found {
                     return Err(SolidError::sm_err(OP));
                 }
@@ -2230,6 +2249,13 @@ pub fn normalized_evaluate(
 
                 let mut first_deriv = None;
                 if let Some(d3) = three_d.first_deriv {
+                    // Reacquire after cache construction; no borrowed geometry
+                    // view survives the owning-model mutation.
+                    let surf = b
+                        .face(f)?
+                        .surface
+                        .as_ref()
+                        .ok_or_else(|| SolidError::null_pointer(OP))?;
                     // (status ignored)
                     let (s_su, s_sv) = ignored(surf.evaluate_1st_derivatives(uv, false, false))?
                         .map_or((Vec3::UNDEF, Vec3::UNDEF), |(_, su, sv)| (su, sv));

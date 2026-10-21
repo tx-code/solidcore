@@ -469,6 +469,9 @@ pub struct SurfPtGlobalSolver<'s> {
     closed_in_u: Option<bool>,
     /// `m_bClosedInV` (`None` = `UNSURE`).
     closed_in_v: Option<bool>,
+    // Actual owning face tolerance supplied by a scoped caller; None retains
+    // standalone unresolved-owner behavior, never a guessed tolerance.
+    pub(super) face_tolerance: Option<f64>,
 }
 
 /// The result of [`SurfPtGlobalSolver::find_polygon_triangle_guess`].
@@ -520,6 +523,7 @@ impl<'s> SurfPtGlobalSolver<'s> {
             )?,
             closed_in_u: None,
             closed_in_v: None,
+            face_tolerance: None,
         })
     }
 
@@ -530,6 +534,7 @@ impl<'s> SurfPtGlobalSolver<'s> {
             base: self.base.with_surface(surface),
             closed_in_u: self.closed_in_u,
             closed_in_v: self.closed_in_v,
+            face_tolerance: self.face_tolerance,
         }
     }
 
@@ -941,7 +946,7 @@ impl<'s> SurfPtGlobalSolver<'s> {
     /// Those of the seam and closure tests and of [`Surface::is_on_seam`].
     pub fn check_guess_for_seams(&mut self, k: &Kernel, uv_guess: Point2) -> Result<Point2> {
         let mut uv = uv_guess;
-        if !is_on_seam(k, self.base.surface, uv)? {
+        if !is_on_seam(k, self.base.surface, uv, self.face_tolerance)? {
             return Ok(uv);
         }
 
@@ -1282,7 +1287,12 @@ fn set_interval(d: &mut Extent2d, dir: SurfParamType, ivl: &Extent1d) {
 
 /// `pSurf->IsOnSeam(crUV)` (virtual, default arguments): a plane has no seam
 /// (`SmPlane::IsOnSeam` override); the other kinds run the base body.
-fn is_on_seam(k: &Kernel, surface: &Surface, uv: Point2) -> Result<bool> {
+fn is_on_seam(
+    k: &Kernel,
+    surface: &Surface,
+    uv: Point2,
+    face_tolerance: Option<f64>,
+) -> Result<bool> {
     match surface.kind() {
         SurfaceKind::Plane(p) => Ok(p.is_on_seam().0),
         SurfaceKind::BSpline(_)
@@ -1290,7 +1300,7 @@ fn is_on_seam(k: &Kernel, surface: &Surface, uv: Point2) -> Result<bool> {
         | SurfaceKind::SurfOfRevolution(_)
         | SurfaceKind::Step(_)
         | SurfaceKind::OffsetSurface(_)
-        | SurfaceKind::SrfInVolume(_) => Ok(surface.is_on_seam(k, uv, None)?.on_seam),
+        | SurfaceKind::SrfInVolume(_) => Ok(surface.is_on_seam(k, uv, face_tolerance)?.on_seam),
     }
 }
 

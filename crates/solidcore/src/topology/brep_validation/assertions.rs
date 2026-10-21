@@ -386,22 +386,17 @@ mod tests {
     }
 
     #[test]
-    fn default_walk_never_promotes_a_root_only_success() {
+    fn default_walk_completes_the_qualified_planar_graph_and_its_vertices() {
         let mut b = fixture();
-        let error = assert_valid(
+        let mut reports = AssertArray::new();
+        assert!(assert_valid(
             &mut Kernel::default(),
             &mut b,
             AssertValidOptions::default(),
-            None,
+            Some(&mut reports)
         )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            SolidError::Unported {
-                upstream: "SmVertex::AssertValid",
-                ..
-            }
-        ));
+        .unwrap());
+        assert!(reports.is_empty());
     }
 
     #[test]

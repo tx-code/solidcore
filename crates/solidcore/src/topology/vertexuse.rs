@@ -848,6 +848,7 @@ fn global_point_solve(
 /// body otherwise).
 fn is_singularity(
     k: &Kernel,
+    b: &Brep,
     surface: &Surface,
     uv: Point2,
     tol: f64,
@@ -860,7 +861,21 @@ fn is_singularity(
         | SurfaceKind::Step(_)
         | SurfaceKind::SrfInVolume(_)
         | SurfaceKind::OffsetSurface(_) => {
-            let r = surface.is_singularity(k, uv, tol, false)?;
+            // SmVertexuse.cpp uses the actual surface owner for the pole
+            // approximation tolerance; d3d_tol remains the caller's threshold.
+            let face_tol = surface
+                .face()?
+                .map(|_| crate::topology::surface_cache::working_surface_tolerance(k, b, surface))
+                .transpose()?;
+            let r = surface.is_singularity_with_owner_tolerance(
+                k,
+                uv,
+                crate::surface::surface::p5::SS_UNKNOWN,
+                None,
+                tol,
+                false,
+                face_tol,
+            )?;
             Ok((r.singular, r.direction))
         }
     }
@@ -868,7 +883,12 @@ fn is_singularity(
 
 /// `pSurface->IsOnSeam(uv, NULL, &eSeamDir, ...)` (virtual: the plane override, the
 /// base body otherwise).
-fn is_on_seam(k: &Kernel, surface: &Surface, uv: Point2) -> Result<(bool, SurfParamType)> {
+fn is_on_seam(
+    k: &Kernel,
+    b: &Brep,
+    surface: &Surface,
+    uv: Point2,
+) -> Result<(bool, SurfParamType)> {
     match surface.kind() {
         SurfaceKind::Plane(p) => Ok(p.is_on_seam()),
         SurfaceKind::BSpline(_)
@@ -877,15 +897,29 @@ fn is_on_seam(k: &Kernel, surface: &Surface, uv: Point2) -> Result<(bool, SurfPa
         | SurfaceKind::Step(_)
         | SurfaceKind::SrfInVolume(_)
         | SurfaceKind::OffsetSurface(_) => {
-            let info = surface.is_on_seam(k, uv, None)?;
+            let face_tol = surface
+                .face()?
+                .map(|_| crate::topology::surface_cache::working_surface_tolerance(k, b, surface))
+                .transpose()?;
+            let info = surface.is_on_seam(k, uv, face_tol)?;
             Ok((info.on_seam, info.seam_dir))
         }
     }
 }
 
 /// `pSurface->GetSingularities() != 0`.
-fn has_singularities(k: &Kernel, surface: &Surface) -> Result<bool> {
-    Ok(surface.get_singularities(k, false, false)?.singular != 0)
+fn has_singularities(k: &Kernel, b: &Brep, surface: &Surface) -> Result<bool> {
+    let singular = if surface.face()?.is_some() {
+        surface.get_singularities_of_face(
+            k,
+            crate::topology::surface_cache::working_surface_tolerance(k, b, surface)?,
+            false,
+            false,
+        )?
+    } else {
+        surface.get_singularities(k, false, false)?
+    };
+    Ok(singular.singular != 0)
 }
 
 // ---- UV point and sector --------------------------------------------------------------
@@ -1378,7 +1412,7 @@ pub fn compute_uv_sector(
 
             // IsBegVertexUV on a Surface Singularity
             let (on_pole, singular_dir) =
-                is_singularity(k, surface, io.beg_edge_uv_point, APPROX_TOL_3D)?;
+                is_singularity(k, b, surface, io.beg_edge_uv_point, APPROX_TOL_3D)?;
             io.vertex_on_pole = on_pole;
             if on_pole {
                 // Find DegenParam for BegEdge and EndEdge (statuses ignored)
@@ -1488,7 +1522,7 @@ pub fn compute_uv_sector(
 
             // Is BegVertexUV on a Surface->Seam
             let surface = face_surface(b, f)?;
-            let (on_seam, seam_dir) = is_on_seam(k, surface, io.beg_edge_uv_point)?;
+            let (on_seam, seam_dir) = is_on_seam(k, b, surface, io.beg_edge_uv_point)?;
             let seam_u = seam_dir == SurfParamType::U || seam_dir == SurfParamType::Both;
             let seam_v = seam_dir == SurfParamType::V || seam_dir == SurfParamType::Both;
             io.vertex_on_closed_u = on_seam && seam_u;
@@ -1587,13 +1621,13 @@ pub fn is_on_pole(k: &Kernel, b: &mut Brep, vu: VertexuseId) -> Result<bool> {
 
     // when vertexuse connects to a face->Surface with poles - see if vertex is on pole
     if let Some(f) = f {
-        if has_singularities(k, face_surface(b, f)?)? && has_vertex_face_gap(b, vu)? {
+        if has_singularities(k, b, face_surface(b, f)?)? && has_vertex_face_gap(b, vu)? {
             // find the gap to the surface
             let gap = vertex_face_gap(k, b, vu, false)?
                 .ok_or_else(|| null("IsOnPole: no vertex/face gap"))?;
             let face_uv = gap.face_uv;
             if face_uv.is_initialized()
-                && is_singularity(k, face_surface(b, f)?, face_uv, crate::math::EFF_ZERO)?.0
+                && is_singularity(k, b, face_surface(b, f)?, face_uv, crate::math::EFF_ZERO)?.0
             {
                 on_pole = true;
             }

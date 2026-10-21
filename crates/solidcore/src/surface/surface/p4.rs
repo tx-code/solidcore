@@ -1407,6 +1407,18 @@ impl Surface {
                 // values are within the trim boundaries of the face, unless flags in its
                 // surface cache indicate otherwise.
                 if self.owner().is_some_and(|o| o.type_code == FACE_TYPE) {
+                    // SmSurface.cpp20065 acquires this cache only for fast-result
+                    // trim classification, not before the generic numerical solve.
+                    let owned_cache = if cache.is_none() {
+                        Some(topology.point_solver_cache(k, self)?)
+                    } else {
+                        None
+                    };
+                    let cache = cache.or_else(|| {
+                        owned_cache
+                            .as_ref()
+                            .map(crate::surface::cache_topology::OwnedSurfaceCache::view)
+                    });
                     if let Some(cache) = cache {
                         if cache.trimmed().is_some()
                             && cache.base().point_test_enabled
@@ -1460,7 +1472,7 @@ impl Surface {
         let use_new =
             (op != SolverOperation::Maximize) || op == SolverOperation::Signed3dDirectedMaximize;
         *solutions = if use_new {
-            self.global_point_solve_1(
+            self.global_point_solve_1_for_face(
                 k,
                 uv_domain,
                 op,
@@ -1469,6 +1481,7 @@ impl Surface {
                 opt_target_distance,
                 requested,
                 None,
+                topology.point_solver_face_tolerance(self)?,
             )?
         } else if let Some(surface) = surface {
             self.global_point_solve_0(

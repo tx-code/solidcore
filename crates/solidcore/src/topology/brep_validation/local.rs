@@ -86,12 +86,8 @@ pub(super) fn walk_root(
     for edge in edges {
         valid &= super::assert_edge(k, b, edge, options, report.reports.as_deref_mut())?;
     }
-    if !vertices.is_empty() {
-        // UNPORTED(fork.topology_validation): remaining Vertex validator.
-        return Err(SolidError::unported(
-            "SmVertex::AssertValid",
-            "fork.topology_validation",
-        ));
+    for vertex in vertices {
+        valid &= super::assert_vertex(k, b, vertex, options, report.reports.as_deref_mut())?;
     }
     Ok(valid)
 }
@@ -517,14 +513,14 @@ mod tests {
                 .mark(contexts.first(), MarkType::Mark3);
             lock.release(&mut contexts).unwrap();
             let mut reports = AssertArray::new();
-            let error = super::super::assert_valid(
+            let valid = super::super::assert_valid(
                 &mut Kernel::default(),
                 &mut b,
                 AssertValidOptions { level, walk: true },
                 Some(&mut reports),
             )
-            .unwrap_err();
-            assert!(matches!(error, SolidError::Unported { .. }));
+            .unwrap();
+            assert_eq!(valid, !matches!(level, CheckLevel::Zero));
             let actual = reports
                 .reports()
                 .iter()

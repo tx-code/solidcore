@@ -409,7 +409,36 @@ impl Surface {
         requested: SolutionRequested,
         surface_object: Option<O>,
     ) -> Result<SolutionArray<O>> {
-        SurfPtGlobalSolver::new(
+        self.global_point_solve_1_for_face(
+            k,
+            domain,
+            op,
+            point,
+            distance_tolerance,
+            target_distance,
+            requested,
+            surface_object,
+            None,
+        )
+    }
+
+    /// Same native global solver with the live owning face's working tolerance.
+    /// Seam and local-refinement calls receive it; geometry and domains are shared.
+    /// `SmSurfacePointSolve.cpp`3150--3170 delegates to the same solver. The
+    /// owner tolerance must not replace the caller's distance/target tolerance.
+    pub(crate) fn global_point_solve_1_for_face<O: SolutionObject>(
+        &self,
+        k: &Kernel,
+        domain: &Extent2d,
+        op: SolverOperation,
+        point: Point3,
+        distance_tolerance: f64,
+        target_distance: Option<f64>,
+        requested: SolutionRequested,
+        surface_object: Option<O>,
+        face_tolerance: Option<f64>,
+    ) -> Result<SolutionArray<O>> {
+        let mut solver = SurfPtGlobalSolver::new(
             k,
             self,
             domain,
@@ -418,8 +447,9 @@ impl Surface {
             distance_tolerance,
             target_distance,
             requested,
-        )?
-        .solve(k, surface_object)
+        )?;
+        solver.face_tolerance = face_tolerance;
+        solver.solve(k, surface_object)
     }
 
     /// The new bounded local surface-point solve (`LocalPointSolve_1`).

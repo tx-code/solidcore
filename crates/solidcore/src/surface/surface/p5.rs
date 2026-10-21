@@ -829,12 +829,35 @@ impl Surface {
         test_point: Point3,
         guess_uv: Point2,
     ) -> Result<PointSolve<O>> {
+        self.local_point_solve_for_face(k, domain, op, test_point, guess_uv, None)
+    }
+
+    /// Original `LocalPointSolve` dispatch with resolved live face tolerance.
+    /// This value is used only by the owning solver; it is not a repair budget.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn local_point_solve_for_face<O: Copy>(
+        &self,
+        k: &Kernel,
+        domain: &Extent2d,
+        op: SolverOperation,
+        test_point: Point3,
+        guess_uv: Point2,
+        face_tolerance: Option<f64>,
+    ) -> Result<PointSolve<O>> {
         // Don't use new solvers for MAXIMIZE, but always use them for DIRECTED
         let use_new =
             op != SolverOperation::Maximize || op == SolverOperation::Signed3dDirectedMaximize;
 
         if use_new {
-            let r = self.local_point_solve_1(k, domain, op, test_point, guess_uv, None)?;
+            let r = self.local_point_solve_1_for_face(
+                k,
+                domain,
+                op,
+                test_point,
+                guess_uv,
+                None,
+                face_tolerance,
+            )?;
             let mut solution = r.solution;
             solution.num_variables = 2;
             return Ok(PointSolve {
@@ -996,6 +1019,61 @@ pub struct DropPoint<O> {
     pub solutions: SolutionArray<O>,
 }
 
+/// Scoped owner context for the native `DropPoint` pipeline. The solver phases
+/// remain in Surface; a model context supplies actual face tolerance and the
+/// cache/classification environment only when the global phase is reached.
+pub trait PointDropContext<O: SolutionObject> {
+    /// Resolve the owning face's working tolerance without inventing a default.
+    fn face_tolerance(&mut self, owner: crate::geom::object::ObjectRef) -> Result<f64>;
+    /// Execute the original global phase with its actual model/cache context.
+    #[allow(clippy::too_many_arguments)]
+    fn global_point_solve(
+        &mut self,
+        k: &Kernel,
+        surface: &Surface,
+        domain: &Extent2d,
+        op: SolverOperation,
+        point: Point3,
+        tolerance: f64,
+    ) -> Result<SolutionArray<O>>;
+}
+
+struct LookupDropContext<'a> {
+    lookup: Option<&'a dyn Fn(crate::geom::object::ObjectRef) -> Result<f64>>,
+}
+impl<O: SolutionObject> PointDropContext<O> for LookupDropContext<'_> {
+    fn face_tolerance(&mut self, owner: crate::geom::object::ObjectRef) -> Result<f64> {
+        if let Some(lookup) = self.lookup {
+            lookup(owner)
+        } else {
+            Err(SolidError::unported(
+                "SmFace::GetTolerance",
+                "topology.face_p2",
+            ))
+        }
+    }
+    fn global_point_solve(
+        &mut self,
+        k: &Kernel,
+        surface: &Surface,
+        domain: &Extent2d,
+        op: SolverOperation,
+        point: Point3,
+        tolerance: f64,
+    ) -> Result<SolutionArray<O>> {
+        surface.global_point_solve(
+            k,
+            None,
+            domain,
+            op,
+            point,
+            tolerance,
+            None,
+            SolutionRequested::All,
+        )
+    }
+}
+
 impl Surface {
     /// Inverts `pt_to_drop` on the surface: the UV of the surface point closest to it
     /// (`DropPoint`). A fast drop (planes) is tried first, then a local solve from the
@@ -1031,6 +1109,29 @@ impl Surface {
         opts: &DropPointOptions,
         face_tolerance: Option<&dyn Fn(crate::geom::object::ObjectRef) -> Result<f64>>,
     ) -> Result<DropPoint<O>> {
+        self.drop_point_with_context(
+            k,
+            pt_to_drop,
+            domain,
+            opts,
+            &mut LookupDropContext {
+                lookup: face_tolerance,
+            },
+        )
+    }
+
+    /// The same fast/local/global native pipeline with an explicit owner context.
+    /// Fast success never requests a global cache; existing result selection,
+    /// status handling and UV parameter conventions are shared by every entry.
+    #[allow(clippy::too_many_lines)]
+    pub fn drop_point_with_context<O: SolutionObject>(
+        &self,
+        k: &Kernel,
+        pt_to_drop: Point3,
+        domain: &Extent2d,
+        opts: &DropPointOptions,
+        context: &mut impl PointDropContext<O>,
+    ) -> Result<DropPoint<O>> {
         let op = opts.operation;
         let guess = opts.guess_uv;
 
@@ -1046,16 +1147,9 @@ impl Surface {
         let mut answer_in_array = false;
 
         // We need a tolerance value.
-        let dist_tol = if let Some(face) = self.face()? {
-            if let Some(lookup) = face_tolerance {
-                lookup(face)?
-            } else {
-                // UNPORTED(topology.face_p2): SmFace::GetTolerance without owning model lookup
-                return Err(SolidError::unported(
-                    "SmFace::GetTolerance",
-                    "topology.face_p2",
-                ));
-            }
+        let face = self.face()?;
+        let dist_tol = if let Some(owner) = face {
+            context.face_tolerance(owner)?
         } else {
             XSECT_TOL_3D
         };
@@ -1085,7 +1179,14 @@ impl Surface {
         // Try LocalPointSolve if a guess was supplied.
         if !success {
             if let Some(g) = guess {
-                match ignored(self.local_point_solve::<O>(k, domain, op, pt_to_drop, g))? {
+                match ignored(self.local_point_solve_for_face::<O>(
+                    k,
+                    domain,
+                    op,
+                    pt_to_drop,
+                    g,
+                    face.map(|_| dist_tol),
+                ))? {
                     Some(r) => {
                         success = r.found;
                         sol = r.solution;
@@ -1106,16 +1207,7 @@ impl Surface {
 
         if !success {
             // Haven't found it yet. Call GlobalPointSolve.
-            solutions = self.global_point_solve::<O>(
-                k,
-                None,
-                domain,
-                op,
-                pt_to_drop,
-                dist_tol,
-                None,
-                SolutionRequested::All,
-            )?;
+            solutions = context.global_point_solve(k, self, domain, op, pt_to_drop, dist_tol)?;
             if !solutions.is_empty() {
                 success = true;
                 answer_in_array = true;

@@ -45,6 +45,66 @@ pub struct BrepSurfaceContext<'a> {
     pub face: FaceId,
 }
 
+impl crate::surface::surface::p5::PointDropContext<EntityRef> for BrepSurfaceContext<'_> {
+    fn face_tolerance(&mut self, owner: crate::geom::object::ObjectRef) -> Result<f64> {
+        owning_face_tolerance(self.brep, owner)
+    }
+    fn global_point_solve(
+        &mut self,
+        k: &Kernel,
+        surface: &Surface,
+        domain: &crate::geom::extent2d::Extent2d,
+        op: crate::geom::global_solver::SolverOperation,
+        point: crate::math::Point3,
+        tolerance: f64,
+    ) -> Result<crate::geom::solution_array::SolutionArray<EntityRef>> {
+        // SmSurface.cpp20065 gets a cache only for a fast-result trim check.
+        // Let the shared global pipeline perform that lookup lazily; generic
+        // numerical solves retain their original absence of cache construction.
+        let mut solutions = crate::geom::solution_array::SolutionArray::new();
+        surface.global_point_solve_into_with_surface_cache(
+            k,
+            None,
+            domain,
+            op,
+            point,
+            tolerance,
+            None,
+            crate::geom::global_solver::SolutionRequested::All,
+            &mut solutions,
+            None,
+            self,
+        )?;
+        Ok(solutions)
+    }
+}
+
+/// Native point drop on an actual face, retaining its concrete surface and
+/// classification/cache context. All entrypoints share the Surface pipeline;
+/// this bridge supplies ownership, without fitting geometry or clearing owners.
+pub fn drop_face_point(
+    k: &Kernel,
+    b: &mut Brep,
+    face: FaceId,
+    point: crate::math::Point3,
+    domain: &crate::geom::extent2d::Extent2d,
+    options: &crate::surface::surface::p5::DropPointOptions,
+) -> Result<crate::surface::surface::p5::DropPoint<EntityRef>> {
+    let surface = b
+        .face(face)?
+        .surface
+        .as_ref()
+        .ok_or_else(|| SolidError::null_pointer(OP))?
+        .clone_for_evaluation()?;
+    surface.drop_point_with_context(
+        k,
+        point,
+        domain,
+        options,
+        &mut BrepSurfaceContext { brep: b, face },
+    )
+}
+
 fn wrong_handle() -> SolidError {
     SolidError::invalid_input(OP, "cache topology handle has the wrong type")
 }
@@ -109,6 +169,19 @@ pub(crate) fn natural_domain_owned(
 }
 
 impl CacheTopology<EntityRef> for BrepSurfaceContext<'_> {
+    fn point_solver_face_tolerance(&mut self, surface: &Surface) -> Result<Option<f64>> {
+        surface
+            .face()?
+            .map(|owner| owning_face_tolerance(self.brep, owner))
+            .transpose()
+    }
+    fn point_solver_cache(
+        &mut self,
+        k: &Kernel,
+        _surface: &Surface,
+    ) -> Result<crate::surface::cache_topology::OwnedSurfaceCache<EntityRef>> {
+        get_face_surface_cache(k, self.brep, self.face, None)
+    }
     fn face(&mut self, surface: &Surface) -> Result<Option<EntityRef>> {
         let Some(owner) = surface.face()? else {
             return Ok(None);

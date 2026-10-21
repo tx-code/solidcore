@@ -261,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_owned_bspline_callee_restores_both_model_flags_and_owner() {
+    fn unavailable_general_projection_restores_both_model_flags_and_owner() {
         use crate::surface::surface::{Surface, SurfaceKind};
         let (mut b, _) = shifted(0.01);
         let face = b.face_list()[0];
@@ -281,12 +281,14 @@ mod tests {
             None,
         )
         .unwrap_err();
+        // Live owner tolerance is now resolved. The actual next dependency is
+        // UV projection; that failure must still restore every temporary flag.
         assert!(
             matches!(
                 error,
                 SolidError::Unported {
-                    upstream: "SmFace::GetTolerance",
-                    unit: "topology.face_p2"
+                    upstream: "SmSurface::DropCurve",
+                    unit: "intersect.surface_drop_lib_p3"
                 }
             ),
             "{error:?}"

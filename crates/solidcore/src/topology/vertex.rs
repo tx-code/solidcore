@@ -78,15 +78,20 @@
 //!   loop use walk stops with [`SolidError::InvalidInput`] after visiting more edge uses
 //!   than the B-rep holds (upstream loops forever on a CCW chain that does not return to
 //!   its start). They have no attribute filter (callers here pass none).
-//! - `CalcCornerFromFaces`, `IsZoneTol3dConsistent`, `GetLoopOfFace`,
+//! - The maintained fork's [`validity`] module owns `CalcCornerFromFaces`,
+//!   `HasParallelFaces`, `IsWithinXSectTol3dOfFaces`, `IsOnFaceCorner` and `CheckPointers`.
+//!   `topology::brep_validation::assert_vertex` owns `AssertValid`. Remaining methods
+//!   outside this base unit include `IsZoneTol3dConsistent`, `GetLoopOfFace`,
 //!   `GetVertexuseOfEdge`, `GetVertexNumberInBrep`, the `Has*` / `IsEdgeVertex` /
 //!   `IsOnSeam` / `IsConnectedToEdge` / `IsConnectedToFace` predicates,
-//!   `IsWithinXSectTol3dOf*`, `IsOnFaceCorner`, `HasParallelFaces`, `CheckPointers`,
+//!   `IsWithinXSectTol3dOfEdges`,
 //!   `IsComplexCornerMember`, `RefineGeometry`, `FindAndRemoveVertexuseByEdge`,
-//!   `GetMemoryUsed`, `AssertValid`, the graphics and the `Dump`s are not part of this
+//!   `GetMemoryUsed`, the graphics and the `Dump`s are not part of this
 //!   unit.
 
 use std::collections::BTreeMap;
+
+pub mod validity;
 
 use crate::error::{EntityRef, Result, SolidError};
 use crate::geom::attribute::{AttributeStore, ObjectKey};

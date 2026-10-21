@@ -40,6 +40,7 @@ mod surfaces;
 mod tests;
 mod tolerances;
 mod uses;
+mod vertices;
 
 pub use assertions::{assert_valid, AssertValidOptions};
 pub use curves::{assert_edge_curve, assert_uv_curve};
@@ -50,6 +51,7 @@ pub use loops::assert_loop;
 pub use surfaces::assert_surface;
 pub use tolerances::{validate_and_update_tolerances, ToleranceReport};
 pub use uses::{assert_faceuse, assert_loopuse, assert_vertexuse};
+pub use vertices::assert_vertex;
 
 use super::brep::p1 as bp;
 use super::{

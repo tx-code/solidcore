@@ -110,7 +110,10 @@ fn run() -> Result<Value> {
     let cache_mode = mode.starts_with("cache_");
     let local_mode = mode == "local_bsp";
     let root_mode = mode == "assert_root" || mode == "assert_root_walk";
-    let topology_mode = mode.starts_with("assert_region")
+    let vertex_mode = (mode.starts_with("assert_vertex") && !mode.starts_with("assert_vertexuse"))
+        || mode.starts_with("vertex_");
+    let topology_mode = vertex_mode
+        || mode.starts_with("assert_region")
         || mode.starts_with("assert_shell")
         || mode.starts_with("assert_face")
         || mode.starts_with("assert_loop")
@@ -257,6 +260,70 @@ fn run() -> Result<Value> {
         None
     };
     builder.end_face()?;
+    if mode.contains("_trihedral") {
+        let mut zv = None;
+        let mut ze = None;
+        for n in 0..2 {
+            builder.start_face(OrientType::Same)?;
+            let (u, v) = if n == 0 {
+                (Vec3::Z, Vec3::X)
+            } else {
+                (Vec3::Y, Vec3::Z)
+            };
+            builder.set_face_surface(
+                Plane::new(Vec3::ZERO, u, v, Vec2::new(1., 1.), &domain).into(),
+                domain,
+            )?;
+            builder.start_loop(OrientType::Same)?;
+            if n == 0 {
+                zv = Some(builder.start_vertex_of_loop(Vec3::Z)?);
+            }
+            let z = require(zv)?;
+            let vv = [
+                *at(&vertices, 0)?,
+                if n == 0 { z } else { *at(&vertices, 2)? },
+                if n == 0 { *at(&vertices, 1)? } else { z },
+            ];
+            let pp = [
+                Vec3::ZERO,
+                if n == 0 { Vec3::Z } else { Vec3::Y },
+                if n == 0 { Vec3::X } else { Vec3::Z },
+            ];
+            let existing = [
+                if n == 0 { None } else { Some(*at(&edges, 2)?) },
+                None,
+                if n == 0 { Some(*at(&edges, 0)?) } else { ze },
+            ];
+            for j in 0..3 {
+                let old = *at(&existing, j)?;
+                let edge = builder.start_edge(
+                    &k,
+                    if old.is_some() {
+                        OrientType::Opposite
+                    } else {
+                        OrientType::Same
+                    },
+                    old,
+                    Some(*at(&vv, j)?),
+                    Some(*at(&vv, (j + 1) % 3)?),
+                )?;
+                if old.is_none() {
+                    builder.set_edge_curve(
+                        &k,
+                        Line::from_points(*at(&pp, j)?, *at(&pp, (j + 1) % 3)?, 3).into(),
+                        false,
+                    )?;
+                    builder.set_limits(&k, VertexNode::Parameter(0.), VertexNode::Parameter(1.))?;
+                }
+                if n == 0 && j == 0 {
+                    ze = Some(edge);
+                }
+                builder.end_edge()?;
+            }
+            builder.end_loop()?;
+            builder.end_face()?;
+        }
+    }
     if mode.contains("_manifold") || mode.contains("_spine") {
         for tip in [Vec3::Z, -Vec3::Y]
             .into_iter()
@@ -324,7 +391,9 @@ fn run() -> Result<Value> {
     let mut target_shell = outer;
     if (mode.starts_with("assert_region")
         || mode.starts_with("assert_shell")
-        || ((mode.starts_with("assert_vertexuse") || mode.starts_with("assert_edge"))
+        || ((mode.starts_with("assert_vertexuse")
+            || mode.starts_with("assert_edge")
+            || vertex_mode)
             && (mode.contains("_wire") || mode.contains("_shellvertex"))))
         && (mode.contains("_vertex") || mode.contains("_wire"))
     {
@@ -371,29 +440,40 @@ fn run() -> Result<Value> {
         .vertexuses
         .first()
         .ok_or("missing fixture vertex use")?;
-    let target_vu = if mode.starts_with("assert_vertexuse") && mode.contains("_vertexloop") {
-        match b.loopuse(target_lu)?.start {
-            LoopuseStart::Vertexuse(Some(vu)) => vu,
-            _ => return Err("missing vertex loop use".into()),
-        }
-    } else if mode.starts_with("assert_vertexuse")
-        && (mode.contains("_wire") || mode.contains("_shellvertex"))
-    {
-        match b.shell(target_shell)?.members {
-            ShellMembers::Vertexuse(vu) => vu,
-            ShellMembers::Edgeuse(eu) => require(b.edgeuse(eu)?.vertexuse)?,
-            _ => return Err("missing shell vertex use".into()),
-        }
-    } else {
-        vu
-    };
-    if (side_mode || mode.starts_with("assert_edge")) && mode.contains("_uv") {
+    let target_vu =
+        if (mode.starts_with("assert_vertexuse") || vertex_mode) && mode.contains("_vertexloop") {
+            match b.loopuse(target_lu)?.start {
+                LoopuseStart::Vertexuse(Some(vu)) => vu,
+                _ => return Err("missing vertex loop use".into()),
+            }
+        } else if (mode.starts_with("assert_vertexuse") || vertex_mode)
+            && (mode.contains("_wire") || mode.contains("_shellvertex"))
+        {
+            match b.shell(target_shell)?.members {
+                ShellMembers::Vertexuse(vu) => vu,
+                ShellMembers::Edgeuse(eu) => require(b.edgeuse(eu)?.vertexuse)?,
+                _ => return Err("missing shell vertex use".into()),
+            }
+        } else {
+            vu
+        };
+    if (side_mode || mode.starts_with("assert_edge") || vertex_mode) && mode.contains("_uv") {
         for eu in solidcore::topology::edgeuse::p1::loopuse_edgeuses(&b, lu)? {
             solidcore::topology::edgeuse::p3::get_or_create_uv_trim_curve(
                 &k, &mut b, eu, false, false, true,
             )?
             .status?;
         }
+    }
+    if defect == "warm_bspline" {
+        let source = b.face(face)?.surface.as_ref().ok_or("surface fixture")?;
+        let owner = source.owner();
+        let solidcore::surface::surface::SurfaceKind::Plane(plane) = source.kind() else {
+            return Err("plane receiver".into());
+        };
+        let mut surface = Surface::from(plane.base_with_nurb()?.clone_exact());
+        surface.set_owner(owner);
+        b.face_mut(face)?.surface = Some(surface);
     }
     let mark_types = [
         solidcore::geom::context::MarkType::Mark,
@@ -405,7 +485,7 @@ fn run() -> Result<Value> {
     let before_marks = mark_types.map(|mark| k.context.current_mark(mark));
     for name in [defect.as_str(), second] {
         match name {
-            "none" | "edge_no_uses" | "surface_offset" | "trim_failure" => {}
+            "none" | "edge_no_uses" | "surface_offset" | "trim_failure" | "warm_bspline" => {}
             name if name.starts_with("reverse_") || name.starts_with("bspline_") => {}
             "face_domain_outside" => {
                 b.face_mut(face)?.uv_domain = Extent2d::from_bounds(-0.1, -0.1, 1.1, 1.1);
@@ -552,6 +632,7 @@ fn run() -> Result<Value> {
             "edge_high_tolerance" => b.edge_mut(*at(&edges, 0)?)?.tolerance = 0.1,
             "vertex_low_tolerance" => b.vertex_mut(v0)?.tolerance = 0.,
             "vertex_high_tolerance" => b.vertex_mut(v0)?.tolerance = 0.1,
+            "vertex_shift" => b.vertex_mut(v0)?.point = Vec3::new(0.0003, 0.0004, 0.0005),
             "root_zero_tolerance" => b.set_tolerance(0.),
             "initial_validate_only" => b.set_validate_only(true),
             name if name.starts_with("gap_") => {
@@ -615,6 +696,17 @@ fn run() -> Result<Value> {
     let mut local_output = None;
     let mut root_output = None;
     let mut side_output = None;
+    let mut vertex_query = (
+        1000,
+        false,
+        -1.,
+        None,
+        Vec3::UNDEF,
+        solidcore::math::BIG_DOUBLE,
+        None,
+        None,
+        [solidcore::math::UNDEF_DOUBLE; 4],
+    );
     let mut invoke = |reports: Option<&mut AssertArray>| {
         if raw {
             Ok(())
@@ -665,6 +757,46 @@ fn run() -> Result<Value> {
                 )
             } else if mode.starts_with("assert_vertexuse") {
                 validation::assert_vertexuse(&mut k, &mut b, target_vu, options, reports)
+            } else if vertex_mode {
+                use solidcore::topology::vertex::validity as v;
+                let vertex = b
+                    .vertexuse(target_vu)?
+                    .vertex
+                    .ok_or_else(|| SolidError::null_pointer("target vertex"))?;
+                let value = if mode.starts_with("assert_vertex") {
+                    validation::assert_vertex(&mut k, &mut b, vertex, options, reports)?
+                } else if mode.starts_with("vertex_pointers") {
+                    v::check_pointers(&b, vertex)?
+                } else if mode.starts_with("vertex_within") {
+                    let r = v::within_faces(&k, &mut b, vertex, mode.contains("_force"))?;
+                    vertex_query.2 = r.max_gap;
+                    vertex_query.3 = r.max_face;
+                    r.within
+                } else if mode.starts_with("vertex_on_corner") {
+                    let (valid, c) = v::is_on_face_corner(&k, &mut b, vertex)?;
+                    vertex_query.1 = c.found;
+                    vertex_query.2 = c.max_gap;
+                    vertex_query.4 = c.point;
+                    valid
+                } else if mode.starts_with("vertex_corner") {
+                    let c = v::calc_corner_from_faces(&k, &mut b, vertex)?;
+                    vertex_query.1 = c.found;
+                    vertex_query.2 = c.max_gap;
+                    vertex_query.3 = c.max_face;
+                    vertex_query.4 = c.point;
+                    true
+                } else {
+                    let p = v::has_parallel_faces(&k, &mut b, vertex, None)?;
+                    vertex_query.2 = p.max_gap;
+                    vertex_query.5 = p.min_angle_degrees;
+                    if let Some([(a, uv1), (c, uv2)]) = p.pair {
+                        vertex_query.6 = Some(a);
+                        vertex_query.7 = Some(c);
+                        vertex_query.8 = [uv1.x, uv1.y, uv2.x, uv2.y];
+                    }
+                    p.found
+                };
+                Ok(value)
             } else if mode.starts_with("assert_edgeuse") {
                 let first = if mode.contains("_wire") {
                     let ShellMembers::Edgeuse(use_) = b.shell(target_shell)?.members else {
@@ -1023,7 +1155,7 @@ fn run() -> Result<Value> {
                 r.value,
                 r.owner_type_string
             ]);
-            if mode.starts_with("assert_edge") {
+            if mode.starts_with("assert_edge") || vertex_mode {
                 if let Some(row) = row.as_array_mut() {
                     row.push(json!([r.owner_param.x, r.owner_param.y]));
                 }
@@ -1171,6 +1303,49 @@ fn run() -> Result<Value> {
             })
             .collect::<solidcore::Result<Vec<_>>>()?;
         output.insert("use_state".into(), json!(states));
+    }
+    if vertex_mode {
+        let vertex = require(b.vertexuse(target_vu)?.vertex)?;
+        let p = b.vertex(vertex)?.point;
+        output.insert("vertex_point".into(), json!([p.x, p.y, p.z]));
+        let states = b
+            .vertex(vertex)?
+            .vertexuses
+            .iter()
+            .map(|id| {
+                let g = b.vertexuse(*id)?.vertex_face_gap;
+                Ok(json!([
+                    id.index(),
+                    g.is_init(),
+                    g.gap_3d,
+                    g.face_uv.x,
+                    g.face_uv.y
+                ]))
+            })
+            .collect::<solidcore::Result<Vec<_>>>()?;
+        output.insert("vertex_state".into(), json!(states));
+        if mode.starts_with("vertex_") {
+            let key = |face: Option<solidcore::topology::FaceId>| {
+                face.map(|f| {
+                    ((solidcore::geom::assert_array::labels::FACE_TYPE as u64) << 32)
+                        | u64::from(f.index())
+                })
+            };
+            output.insert(
+                "vertex_query".into(),
+                json!([
+                    vertex_query.0,
+                    vertex_query.1,
+                    vertex_query.2,
+                    key(vertex_query.3),
+                    [vertex_query.4.x, vertex_query.4.y, vertex_query.4.z],
+                    vertex_query.5,
+                    key(vertex_query.6),
+                    key(vertex_query.7),
+                    vertex_query.8
+                ]),
+            );
+        }
     }
     if let Some(side) = side_output {
         output.insert("side".into(), side);

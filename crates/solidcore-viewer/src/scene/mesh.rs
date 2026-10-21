@@ -47,6 +47,8 @@ struct Work<'a> {
     evaluations: usize,
     nodes: usize,
     progress: &'a dyn Fn(&str) -> Result<()>,
+    #[cfg(test)]
+    native_evaluations: [usize; 3], // Surface, UV trim and defining edge evaluator calls.
 }
 impl Work<'_> {
     fn step(&mut self) -> Result<()> {
@@ -115,6 +117,10 @@ fn surface(owner: &Candidate, face: FaceId) -> Result<&Surface> {
 }
 fn sample(owner: &Candidate, face: FaceId, uv: DVec2, work: &mut Work<'_>) -> Result<Node> {
     work.step()?;
+    #[cfg(test)]
+    {
+        work.native_evaluations[0] += 1;
+    }
     let values = surface(owner, face)?
         .evaluate(
             owner.kernel(),
@@ -191,6 +197,10 @@ fn edge_point(
         return Ok(*point);
     }
     work.step()?;
+    #[cfg(test)]
+    {
+        work.native_evaluations[2] += 1;
+    }
     let edge = owner.brep().edge(edge_id).map_err(|e| e.to_string())?;
     let curve = edge
         .curve
@@ -227,6 +237,10 @@ fn edge_point(
 }
 fn trim_uv(owner: &Candidate, use_: EdgeuseId, t: f64, work: &mut Work<'_>) -> Result<DVec2> {
     work.step()?;
+    #[cfg(test)]
+    {
+        work.native_evaluations[1] += 1;
+    }
     let curve = eu::uv_trim_curve(owner.brep(), use_)
         .map_err(|e| e.to_string())?
         .0
@@ -740,15 +754,24 @@ fn key(a: usize, b: usize) -> MeshEdge {
     (a.min(b), a.max(b))
 }
 
+struct ScreenedEdges {
+    marked: BTreeSet<MeshEdge>,
+    // Successful samples of this one immutable FaceMesh in this refinement round.
+    // Face-local indices retain the actual edge-use UV branch, including both seam
+    // incidences. Never move this table to a different face, owner or round.
+    samples: BTreeMap<MeshEdge, Node>,
+}
+
 fn marked_edges(
     owner: &Candidate,
     mesh: &FaceMesh,
     force_interior: bool,
     work: &mut Work<'_>,
     shared: &mut BTreeMap<(EdgeId, u64), DVec3>,
-) -> Result<BTreeSet<MeshEdge>> {
+) -> Result<ScreenedEdges> {
     let mut marked = BTreeSet::new();
     let mut evaluated = BTreeSet::new();
+    let mut samples = BTreeMap::new();
     let cosine = work.options.normal_angle_radians.cos();
     for &[a, b, c] in &mesh.triangles {
         let nodes = [point_at(mesh, a)?, point_at(mesh, b)?, point_at(mesh, c)?];
@@ -773,6 +796,7 @@ fn marked_edges(
                 .any(|normal| mid.normal.is_some_and(|mid| normal.dot(mid) < cosine));
             if too_wide || curved_chord || turned {
                 marked.insert(pair);
+                samples.insert(pair, mid);
             }
         }
         let center = sample(owner, mesh.face, (na.uv + nb.uv + nc.uv) / 3., work)?;
@@ -786,7 +810,41 @@ fn marked_edges(
             marked.extend([key(a, b), key(b, c), key(c, a)]);
         }
     }
-    Ok(marked)
+    // Keep the original key-only visitation set. Retain Node payload only when
+    // that edge's own screen immediately selects it; a final no-change pass then
+    // allocates no Node cache. Triangle-center and propagated marks may have no
+    // retained sample, and deliberately take the original evaluator path later.
+    // At most one successful Node is retained per selected checked mesh edge.
+    Ok(ScreenedEdges { marked, samples })
+}
+
+fn refinement_midpoint(
+    owner: &Candidate,
+    mesh: &FaceMesh,
+    a: usize,
+    b: usize,
+    samples: &BTreeMap<MeshEdge, Node>,
+    work: &mut Work<'_>,
+    shared: &mut BTreeMap<(EdgeId, u64), DVec3>,
+) -> Result<Node> {
+    if let Some(node) = samples.get(&key(a, b)) {
+        // The same Candidate, native definitions, kernel settings and face chart
+        // remain immutably borrowed between screening and refinement. Direct
+        // Surface/Curve evaluation does not mutate owner caches or lazy topology.
+        // Preserve the original logical work/cancellation points even when its
+        // successful native result is reused: trim then surface for a boundary,
+        // surface alone inside. The shared native edge point is already present
+        // from that successful screen and originally costs no extra step here.
+        if mesh.constraints.contains_key(&key(a, b)) {
+            work.step()?;
+        }
+        work.step()?;
+        Ok(*node)
+    } else {
+        // Forced first-round refinement and newly propagated boundary marks have
+        // no successful local sample. Keep their evaluator/error order unchanged.
+        midpoint(owner, mesh, a, b, work, shared)
+    }
 }
 
 fn boundary_key(boundary: &Boundary) -> (EdgeId, u64, u64) {
@@ -814,14 +872,14 @@ fn refinement_count(mesh: &FaceMesh, marked: &BTreeSet<MeshEdge>) -> Result<usiz
 fn refine(
     owner: &Candidate,
     mesh: &mut FaceMesh,
-    marked: &BTreeSet<MeshEdge>,
+    screened: &ScreenedEdges,
     work: &mut Work<'_>,
     shared: &mut BTreeMap<(EdgeId, u64), DVec3>,
 ) -> Result<()> {
     let old = std::mem::take(&mut mesh.triangles);
     let mut midpoints = BTreeMap::new();
-    for &(a, b) in marked {
-        let node = midpoint(owner, mesh, a, b, work, shared)?;
+    for &(a, b) in &screened.marked {
+        let node = refinement_midpoint(owner, mesh, a, b, &screened.samples, work, shared)?;
         work.node()?;
         let id = mesh.nodes.len();
         mesh.nodes.push(node);
@@ -933,6 +991,8 @@ pub(super) fn extract(
         evaluations: seed_evaluations,
         nodes: 0,
         progress,
+        #[cfg(test)]
+        native_evaluations: [0; 3],
     };
     let mut shared = BTreeMap::new();
     let mut uses = BTreeMap::new();
@@ -988,7 +1048,7 @@ pub(super) fn extract(
         let mut boundary_marks = BTreeSet::new();
         for face in &faces {
             let edges = marked_edges(owner, face, depth == 0, &mut work, &mut shared)?;
-            for edge in &edges {
+            for edge in &edges.marked {
                 if let Some(boundary) = face.constraints.get(edge) {
                     boundary_marks.insert(boundary_key(boundary));
                 }
@@ -998,11 +1058,11 @@ pub(super) fn extract(
         for (face, edges) in faces.iter().zip(&mut marked) {
             for (pair, boundary) in &face.constraints {
                 if boundary_marks.contains(&boundary_key(boundary)) {
-                    edges.insert(*pair);
+                    edges.marked.insert(*pair);
                 }
             }
         }
-        if marked.iter().all(BTreeSet::is_empty) {
+        if marked.iter().all(|edges| edges.marked.is_empty()) {
             break;
         }
         if depth == options.max_depth {
@@ -1012,7 +1072,7 @@ pub(super) fn extract(
             .iter()
             .zip(&marked)
             .try_fold(0usize, |sum, (face, edges)| {
-                sum.checked_add(refinement_count(face, edges)?)
+                sum.checked_add(refinement_count(face, &edges.marked)?)
                     .ok_or_else(|| "Display triangle count overflow".to_string())
             })?;
         work.triangles(count)?;
@@ -1093,6 +1153,364 @@ pub(super) fn extract(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::public_controls::{candidate, CYLINDER};
+    use std::cell::RefCell;
+
+    fn test_work(progress: &dyn Fn(&str) -> Result<()>) -> Work<'_> {
+        Work {
+            options: DisplayOptions::default(),
+            chord_mm: 0.001,
+            evaluations: 0,
+            nodes: 0,
+            progress,
+            native_evaluations: [0; 3],
+        }
+    }
+
+    fn curved_face(owner: &Candidate) -> FaceId {
+        owner
+            .brep()
+            .face_list()
+            .iter()
+            .copied()
+            .find(|face| !matches!(surface(owner, *face).unwrap().kind(), SurfaceKind::Plane(_)))
+            .unwrap()
+    }
+
+    fn copy_mesh(mesh: &FaceMesh) -> FaceMesh {
+        FaceMesh {
+            face: mesh.face,
+            nodes: mesh.nodes.clone(),
+            triangles: mesh.triangles.clone(),
+            constraints: mesh.constraints.clone(),
+            uv_scale: mesh.uv_scale,
+            span: mesh.span,
+            curved: mesh.curved,
+        }
+    }
+
+    fn assert_same_node(a: &Node, b: &Node) {
+        assert_eq!(
+            a.uv.to_array().map(f64::to_bits),
+            b.uv.to_array().map(f64::to_bits)
+        );
+        assert_eq!(
+            a.point.to_array().map(f64::to_bits),
+            b.point.to_array().map(f64::to_bits)
+        );
+        assert_eq!(
+            a.normal.map(|v| v.to_array().map(f64::to_bits)),
+            b.normal.map(|v| v.to_array().map(f64::to_bits))
+        );
+        assert_eq!(a.vertex, b.vertex);
+    }
+
+    #[test]
+    fn midpoint_reuse_keeps_refinement_bits_work_and_actual_owner() {
+        let owner = candidate(CYLINDER);
+        let face = curved_face(&owner);
+        let domain = owner.brep().face(face).unwrap().uv_domain;
+        let mut preparation = test_work(&|_| Ok(()));
+        let mut mesh = FaceMesh {
+            face,
+            nodes: [(0.1, 0.2), (0.6, 0.2), (0.1, 0.8)]
+                .into_iter()
+                .map(|(u, v)| {
+                    let uv = domain.evaluate(u, v);
+                    sample(&owner, face, DVec2::new(uv.x, uv.y), &mut preparation).unwrap()
+                })
+                .collect(),
+            triangles: vec![[0, 1, 2]],
+            constraints: BTreeMap::new(),
+            uv_scale: DVec2::new(domain.size().x, domain.size().y),
+            span: span_limit(surface(&owner, face).unwrap()).unwrap(),
+            curved: true,
+        };
+        let mut reference = copy_mesh(&mesh);
+        let cached_events = RefCell::new(Vec::new());
+        let reference_events = RefCell::new(Vec::new());
+        let cached_progress = |message: &str| {
+            cached_events.borrow_mut().push(message.to_owned());
+            Ok(())
+        };
+        let reference_progress = |message: &str| {
+            reference_events.borrow_mut().push(message.to_owned());
+            Ok(())
+        };
+        let mut cached_work = test_work(&cached_progress);
+        let mut reference_work = test_work(&reference_progress);
+        cached_work.evaluations = 510;
+        reference_work.evaluations = 510;
+        let mut shared = BTreeMap::new();
+        let mut reference_shared = BTreeMap::new();
+        let screened = marked_edges(&owner, &mesh, false, &mut cached_work, &mut shared).unwrap();
+        let mut fresh = marked_edges(
+            &owner,
+            &reference,
+            false,
+            &mut reference_work,
+            &mut reference_shared,
+        )
+        .unwrap();
+        assert_eq!(screened.marked, fresh.marked);
+        assert!(!screened.samples.is_empty());
+        let reused = screened.samples.len();
+        fresh.samples.clear(); // Same screen, deliberately evaluate again as before this optimization.
+        refine(&owner, &mut mesh, &screened, &mut cached_work, &mut shared).unwrap();
+        refine(
+            &owner,
+            &mut reference,
+            &fresh,
+            &mut reference_work,
+            &mut reference_shared,
+        )
+        .unwrap();
+        assert_eq!(mesh.triangles, reference.triangles);
+        assert_eq!(mesh.nodes.len(), reference.nodes.len());
+        for (a, b) in mesh.nodes.iter().zip(&reference.nodes) {
+            assert_same_node(a, b);
+        }
+        assert_eq!(cached_work.evaluations, reference_work.evaluations);
+        assert_eq!(cached_work.nodes, reference_work.nodes);
+        assert_eq!(*cached_events.borrow(), *reference_events.borrow());
+        assert_eq!(
+            reference_work.native_evaluations[0] - cached_work.native_evaluations[0],
+            reused
+        );
+        assert_eq!(
+            cached_work.native_evaluations[1..],
+            reference_work.native_evaluations[1..]
+        );
+        assert_eq!(shared, reference_shared);
+        assert_eq!(owner.source().source().bytes(), CYLINDER);
+
+        // The forced first curved pass does not screen midpoints. It must retain
+        // the original evaluator path instead of publishing invented cache hits.
+        let mut forced_work = test_work(&|_| Ok(()));
+        let mut forced_shared = BTreeMap::new();
+        let forced = marked_edges(
+            &owner,
+            &reference,
+            true,
+            &mut forced_work,
+            &mut forced_shared,
+        )
+        .unwrap();
+        assert!(forced.samples.is_empty());
+        let marked_count = forced.marked.len();
+        refine(
+            &owner,
+            &mut reference,
+            &forced,
+            &mut forced_work,
+            &mut forced_shared,
+        )
+        .unwrap();
+        assert_eq!(forced_work.native_evaluations[0], marked_count);
+        assert_eq!(forced_work.evaluations, marked_count);
+    }
+
+    fn seam_meshes(owner: &Candidate, work: &mut Work<'_>) -> Vec<FaceMesh> {
+        let face = curved_face(owner);
+        let cut = owner.general_report().unwrap().chart_cuts[0].1;
+        let record = owner.brep().face(face).unwrap();
+        let primary = owner.brep().faceuse(record.faceuse.unwrap()).unwrap();
+        primary
+            .loopuses
+            .iter()
+            .flat_map(|loopuse| eu::loopuse_edgeuses(owner.brep(), *loopuse).unwrap())
+            .filter(|use_| owner.brep().edgeuse(*use_).unwrap().edge == Some(cut))
+            .map(|use_| {
+                let interval = owner.brep().edge(cut).unwrap().interval;
+                let ta = interval.evaluate(0.2);
+                let tb = interval.evaluate(0.8);
+                let nodes = [ta, tb]
+                    .into_iter()
+                    .map(|t| {
+                        let uv = trim_uv(owner, use_, t, work).unwrap();
+                        sample(owner, face, uv, work).unwrap()
+                    })
+                    .collect();
+                FaceMesh {
+                    face,
+                    nodes,
+                    triangles: Vec::new(),
+                    constraints: BTreeMap::from([(
+                        (0, 1),
+                        Boundary {
+                            edge: cut,
+                            use_,
+                            ta,
+                            tb,
+                        },
+                    )]),
+                    uv_scale: DVec2::new(record.uv_domain.size().x, record.uv_domain.size().y),
+                    span: span_limit(surface(owner, face).unwrap()).unwrap(),
+                    curved: true,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn midpoint_reuse_keeps_center_only_marks_sparse_and_evaluates_their_fallbacks() {
+        let owner = candidate(CYLINDER);
+        let face = curved_face(&owner);
+        let domain = owner.brep().face(face).unwrap().uv_domain;
+        let mut preparation = test_work(&|_| Ok(()));
+        let mut mesh = FaceMesh {
+            face,
+            nodes: [(0.2, 0.2), (0.22, 0.2), (0.2, 0.6)]
+                .into_iter()
+                .map(|(u, v)| {
+                    let uv = domain.evaluate(u, v);
+                    sample(&owner, face, DVec2::new(uv.x, uv.y), &mut preparation).unwrap()
+                })
+                .collect(),
+            triangles: vec![[0, 1, 2]],
+            constraints: BTreeMap::new(),
+            uv_scale: DVec2::new(domain.size().x, domain.size().y),
+            span: span_limit(surface(&owner, face).unwrap()).unwrap(),
+            curved: true,
+        };
+        let mut shared = BTreeMap::new();
+        let mut minimum_edge_dot = 1_f64;
+        for (a, b) in [(0, 1), (1, 2), (2, 0)] {
+            let mid = midpoint(&owner, &mesh, a, b, &mut preparation, &mut shared).unwrap();
+            for endpoint in [a, b] {
+                minimum_edge_dot = minimum_edge_dot.min(
+                    mesh.nodes[endpoint]
+                        .normal
+                        .unwrap()
+                        .dot(mid.normal.unwrap()),
+                );
+            }
+        }
+        let uv = (mesh.nodes[0].uv + mesh.nodes[1].uv + mesh.nodes[2].uv) / 3.;
+        let center = sample(&owner, face, uv, &mut preparation).unwrap();
+        let minimum_center_dot = mesh.nodes.iter().fold(1_f64, |dot, node| {
+            dot.min(node.normal.unwrap().dot(center.normal.unwrap()))
+        });
+        assert!(minimum_center_dot < minimum_edge_dot);
+        // The analytic cylinder's normal depends on U alone. A triangle with two
+        // equal-U corners puts its center one third across U: the far endpoint's
+        // normal turns farther there than at any edge midpoint. Select that
+        // measured open interval solely to isolate center-triggered refinement.
+        let mut work = test_work(&|_| Ok(()));
+        work.chord_mm = 0.1;
+        work.options.normal_angle_radians = ((minimum_center_dot + minimum_edge_dot) * 0.5).acos();
+        let screened = marked_edges(&owner, &mesh, false, &mut work, &mut shared).unwrap();
+        assert_eq!(screened.marked.len(), 3);
+        assert!(screened.samples.is_empty());
+        let screened_surface_calls = work.native_evaluations[0];
+        refine(&owner, &mut mesh, &screened, &mut work, &mut shared).unwrap();
+        assert_eq!(work.native_evaluations[0] - screened_surface_calls, 3);
+        assert_eq!(work.evaluations, 7);
+    }
+
+    #[test]
+    fn midpoint_reuse_preserves_both_actual_seam_uv_branches() {
+        let owner = candidate(CYLINDER);
+        let mut preparation = test_work(&|_| Ok(()));
+        let meshes = seam_meshes(&owner, &mut preparation);
+        assert_eq!(meshes.len(), 2);
+        let mut shared = BTreeMap::new();
+        let mut results = Vec::new();
+        for mesh in meshes {
+            let node = midpoint(&owner, &mesh, 0, 1, &mut preparation, &mut shared).unwrap();
+            let samples = BTreeMap::from([((0, 1), node)]);
+            let mut work = test_work(&|_| Ok(()));
+            let reused =
+                refinement_midpoint(&owner, &mesh, 0, 1, &samples, &mut work, &mut shared).unwrap();
+            assert_same_node(&node, &reused);
+            assert_eq!(work.evaluations, 2);
+            assert_eq!(work.native_evaluations, [0; 3]);
+            results.push(reused);
+        }
+        assert_ne!(results[0].uv, results[1].uv);
+        assert_eq!(
+            results[0].point.to_array().map(f64::to_bits),
+            results[1].point.to_array().map(f64::to_bits)
+        );
+    }
+
+    #[test]
+    fn midpoint_reuse_keeps_budget_and_cancellation_at_each_boundary_step() {
+        let owner = candidate(CYLINDER);
+        let mut preparation = test_work(&|_| Ok(()));
+        let mesh = seam_meshes(&owner, &mut preparation).remove(0);
+        let mut shared = BTreeMap::new();
+        let node = midpoint(&owner, &mesh, 0, 1, &mut preparation, &mut shared).unwrap();
+        let samples = BTreeMap::from([((0, 1), node)]);
+        for (initial, maximum, cancel) in [
+            (511, 511, false),
+            (511, 512, false),
+            (511, 513, false),
+            (510, 513, true),
+        ] {
+            let cached_events = RefCell::new(Vec::new());
+            let fresh_events = RefCell::new(Vec::new());
+            let callback = |events: &RefCell<Vec<String>>, message: &str| {
+                events.borrow_mut().push(message.to_owned());
+                if cancel {
+                    Err("public midpoint cancellation".into())
+                } else {
+                    Ok(())
+                }
+            };
+            let cached_progress = |message: &str| callback(&cached_events, message);
+            let fresh_progress = |message: &str| callback(&fresh_events, message);
+            let mut cached_work = test_work(&cached_progress);
+            let mut fresh_work = test_work(&fresh_progress);
+            cached_work.evaluations = initial;
+            fresh_work.evaluations = initial;
+            cached_work.options.max_evaluations = maximum;
+            fresh_work.options.max_evaluations = maximum;
+            let cached =
+                refinement_midpoint(&owner, &mesh, 0, 1, &samples, &mut cached_work, &mut shared);
+            let fresh = refinement_midpoint(
+                &owner,
+                &mesh,
+                0,
+                1,
+                &BTreeMap::new(),
+                &mut fresh_work,
+                &mut shared,
+            );
+            match (cached, fresh) {
+                (Ok(a), Ok(b)) => assert_same_node(&a, &b),
+                (Err(a), Err(b)) => assert_eq!(a, b),
+                _ => panic!(
+                    "cache changed result at initial={initial}, maximum={maximum}, cancel={cancel}"
+                ),
+            }
+            assert_eq!(cached_work.evaluations, fresh_work.evaluations);
+            assert_eq!(cached_work.nodes, fresh_work.nodes);
+            assert_eq!(*cached_events.borrow(), *fresh_events.borrow());
+            assert_eq!(cached_work.native_evaluations, [0; 3]);
+        }
+
+        // An unevaluated incidence must still reach the actual native lookup and
+        // propagate its error, rather than being replaced by a nearby cached edge.
+        let mut invalid = mesh;
+        invalid.constraints.get_mut(&(0, 1)).unwrap().use_ = EdgeuseId::from_index(99_999);
+        let mut fallback_work = test_work(&|_| Ok(()));
+        let mut original_work = test_work(&|_| Ok(()));
+        let fallback = refinement_midpoint(
+            &owner,
+            &invalid,
+            0,
+            1,
+            &BTreeMap::new(),
+            &mut fallback_work,
+            &mut shared,
+        );
+        let original = midpoint(&owner, &invalid, 0, 1, &mut original_work, &mut shared);
+        assert_eq!(fallback.err(), original.err());
+        assert_eq!(fallback_work.evaluations, 1);
+        assert_eq!(fallback_work.evaluations, original_work.evaluations);
+        assert_eq!(fallback_work.nodes, 0);
+    }
 
     #[test]
     fn chart_corner_canonicalization_never_merges_different_real_vertices() {

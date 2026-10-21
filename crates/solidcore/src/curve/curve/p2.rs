@@ -1452,7 +1452,7 @@ impl Curve {
             | CurveKind::Offset(_) => Err(base_err()),
             CurveKind::Projected(c) => c.transform(k, rotate_n_move, scale),
             CurveKind::CrvInVolume(c) => c.transform(rotate_n_move, scale),
-            CurveKind::CrvOnSurf(c) => c.transform(rotate_n_move, scale),
+            CurveKind::CrvOnSurf(c) => c.transform_with_kernel(k, rotate_n_move, scale),
             CurveKind::Line(c) => c.transform(rotate_n_move, scale),
         }
     }

@@ -43,7 +43,7 @@ pub use local::{assert_region, assert_shell};
 pub use loops::assert_loop;
 pub use surfaces::assert_surface;
 pub use tolerances::{validate_and_update_tolerances, ToleranceReport};
-pub use uses::{assert_faceuse, assert_loopuse};
+pub use uses::{assert_faceuse, assert_loopuse, assert_vertexuse};
 
 use super::brep::p1 as bp;
 use super::{

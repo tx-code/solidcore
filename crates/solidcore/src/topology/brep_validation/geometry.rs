@@ -12,7 +12,7 @@
 //! | `validate_edge` | `SmEdge::ValidateGeometry` |
 //!
 //! Deviations: checked arena access; exact owned copies represent borrowed UV
-//! and B-spline surface values. Release warning-only branches do not become new
+//! and concrete surface values. Release warning-only branches do not become new
 //! failures. Unavailable surface dispatch remains an explicit dependency.
 use super::{Brep, EdgeId, EdgeuseId};
 use crate::curve::{
@@ -24,7 +24,6 @@ use crate::geom::tol::are_same;
 use crate::kernel::Kernel;
 use crate::math::Point2;
 use crate::nurbs::b_spline_surface_n_lib::p2::OrientType;
-use crate::surface::surface::SurfaceKind;
 use crate::topology::brep_cache::{arena_identity, CacheObject};
 use crate::topology::{edge, edgeuse::p1 as eu};
 
@@ -141,16 +140,7 @@ pub(super) fn validate_edge(k: &Kernel, b: &mut Brep, id: EdgeId, fix: bool) -> 
             .surface
             .as_ref()
             .ok_or(SolidError::null_pointer(OP))?;
-        let surface = match surface.kind() {
-            SurfaceKind::BSpline(s) => s.clone_exact(),
-            _ => {
-                // UNPORTED(curve.crv_on_surf): SmCrvOnSurf over non-B-spline surface
-                return Err(SolidError::unported(
-                    "SmCrvOnSurf over non-B-spline surface",
-                    "curve.crv_on_surf",
-                ));
-            }
-        };
+        let surface = surface.clone_for_evaluation()?;
         let uv = b
             .edgeuse(incidence)?
             .uv_trim_curve

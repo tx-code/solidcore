@@ -39,15 +39,11 @@
 //! | `SetContext` (dropped)                          | `SetContext`                                   |
 //!
 //! Deviations:
-//! - **Surface.** `m_pSurface` is an `SmSurface*`; the only ported surface class is
-//!   [`BSplineSurface`], so the curve holds one, by value. The surface virtuals resolve
-//!   to its overrides (`GetNaturalUVDomain`, `Evaluate`, `EvaluatePoint`,
-//!   `operator==`, `Copy`, `Transform`); the base-class `SmSurface` methods it needs
-//!   (`EvaluateNormal`, `Evaluate2ndDerivatives`) are those of `surface::surface::p7`;
-//!   `ReadFromDB` reads the
-//!   surface through `SmSurface::ReadFromDB` ([`Surface::read_from_db`]), whose other
-//!   surface types are unported. The derivative lifts are those of
-//!   [`crate::surface::surface::p2`].
+//! - **Surface.** The owned [`Surface`] enum retains the concrete receiver and
+//!   defining parameters through evaluation, copy, transform and archive dispatch.
+//!   Unsupported virtual dependencies return `Unported`; they never select a
+//!   fitted B-spline in place of an analytic definition. The derivative lifts are
+//!   those of [`crate::surface::surface::p2`].
 //! - **Ownership.** The UV curve and the surface are held by value. Upstream shares or
 //!   owns (and maybe copies) them as the owner flag says; the flag is kept as data and
 //!   decides what upstream observes: the copies made for flags 1 and 2 (`Copy`, which
@@ -55,9 +51,12 @@
 //!   `ReverseParameterization` are allowed, whether `Transform` moves the surface,
 //!   and the owner flag of a copy. The UV-line constructor copies the surface for
 //!   flag 2 and then discards the copy, as upstream. The copy constructor copies both
-//!   parts when it owns the curve (upstream shares the unowned parts; the geometry is
-//!   the same). Owner links (`SetOwner`), notifications (`Notify`) and contexts
-//!   (`SetContext`, the `SmContext` arguments) are not modelled.
+//!   owned parts only, following the maintained fork's `d8ed45a` copy constructor
+//!   (a UV-only owner keeps borrowing its surface). The value model snapshots
+//!   unowned parts without copy-constructor normalization; it does not reproduce
+//!   external live aliases. Owner links (`SetOwner`), notifications (`Notify`) and
+//!   stored contexts (`SetContext`) are not modelled. Dynamic operations use the
+//!   caller's actual [`Kernel`], never a fresh context.
 //! - **Caches.** `GetKnots`, `GetOrCreateBSApproxPointer` and the `const` methods that
 //!   call them (`CalculateContinuities`, `GetNumberNaturalKnots`,
 //!   `CalculateBoundingBox`, `DropPoint`, `ApproximateCurve`) update the break and
@@ -121,7 +120,6 @@ use crate::kernel::Kernel;
 use crate::math::{BIG_DOUBLE, EFF_ZERO, UNDEF_DOUBLE};
 use crate::nurbs::b_spline_curve::{BSplineCurve, BoundingBoxRequest, BoundingBoxes};
 use crate::nurbs::b_spline_curve_n_lib::TrimMode;
-use crate::nurbs::b_spline_surface::BSplineSurface;
 use crate::nurbs::b_spline_surface_n_lib::p2::EvaluateFlags;
 use crate::nurbs::knots::Side;
 use crate::surface::surface::p2::{Surface, SurfaceKind};
@@ -147,15 +145,15 @@ pub const CONTINUITY_ANGLE: f64 = 0.5;
 
 /// `SmSurface::EvaluateNormal(uv, from_left, from_left, normal)` (not overridden by
 /// `SmBSplineSurface`).
-fn surface_evaluate_normal(srf: &BSplineSurface, uv: Point2, from_left: bool) -> Result<Vec3> {
+fn surface_evaluate_normal(srf: &Surface, uv: Point2, from_left: bool) -> Result<Vec3> {
     let side = if from_left { Side::Left } else { Side::Right };
-    crate::surface::surface::p7::base_evaluate_normal(srf, uv, side, side)
+    srf.evaluate_normal(uv, side, side)
 }
 
 /// The second derivatives of `SmSurface::Evaluate2ndDerivatives(uv, from_left,
 /// from_left, S, Su, Sv, Suv, Suu, Svv)`: `[S, Su, Sv, Suv, Suu, Svv]`.
 fn surface_evaluate_2nd_derivatives(
-    srf: &BSplineSurface,
+    srf: &Surface,
     uv: Point2,
     from_left: bool,
 ) -> Result<[Vec3; 6]> {
@@ -164,44 +162,14 @@ fn surface_evaluate_2nd_derivatives(
     Ok([d.point, d.du, d.dv, d.duv, d.duu, d.dvv])
 }
 
-/// `SmSurface::ReadFromDB(type, db, .., version)`: the surface of the record (the
-/// only ported surface kind is the B-spline; the other types are unported in the
-/// reader).
+/// `SmSurface::ReadFromDB(type, db, .., version)` with its concrete type intact.
 fn surface_read_from_db(
     k: &Kernel,
     surface_type: i64,
     db: &mut DatabaseReader,
     version: u64,
-) -> Result<BSplineSurface> {
-    match Surface::read_from_db(k, surface_type, db, version)?.into_kind() {
-        SurfaceKind::BSpline(s) => Ok(s),
-        // DISPATCH GAP: the SmSurface virtuals (surface.surface_p1, ported; no UNPORTED
-        // marker: the ported SmCrvOnSurf holds an SmBSplineSurface here, not any Surface)
-        SurfaceKind::CurveBounded(_) => Err(SolidError::unported(
-            "SmSurface virtuals of an SmCurveBoundedSurface",
-            "curve.crv_on_surf",
-        )),
-        SurfaceKind::Plane(_) => Err(SolidError::unported(
-            "SmSurface virtuals of an SmPlane",
-            "curve.crv_on_surf",
-        )),
-        SurfaceKind::Step(_) => Err(SolidError::unported(
-            "SmSurface virtuals of an SmSTEPSurface",
-            "curve.crv_on_surf",
-        )),
-        SurfaceKind::SurfOfRevolution(_) => Err(SolidError::unported(
-            "SmSurface virtuals of an SmSurfOfRevolution",
-            "curve.crv_on_surf",
-        )),
-        SurfaceKind::OffsetSurface(_) => Err(SolidError::unported(
-            "SmSurface virtuals of an SmOffsetSurface",
-            "curve.crv_on_surf",
-        )),
-        SurfaceKind::SrfInVolume(_) => Err(SolidError::unported(
-            "SmSurface virtuals of an SmSrfInVolume",
-            "curve.crv_on_surf",
-        )),
-    }
+) -> Result<Surface> {
+    Surface::read_from_db(k, surface_type, db, version)
 }
 
 /// The parameter intervals of the `SmCurveClassification` of `curve` over `interval`
@@ -211,7 +179,7 @@ fn classify_against_surface(
     _curve: &Curve,
     _interval: &Extent1d,
     _tol: f64,
-    _surface: &BSplineSurface,
+    _surface: &Surface,
 ) -> Result<Vec<Extent1d>> {
     // The constructor (CurveClassification::with_curve) needs a Kernel, which the Curve::knots
     // virtual does not carry (plan/findings.md "intersect.curve_class_p4"); it defers on ReSet.
@@ -307,7 +275,7 @@ pub struct CrvOnSurf {
     /// `m_pUVCurve`: the parameter-space curve (image dimension 2).
     uv_curve: Box<Curve>,
     /// `m_pSurface`: the base surface.
-    surface: Box<BSplineSurface>,
+    surface: Box<Surface>,
     /// `m_vUVDomain`: the domain of interest on the surface.
     uv_domain: Extent2d,
     /// `m_bNeedBreaks`: the break cache is not computed.
@@ -330,7 +298,7 @@ impl CrvOnSurf {
     pub const TYPE: i64 = CRV_ON_SURF_TYPE;
 
     /// The empty object of `ReadFromDB` (`SmCrvOnSurf()`), on the given parts.
-    fn bare(uv_curve: Curve, surface: BSplineSurface, owner_flag: u64) -> Self {
+    fn bare(uv_curve: Curve, surface: Surface, owner_flag: u64) -> Self {
         Self {
             uv_curve: Box::new(uv_curve),
             surface: Box::new(surface),
@@ -354,11 +322,11 @@ impl CrvOnSurf {
     pub fn new(
         k: &Kernel,
         uv_curve: Curve,
-        surface: BSplineSurface,
+        surface: impl Into<Surface>,
         uv_domain: Option<Extent2d>,
         owner_flag: u64,
     ) -> Result<Self> {
-        let mut c = Self::bare(uv_curve, surface, owner_flag);
+        let mut c = Self::bare(uv_curve, surface.into(), owner_flag);
 
         // set m_vUVDomain
         c.uv_domain = match uv_domain {
@@ -373,7 +341,7 @@ impl CrvOnSurf {
 
         // m_lOwnerFlag 2: Copy Surface to be deleted when SmCrvOnSurf is destructed
         if owner_flag == 2 {
-            *c.surface = c.surface.copy();
+            *c.surface = c.surface.copy(k)?;
         }
         Ok(c)
     }
@@ -391,7 +359,7 @@ impl CrvOnSurf {
         k: &Kernel,
         start_uv: Point2,
         end_uv: Point2,
-        surface: BSplineSurface,
+        surface: impl Into<Surface>,
         uv_domain: Option<Extent2d>,
         owner_flag: u64,
     ) -> Result<Self> {
@@ -418,12 +386,12 @@ impl CrvOnSurf {
     /// An empty object as `ReadFromDB` makes before reading (`SmCrvOnSurf()`), on the
     /// given parts: owner flag 0, the "inside out" domain, no caches.
     #[must_use]
-    pub fn empty(uv_curve: Curve, surface: BSplineSurface) -> Self {
-        Self::bare(uv_curve, surface, 0)
+    pub fn empty(uv_curve: Curve, surface: impl Into<Surface>) -> Self {
+        Self::bare(uv_curve, surface.into(), 0)
     }
 
     /// The copy constructor (`Copy`): copies the UV curve when this object owns it and
-    /// the surface when it owns either part (`Copy`); the owner flag becomes 2 (owns
+    /// the surface only when it owns the surface (`Copy`); the owner flag becomes 2 (owns
     /// both), 1 (owns the curve) or 0; the break cache and the approximation (with its
     /// gap and parameterisation flag) are kept when present.
     ///
@@ -440,10 +408,12 @@ impl CrvOnSurf {
         } else {
             self.uv_curve.as_ref().clone()
         };
-        let surface = if owns_curve || owns_surface {
-            self.surface.copy()
+        // Maintained fork SmCrvOnSurf.cpp186-245: owning only the UV curve must
+        // not run the surface's virtual Copy (which can normalize cached NURBs).
+        let surface = if owns_surface {
+            self.surface.copy(k)?
         } else {
-            self.surface.as_ref().clone()
+            self.surface.clone_for_evaluation()?
         };
 
         let mut c = Self::bare(uv_curve, surface, 0);
@@ -480,7 +450,7 @@ impl CrvOnSurf {
 
     /// The base surface (`GetBaseSurface`).
     #[must_use]
-    pub fn surface(&self) -> &BSplineSurface {
+    pub fn surface(&self) -> &Surface {
         &self.surface
     }
 
@@ -607,7 +577,7 @@ impl CrvOnSurf {
         // check equivalence of these objects
         let mut rtn = true;
         rtn &= self.uv_curve.approx_eq(&other.uv_curve)?;
-        rtn &= self.surface.approx_eq(&other.surface);
+        rtn &= self.surface.approx_eq(&other.surface)?;
         rtn &= self.uv_domain.are_same(&other.uv_domain);
         Ok(rtn)
     }
@@ -1353,8 +1323,38 @@ impl CrvOnSurf {
             return Ok(());
         }
 
-        // pass the call along to the surface
-        self.surface.transform(rotate_n_move, scale)
+        // Legacy entry has no context argument. Never invent a Kernel for a
+        // dynamic receiver that needs the actual modeling context.
+        match self.surface.kind_mut() {
+            SurfaceKind::BSpline(s) => s.transform(rotate_n_move, scale),
+            SurfaceKind::Plane(s) => s.transform(rotate_n_move, scale),
+            _ => Err(SolidError::unported(
+                "SmCrvOnSurf::Transform requires owning Kernel",
+                "curve.crv_on_surf",
+            )),
+        }
+    }
+
+    /// Dynamic native transform with the actual context; no default Kernel or
+    /// temporary B-spline replacement is used for analytic/general surfaces.
+    pub fn transform_with_kernel(
+        &mut self,
+        k: &Kernel,
+        rotate_n_move: &Axis2Placement,
+        scale: Option<Vec3>,
+    ) -> Result<()> {
+        let identity_scale = Vec3::new(1., 1., 1.);
+        if rotate_n_move.is_identity(EFF_ZERO) && scale.is_none_or(|s| s.approx_eq(identity_scale))
+        {
+            return Ok(());
+        }
+        if let Some(approx) = &mut self.bs_approx {
+            ignored(approx.transform(rotate_n_move, scale))?;
+        }
+        if self.owner_flag < 2 {
+            return Ok(());
+        }
+        self.surface.transform(k, rotate_n_move, scale)
     }
 
     // ---- gaps -----------------------------------------------------------------------
@@ -1727,6 +1727,7 @@ impl CurveEvaluate for CrvOnSurf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nurbs::b_spline_surface::BSplineSurface;
     use crate::nurbs::nurbs_crv::allocate_nurb_curve;
 
     /// A bilinear patch over `[0, 1]^2`: `S(u, v) = (u, v, u * v)`.
@@ -1861,5 +1862,76 @@ mod tests {
         let text = "0 0 1 1 SmCrvOnSurf Domain of interest \n1 SmCrvOnSurf Has breaks flag \n";
         let mut db = DatabaseReader::with_stream(FileType::Ascii, InputStream::new(text.into()));
         assert!(CrvOnSurf::read_from_db(&Kernel::default(), &mut db, 0).is_err());
+    }
+
+    fn plane() -> Surface {
+        Surface::from(crate::surface::plane::Plane::new(
+            Point3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            Point2::new(1., 2.),
+            &Extent2d::from_bounds(0., 0., 1., 1.),
+        ))
+    }
+
+    #[test]
+    fn borrowed_plane_copy_preserves_definition_without_materializing_nurb() {
+        let k = Kernel::default();
+        let c = CrvOnSurf::new(&k, uv(), plane(), None, 1).unwrap();
+        let copied = c.copy(&k).unwrap();
+        for target in [&c, &copied] {
+            let SurfaceKind::Plane(p) = target.surface().kind() else {
+                panic!("analytic type lost")
+            };
+            assert!(p.base().gw_nurb().is_none());
+            assert_eq!(target.owner_flag(), 1);
+            let uv = target.evaluate_uv_point(0.3).unwrap();
+            assert_eq!(
+                target.evaluate_point(0.3).unwrap(),
+                Vec3::new(uv.x, 2. * uv.y, 0.)
+            );
+            assert_eq!(
+                target.evaluate_surface_normal(0.3, true).unwrap().normal,
+                Vec3::Z
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_curve_transform_honors_surface_ownership() {
+        let k = Kernel::default();
+        let transform = Axis2Placement::new(Point3::new(3., -2., 1.), Vec3::Y, -Vec3::X);
+        for flag in 0..4 {
+            let mut c = CrvOnSurf::new(&k, uv(), plane(), None, flag).unwrap();
+            let before = c.evaluate_point(0.3).unwrap();
+            c.transform_with_kernel(&k, &transform, Some(Vec3::new(2., 2., 2.)))
+                .unwrap();
+            let expected = if flag < 2 {
+                before
+            } else {
+                Vec3::new(3. - 2. * before.y, -2. + 2. * before.x, 1.)
+            };
+            assert!((c.evaluate_point(0.3).unwrap() - expected).length() < 1e-12);
+            assert!(matches!(c.surface().kind(), SurfaceKind::Plane(_)));
+        }
+    }
+
+    #[test]
+    fn rejected_nonuniform_plane_transform_retains_partial_nurb_change() {
+        let k = Kernel::default();
+        let mut c = CrvOnSurf::new(&k, uv(), plane(), None, 3).unwrap();
+        let uv = c.evaluate_uv_point(0.3).unwrap();
+        let before = c.evaluate_point(0.3).unwrap();
+        let transform = Axis2Placement::new(Point3::new(3., -2., 1.), Vec3::Y, -Vec3::X);
+        let error = c
+            .transform_with_kernel(&k, &transform, Some(Vec3::new(2., 3., 4.)))
+            .unwrap_err();
+        assert!(matches!(error, SolidError::Upstream { code: 1001, .. }));
+        assert_eq!(c.evaluate_point(0.3).unwrap(), before);
+        let SurfaceKind::Plane(p) = c.surface().kind() else {
+            panic!()
+        };
+        let nurb = p.base().evaluate_point(uv).unwrap();
+        assert!((nurb - Vec3::new(3. - 3. * before.y, -2. + 2. * before.x, 1.)).length() < 1e-12);
     }
 }

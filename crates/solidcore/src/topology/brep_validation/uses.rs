@@ -1,13 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Local faceuse and loopuse assertions over their actual typed graph.
+//! Local faceuse, loopuse and vertexuse assertions over their actual typed graph.
 //!
 //! Upstream: `SmFaceuse.cpp::AssertValid` (430--456),
-//! `SmLoopuse.cpp::AssertValid` (1469--1520), maintained `d8ed45a`.
+//! `SmLoopuse.cpp::AssertValid` (1469--1520), `SmVertexuse.cpp` (3110--3216),
+//! maintained `d8ed45a`.
 //! | Rust | Upstream |
 //! |------|----------|
 //! | [`assert_faceuse`] | `SmFaceuse::AssertValid` |
 //! | [`assert_loopuse`] | `SmLoopuse::AssertValid` |
+//! | [`assert_vertexuse`] | `SmVertexuse::AssertValid` |
 //! Deviations: shared context/type invariants are intrinsic; checked ids replace
 //! unsafe dereferences. These native routines ignore their walk argument. The
 //! existing closure algorithm, including its native over-tolerance bug, is reused.
@@ -16,7 +18,9 @@ use super::{local_base, AssertValidOptions, Brep, CheckLevel, Object, Reporter};
 use crate::error::{Result, SolidError};
 use crate::geom::assert_array::{labels, AssertArray, ReportSpec};
 use crate::kernel::Kernel;
-use crate::topology::{loopuse, FaceuseId, LoopuseId, LoopuseStart};
+use crate::topology::{
+    loopuse, vertexuse, FaceuseId, LoopuseId, LoopuseStart, VertexuseId, VertexuseOwner,
+};
 
 /// Faceuse base/list checks followed by the native optional face/mate context
 /// checks. `walk` is ignored by the original routine, even when true.
@@ -124,6 +128,69 @@ pub fn assert_loopuse(
                 },
             )?;
         }
+    }
+    Ok(valid)
+}
+
+/// Actual old-tolerance Vertexuse local checks. Native disables cached fresh-gap
+/// tests and the broad sector-gap rule in this SDK profile; they stay disabled.
+/// The original routine ignores its walk argument.
+pub fn assert_vertexuse(
+    k: &mut Kernel,
+    b: &mut Brep,
+    id: VertexuseId,
+    options: AssertValidOptions<'_>,
+    reports: Option<&mut AssertArray>,
+) -> Result<bool> {
+    let record = *b.vertexuse(id)?;
+    let mut report = Reporter { reports };
+    let who = Object::Vertexuse(id);
+    let mut valid = if matches!(options.level, CheckLevel::Given(_)) {
+        true
+    } else {
+        local_base::topology_base(k, b, who, &mut report)?
+    };
+    let present = match record.owner {
+        VertexuseOwner::Shell(Some(s)) => {
+            b.shell(s)?;
+            true
+        }
+        VertexuseOwner::Loopuse(Some(lu)) => {
+            b.loopuse(lu)?;
+            true
+        }
+        VertexuseOwner::Edgeuse(Some(eu)) => {
+            b.edgeuse(eu)?;
+            true
+        }
+        _ => false,
+    };
+    if present {
+        valid &= report.class_predicate(labels::VERTEXUSE_TYPE, 0, who, true)?;
+        // Discriminator and target class cannot disagree in this typed sum.
+        valid &= report.class_predicate(labels::VERTEXUSE_TYPE, 1, who, true)?;
+    }
+    let missing = vertexuse::is_sector_missing_seam(k, b, id, true)?.missing;
+    valid &= report.class_predicate(labels::VERTEXUSE_TYPE, 5, who, !missing)?;
+    if matches!(
+        record.owner,
+        VertexuseOwner::Loopuse(_) | VertexuseOwner::Edgeuse(_)
+    ) {
+        let edgeuse = vertexuse::edgeuse(b, id)?;
+        let edge = edgeuse
+            .map(|eu| b.edgeuse(eu))
+            .transpose()?
+            .and_then(|eu| eu.edge);
+        // Native evaluates GetFaceuse first and never queries IsWire when a
+        // face is present. Retain that short circuit, including failure paths.
+        let attached = if vertexuse::faceuse(b, id)?.is_some() {
+            true
+        } else {
+            edge.map(|edge| crate::topology::edge::is_wire(b, edge))
+                .transpose()?
+                .unwrap_or(false)
+        };
+        valid &= report.class_predicate(labels::VERTEXUSE_TYPE, 6, who, attached)?;
     }
     Ok(valid)
 }

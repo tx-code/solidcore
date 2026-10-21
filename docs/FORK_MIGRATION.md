@@ -155,3 +155,11 @@ native failed-status partial outputs. Concrete Revolution/other subclass bodies,
 periodic seam checks, remaining local validators and root dependencies still gate
 complete validity and strict native import. Selected operation equivalence does
 not establish all SDK ownership/attribute or diagnostic ABI behavior.
+
+Concrete `CrvOnSurf` dispatch and local Vertexuse assertions now execute over the
+typed model. Plane definitions survive the curve-on-surface path instead of
+requiring a B-spline replacement. The maintained UV-only copy rule and explicit
+context transform entry are preserved. External borrowed aliases, const-copy
+source-cache changes, geometry notifications, full Edge/Vertex/curve assertions
+and the remaining native import pipeline are still required work; see
+[validation scope](BREP_VALIDATION.md).

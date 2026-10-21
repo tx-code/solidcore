@@ -254,3 +254,50 @@ U/V pole asymmetry, rational weights and full interior multiplicity, alongside
 levels, repeated arrays and cached-grid flags. They qualify selected native
 operations only. Dynamic geometry attributes, other subclass validators, full
 root/local validation and strict STEP acceptance remain required work.
+
+## Concrete curve-on-surface dispatch and vertex uses
+
+`CrvOnSurf` now holds the concrete `Surface` enum. Its constructors accept
+`Into<Surface>` and its `surface()` accessor returns `&Surface` rather than
+`&BSplineSurface`. Plane definitions, UV parameters and scales survive evaluation,
+derivative lifts, copy, transforms and supported archive dispatch. Topology gap
+checks no longer reject a Plane merely because it is not the B-spline enum case.
+Missing classification and other virtual dependencies remain explicit errors.
+
+`transform_with_kernel` uses the actual caller context; `Curve::transform` routes
+through it. The older context-free entry still handles B-splines and Planes, and
+requires an explicit context for other concrete kinds. Native owner flags decide
+whether the base surface moves. Cached approximation transforms precede the base
+surface call. An ordinary failure can leave a modified NURB and an unchanged
+analytic definition, exactly as the native Plane operation does; this is not an
+atomic modeling operation or permission to repair geometry.
+
+The maintained fork's UV-only copy rule is preserved: owning the UV curve alone
+does not invoke a virtual surface copy. Unowned values are exact snapshots in
+this representation, without copy-constructor knot normalization. External live
+borrowed aliases, source mutation through const-copy cache materialization and
+geometry notification ownership are still separate migration gaps, not qualified
+by these numerical operation comparisons.
+
+`assert_vertexuse` follows the actual old-tolerance SDK local routine: the base
+chain except for Given, optional target context/type checks, the real missing-seam
+query and the face-or-wire attachment test. It ignores walk as the source does.
+Disabled fresh-gap and broad sector tests stay disabled. Checked arena failures
+and missing dependencies propagate; they cannot yield a complete validity result.
+The Edge/Vertex base membership adapters do not imply their full local validators
+are implemented. Root traversal still stops at the Edge/Vertex/curve dependencies.
+
+The native observer uses public synthetic Plane, rotated Plane and bilinear
+surface receivers, all ownership flags, copies, identity/rotation/scales, failed
+nonuniform Plane transforms and explicit version-40 ASCII/binary archives.
+Both primitive database width selection and nested record version are explicit;
+the Windows version-30 reader cannot consume the current writer's 64-bit longs.
+Byte-swapped native writer output is not a truth source (see the database issue
+in `plan/upstream-issues.md`). No full import or shared-alias qualification follows.
+
+```text
+cargo build --locked -p solidcore --example brep_curve_probe --example brep_validation_probe
+python scripts/build_brep_constructor_reference.py --source <cpp-checkout> --sdk <release-sdk> --toolchain-env <msvc-env.json> --output bin/curve-surface-reference --probe curve
+python scripts/brep_curve_surface_compare.py --cpp bin/curve-surface-reference/brep-curve-reference.exe --rust bin/debug/examples/brep_curve_probe.exe --receipt bin/brep-curve-surface.local.json
+python scripts/brep_vertexuse_validation_compare.py --cpp <validation-observer> --rust bin/debug/examples/brep_validation_probe.exe --receipt bin/brep-vertexuse.local.json
+```

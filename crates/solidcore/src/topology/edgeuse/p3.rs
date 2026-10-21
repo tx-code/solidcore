@@ -417,7 +417,9 @@ pub fn create_uv_trim_curve(
     let mut have_curves = false;
 
     if let CurveKind::CrvOnSurf(cos) = curve.kind() {
-        let base = Surface::from(cos.surface().clone());
+        // This is a borrowed concrete base, not a virtual Copy request. Keep the
+        // defining type and cached representation intact during UV reuse.
+        let base = cos.surface().clone_for_evaluation()?;
         // `pSurface == base || *pSurface == *base` (identity is lost in the port: value
         // equality only) && same orientation as the primary edge use
         if face_surface.approx_eq(&base)?

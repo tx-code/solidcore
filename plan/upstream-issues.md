@@ -3295,3 +3295,27 @@ meantime, whoever merges renumbers the new entry and every reference to it (here
 - **Severity:** crash/UB (virtual call through a mistyped pointer).
 - **Related:** WR-208 (the same `m_vVertexCornerMap` arrays leak for vertices without a corner).
 - **Rust port:** `ExecutiveAccess::solver_corner` yields `None` for a vertex without a corner, so the walk returns `SM_ERR_NULL_POINTER` (upstream's `NER`) instead.
+
+
+### Maintained-fork observer: NULL links in local Vertexuse assertion sector queries
+
+- **Source:** maintained `d8ed45a`, `SmVertexuse.cpp::AssertValid` (3110–3216),
+  `ComputeUVSector` (688–1185), `GetLoopuse` (2344–2355).
+- **Trigger/evidence:** public synthetic planar triangle, direct VU assertion
+  after raw removal of its Edgeuse owner (`vu_no_owner`), or of its Edgeuse's
+  Edge (`eu_no_edge`). The Windows Release SDK exits `0xC0000005` or remains in
+  process error handling. These faults are not numerical oracle requests.
+- **Handling:** the VU comparison preserves the excluded request identities;
+  Rust-only safety tests require a checked failure and retain the damaged graph.
+  This does not change the source algorithm or promote a successful assertion.
+
+### Maintained database writer: byte-swapped longs encode an address
+
+- **Source:** `SmDatabaseIO.cpp::WriteLong` (316–329) and `WriteLongs` (250–268)
+  pass `(unsigned long long)&llLong` to `ByteSwap64`, rather than `llLong`.
+- **Evidence:** fixed-source inspection and SDK synthetic CrvOnSurf writes:
+  byte-swapped type headers cannot be read as the original curve type. The
+  resulting address-dependent payload cannot serve as independent truth.
+- **Handling:** concrete-surface archive comparisons use explicit version-40
+  ordinary binary/ASCII SDK write/read paths. They do not replay or qualify the
+  bad swapped writer, nor copy address-dependent values into the safe Rust core.

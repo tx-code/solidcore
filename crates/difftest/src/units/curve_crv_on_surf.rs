@@ -633,7 +633,12 @@ fn put_state(o: &mut Vec<f64>, c: &CrvOnSurf) {
         }
     }
     put_curve(o, c.uv_curve());
-    put_surface(o, c.surface());
+    match c.surface().kind() {
+        solidcore::surface::surface::SurfaceKind::BSpline(surface)=>put_surface(o,surface),
+        // This original runner constructs only B-spline surfaces. General
+        // virtual receivers have their separate maintained SDK observer.
+        _=>o.push(-2.),
+    }
 }
 
 /// The `SmStatus` of a Rust error; `1007` for `InvalidInput`, `-1` for one upstream

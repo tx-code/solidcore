@@ -15,6 +15,98 @@ fn options() -> AssertValidOptions<'static> {
 }
 
 #[test]
+fn vertexuse_missing_attachment_is_checked_even_for_empty_given_requests() {
+    let (mut b, _, _, eu) = tests::fixture();
+    let vu = b.edgeuse(eu).unwrap().vertexuse.unwrap();
+    b.vertexuse_mut(vu).unwrap().owner = crate::topology::VertexuseOwner::Edgeuse(None);
+    let mut reports = AssertArray::new();
+    let result = assert_vertexuse(
+        &mut Kernel::default(),
+        &mut b,
+        vu,
+        AssertValidOptions {
+            level: CheckLevel::Given(&[]),
+            walk: true,
+        },
+        Some(&mut reports),
+    );
+    assert!(matches!(result, Err(SolidError::InvalidInput { .. })));
+    assert!(reports.reports().is_empty());
+}
+
+#[test]
+fn vertexuse_base_rejects_ambiguous_membership_without_rewriting_it() {
+    let (mut b, _, _, eu) = tests::fixture();
+    let vu = b.edgeuse(eu).unwrap().vertexuse.unwrap();
+    let vertex = b.vertexuse(vu).unwrap().vertex.unwrap();
+    b.vertex_mut(vertex).unwrap().vertexuses.push(vu);
+    let error = assert_vertexuse(
+        &mut Kernel::default(),
+        &mut b,
+        vu,
+        AssertValidOptions::default(),
+        None,
+    )
+    .unwrap_err();
+    assert!(matches!(error, SolidError::InvalidInput { .. }));
+    assert_eq!(
+        b.vertex(vertex)
+            .unwrap()
+            .vertexuses
+            .iter()
+            .filter(|v| **v == vu)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn edge_and_vertex_base_membership_is_independent_from_child_backpointers() {
+    for edge_case in [true, false] {
+        let (mut b, _, _, eu) = tests::fixture();
+        let vu = b.edgeuse(eu).unwrap().vertexuse.unwrap();
+        let who = if edge_case {
+            let edge = b.edgeuse(eu).unwrap().edge.unwrap();
+            b.edgeuse_mut(eu).unwrap().edge = None;
+            Object::Edge(edge)
+        } else {
+            let vertex = b.vertexuse(vu).unwrap().vertex.unwrap();
+            b.vertexuse_mut(vu).unwrap().vertex = None;
+            Object::Vertex(vertex)
+        };
+        let mut reports = AssertArray::new();
+        let mut reporter = Reporter {
+            reports: Some(&mut reports),
+        };
+        assert!(!local_base::owning(&Kernel::default(), &b, who, &mut reporter).unwrap());
+        assert_eq!(reports.reports().len(), 1);
+        assert_eq!(
+            reports.reports()[0].reporting_type,
+            labels::OWNING_TOPOLOGY_TYPE
+        );
+        assert_eq!(reports.reports()[0].test_index, 2);
+    }
+}
+
+#[test]
+fn vertexuse_raw_missing_edge_cannot_be_a_successful_sector_check() {
+    let (mut b, _, _, eu) = tests::fixture();
+    let vu = b.edgeuse(eu).unwrap().vertexuse.unwrap();
+    b.edgeuse_mut(eu).unwrap().edge = None;
+    // The SDK dereferences NULL in this sector query. Rust returns the checked
+    // dependency/access failure and preserves the damaged graph for diagnostics.
+    let result = assert_vertexuse(
+        &mut Kernel::default(),
+        &mut b,
+        vu,
+        AssertValidOptions::default(),
+        None,
+    );
+    assert!(!matches!(result, Ok(true)));
+    assert!(b.edgeuse(eu).unwrap().edge.is_none());
+}
+
+#[test]
 fn use_walk_flag_is_ignored_but_root_required_content_still_has_its_own_gate() {
     let (mut b, face, _, _) = tests::fixture();
     let fu = b.face(face).unwrap().faceuse.unwrap();

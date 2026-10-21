@@ -167,7 +167,7 @@ int main(int argc, char **argv) {
         const bool cache_mode=mode.starts_with("cache_");
         const bool local_mode=mode=="local_bsp";
         const bool root_mode=mode=="assert_root"||mode=="assert_root_walk";
-        const bool topology_mode=mode.starts_with("assert_region")||mode.starts_with("assert_shell")||mode.starts_with("assert_face")||mode.starts_with("assert_loop");
+        const bool topology_mode=mode.starts_with("assert_region")||mode.starts_with("assert_shell")||mode.starts_with("assert_face")||mode.starts_with("assert_loop")||mode.starts_with("assert_vertexuse");
         const bool side_mode=mode.starts_with("edge_side")||mode.starts_with("loop_side");
         SmContext context;
         SmBrepConstructor builder;
@@ -255,7 +255,9 @@ int main(int argc, char **argv) {
         require(builder.EndShell(FALSE));
         require(builder.EndBrep());
         SmShell *target_shell=outer;
-        if((mode.starts_with("assert_region")||mode.starts_with("assert_shell")) && (mode.find("_vertex")!=std::string::npos || mode.find("_wire")!=std::string::npos)) {
+        if((mode.starts_with("assert_region")||mode.starts_with("assert_shell")||
+            (mode.starts_with("assert_vertexuse")&&(mode.find("_wire")!=std::string::npos||mode.find("_shellvertex")!=std::string::npos))) &&
+            (mode.find("_vertex")!=std::string::npos || mode.find("_wire")!=std::string::npos)) {
             SmVertex *vertex=nullptr;require(b->MakeShellVertexTopology(nullptr,target_shell,vertex));
             if(mode.find("_wire")!=std::string::npos) {
                 SmEdge *wire=nullptr;SmVertex *end=nullptr;require(b->MakeEdgeVertexTopology(nullptr,vertex,wire,end));
@@ -286,6 +288,12 @@ int main(int argc, char **argv) {
         b->GetVertices(vs);
         SmTArray<SmVertexuse *> vus;
         vs[0]->GetVertexuses(vus);
+        auto target_vu=vus[0];
+        if(mode.starts_with("assert_vertexuse")) {
+            if(mode.find("_vertexloop")!=std::string::npos)target_vu=target_lu->GetVertexuse();
+            else if(mode.find("_wire")!=std::string::npos)target_vu=static_cast<SmEdgeuse*>(field<List>(target_shell))->GetVertexuse();
+            else if(mode.find("_shellvertex")!=std::string::npos)target_vu=static_cast<SmVertexuse*>(field<List>(target_shell));
+        }
         std::map<const void *, unsigned long long> keys;
         record(keys, b, 0);
         record(keys, b->GetInfiniteRegion(), 0);
@@ -495,6 +503,7 @@ int main(int argc, char **argv) {
                 if(mode.starts_with("assert_faceuse"))return (mode.find("_mate")!=std::string::npos?mate_fu:fu)->AssertValid(target,level,walk,req);
                 if(mode.starts_with("assert_face"))return f->AssertValid(target,level,walk,req);
                 if(mode.starts_with("assert_loopuse"))return (mode.find("_mate")!=std::string::npos?target_mate_lu:target_lu)->AssertValid(target,level,walk,req);
+                if(mode.starts_with("assert_vertexuse"))return target_vu->AssertValid(target,level,walk,req);
                 return target_loop->AssertValid(target,level,walk,req);};
             root_valid=call();if(selection=="repeat")root_valid=call();
         }

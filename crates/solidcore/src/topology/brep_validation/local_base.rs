@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Region/shell base-class checks over the actual arena graph and owning metadata.
+//! Topology base-class checks over the actual arena graph and owning metadata.
 //!
 //! Upstream: `SmAObject.cpp::AssertValid` (940--998), `SmTopology.cpp`
 //! (356--455), `SmOwningTopology.cpp` (137--209), maintained `d8ed45a`.
@@ -72,6 +72,36 @@ fn owner_state(b: &Brep, object: Object) -> Result<PeerState> {
             let linked = b.face_list().contains(&id);
             // The model's face-list sentinel is intrinsic, distinct from Face.shell.
             (linked, linked, b.face_list().len())
+        }
+        Object::Edge(id) => {
+            b.edge(id)?;
+            let linked = b.edge_list().contains(&id);
+            (linked, linked, b.edge_list().len())
+        }
+        Object::Vertex(id) => {
+            b.vertex(id)?;
+            let linked = b.vertex_list().contains(&id);
+            (linked, linked, b.vertex_list().len())
+        }
+        Object::Edgeuse(id) => {
+            let owner = b.edgeuse(id)?.edge.map(|edge| b.edge(edge)).transpose()?;
+            (
+                owner.is_some(),
+                owner.is_some_and(|edge| edge.edgeuses.contains(&id)),
+                owner.map_or(0, |edge| edge.edgeuses.len()),
+            )
+        }
+        Object::Vertexuse(id) => {
+            let owner = b
+                .vertexuse(id)?
+                .vertex
+                .map(|vertex| b.vertex(vertex))
+                .transpose()?;
+            (
+                owner.is_some(),
+                owner.is_some_and(|vertex| vertex.vertexuses.contains(&id)),
+                owner.map_or(0, |vertex| vertex.vertexuses.len()),
+            )
         }
         Object::Loop(id) => {
             b.loop_(id)?;
@@ -212,6 +242,18 @@ fn child_head(b: &Brep, object: Object) -> Result<(Option<Object>, usize, bool)>
             let list = &b.faceuse(id)?.loopuses;
             (list.first().copied().map(Object::Loopuse), list.len(), true)
         }
+        Object::Edge(id) => {
+            let list = &b.edge(id)?.edgeuses;
+            (list.first().copied().map(Object::Edgeuse), list.len(), true)
+        }
+        Object::Vertex(id) => {
+            let list = &b.vertex(id)?.vertexuses;
+            (
+                list.first().copied().map(Object::Vertexuse),
+                list.len(),
+                true,
+            )
+        }
         Object::Shell(id) => {
             let shell = b.shell(id)?;
             match &shell.members {
@@ -267,6 +309,16 @@ fn child_links(b: &Brep, object: Object) -> Result<(Option<Object>, Option<Objec
             let (next, last) = neighbors(b.face_list(), id)?;
             (next.map(Object::Face), last.map(Object::Face))
         }
+        Object::Edge(id) => {
+            b.edge(id)?;
+            let (next, last) = neighbors(b.edge_list(), id)?;
+            (next.map(Object::Edge), last.map(Object::Edge))
+        }
+        Object::Vertex(id) => {
+            b.vertex(id)?;
+            let (next, last) = neighbors(b.vertex_list(), id)?;
+            (next.map(Object::Vertex), last.map(Object::Vertex))
+        }
         Object::Loop(id) => {
             b.loop_(id)?;
             (None, None)
@@ -296,13 +348,23 @@ fn child_links(b: &Brep, object: Object) -> Result<(Option<Object>, Option<Objec
             (next.map(Object::Loopuse), last.map(Object::Loopuse))
         }
         Object::Edgeuse(id) => {
-            let owner = b.edgeuse(id)?.edge.ok_or_else(invalid)?;
-            let (next, last) = neighbors(&b.edge(owner)?.edgeuses, id)?;
+            b.edgeuse(id)?;
+            let list = containing_list(
+                b.edges().iter().map(|(_, edge)| edge.edgeuses.as_slice()),
+                id,
+            )?;
+            let (next, last) = neighbors(list, id)?;
             (next.map(Object::Edgeuse), last.map(Object::Edgeuse))
         }
         Object::Vertexuse(id) => {
-            let owner = b.vertexuse(id)?.vertex.ok_or_else(invalid)?;
-            let (next, last) = neighbors(&b.vertex(owner)?.vertexuses, id)?;
+            b.vertexuse(id)?;
+            let list = containing_list(
+                b.vertices()
+                    .iter()
+                    .map(|(_, vertex)| vertex.vertexuses.as_slice()),
+                id,
+            )?;
+            let (next, last) = neighbors(list, id)?;
             (next.map(Object::Vertexuse), last.map(Object::Vertexuse))
         }
         _ => return Err(invalid()),
@@ -349,6 +411,10 @@ pub(super) fn owning(
                 (Object::Region(r), Object::Shell(s)) => b.shell(s)?.region == Some(r),
                 (Object::Shell(s), Object::Faceuse(fu)) => b.faceuse(fu)?.shell == Some(s),
                 (Object::Faceuse(fu), Object::Loopuse(lu)) => b.loopuse(lu)?.faceuse == Some(fu),
+                (Object::Edge(edge), Object::Edgeuse(eu)) => b.edgeuse(eu)?.edge == Some(edge),
+                (Object::Vertex(vertex), Object::Vertexuse(vu)) => {
+                    b.vertexuse(vu)?.vertex == Some(vertex)
+                }
                 _ => return Err(invalid()),
             };
             valid &= report.class_predicate(labels::OWNING_TOPOLOGY_TYPE, 2, object, same_owner)?;

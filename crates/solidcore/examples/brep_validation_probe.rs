@@ -113,7 +113,8 @@ fn run() -> Result<Value> {
     let topology_mode = mode.starts_with("assert_region")
         || mode.starts_with("assert_shell")
         || mode.starts_with("assert_face")
-        || mode.starts_with("assert_loop");
+        || mode.starts_with("assert_loop")
+        || mode.starts_with("assert_vertexuse");
     let side_mode = mode.starts_with("edge_side") || mode.starts_with("loop_side");
     let mut k = Kernel::default();
     let mut builder = BrepConstructor::new()?;
@@ -280,7 +281,10 @@ fn run() -> Result<Value> {
     }
     let region = require(b.infinite_region())?;
     let mut target_shell = outer;
-    if (mode.starts_with("assert_region") || mode.starts_with("assert_shell"))
+    if (mode.starts_with("assert_region")
+        || mode.starts_with("assert_shell")
+        || (mode.starts_with("assert_vertexuse")
+            && (mode.contains("_wire") || mode.contains("_shellvertex"))))
         && (mode.contains("_vertex") || mode.contains("_wire"))
     {
         let (shell, vertex) =
@@ -314,6 +318,22 @@ fn run() -> Result<Value> {
         .vertexuses
         .first()
         .ok_or("missing fixture vertex use")?;
+    let target_vu = if mode.starts_with("assert_vertexuse") && mode.contains("_vertexloop") {
+        match b.loopuse(target_lu)?.start {
+            LoopuseStart::Vertexuse(Some(vu)) => vu,
+            _ => return Err("missing vertex loop use".into()),
+        }
+    } else if mode.starts_with("assert_vertexuse")
+        && (mode.contains("_wire") || mode.contains("_shellvertex"))
+    {
+        match b.shell(target_shell)?.members {
+            ShellMembers::Vertexuse(vu) => vu,
+            ShellMembers::Edgeuse(eu) => require(b.edgeuse(eu)?.vertexuse)?,
+            _ => return Err("missing shell vertex use".into()),
+        }
+    } else {
+        vu
+    };
     if side_mode && mode.contains("_uv") {
         for eu in solidcore::topology::edgeuse::p1::loopuse_edgeuses(&b, lu)? {
             solidcore::topology::edgeuse::p3::get_or_create_uv_trim_curve(
@@ -537,6 +557,8 @@ fn run() -> Result<Value> {
                     options,
                     reports,
                 )
+            } else if mode.starts_with("assert_vertexuse") {
+                validation::assert_vertexuse(&mut k, &mut b, target_vu, options, reports)
             } else {
                 validation::assert_loop(&mut k, &mut b, target_loop, options, reports)
             };

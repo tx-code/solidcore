@@ -748,7 +748,11 @@ fn run() -> Result<Value> {
             if status == 1000 {
                 Ok(())
             } else {
-                Err(SolidError::sm_err("subtopology observer"))
+                Err(SolidError::Upstream {
+                    operation: "subtopology observer",
+                    code: status,
+                    entity: None,
+                })
             }
         } else if raw {
             Ok(())

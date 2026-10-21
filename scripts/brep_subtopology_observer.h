@@ -32,10 +32,25 @@ static SmTopology* sub_object(const SubFixture& f,std::string kind){
     if(kind=="faceuse")return f.fu;if(kind=="loopuse")return f.lu;if(kind=="edgeuse")return f.eu;if(kind=="vertexuse")return f.vu;
     throw std::runtime_error("invalid subtopology receiver");
 }
+static std::vector<SmTopology*> sub_batch_objects(const SubFixture& f,const std::string& recipe){
+    if(recipe=="empty")return {};if(recipe=="duplicate")return {f.face,f.face};
+    if(recipe=="mixed")return {f.face,f.edge,f.vertex,f.loop,f.shell,f.region};
+    if(recipe=="faceedge")return {f.face,f.edge};if(recipe=="mixbrep")return {f.face,f.b,f.edge};
+    if(recipe=="twobrep")return {f.b,f.b};if(recipe=="doublemixed")return {f.face,f.b,f.edge,f.b};
+    if(recipe=="firstuse")return {f.eu,f.face};if(recipe=="lateuse")return {f.face,f.eu};
+    if(recipe=="alluses")return {f.fu,f.lu,f.eu,f.vu};
+    return {sub_object(f,recipe)};
+}
 static SubObserved observe_subtopology(SmContext& context,const SubKeys& keys,const SubFixture& f,const std::string& mode,std::string cfg){
     std::replace(cfg.begin(),cfg.end(),',',' ');std::istringstream in(cfg);int mask,reset,target,locked,repeats,seed,premark;
     if(!(in>>mask>>reset>>target>>locked>>repeats>>seed>>premark)||mask<0||mask>63||repeats<1||repeats>2||seed<0||seed>2)throw std::runtime_error("invalid subtopology configuration");
-    auto kind=mode.substr(4);kind=kind.substr(0,kind.find('_'));auto object=sub_object(f,kind);
+    auto kind=mode.substr(4);kind=kind.substr(0,kind.find('_'));bool batch=kind.starts_with("batch");auto recipe=batch?kind.substr(5):kind;
+    int alias=-1;const std::string aliases[]={"aliasregions","aliasshells","aliasfaces","aliasloops","aliasedges","aliasvertices"};
+    for(int i=0;i<6;++i)if(recipe==aliases[i])alias=i;
+    if(alias>=0&&!(mask&(1<<alias)))throw std::runtime_error("alias fixture requires its output");
+    std::vector<SmTopology*> objects=batch&&alias<0?sub_batch_objects(f,recipe):std::vector<SmTopology*>{};
+    SmTopology* object=batch?(objects.empty()?nullptr:objects.front()):sub_object(f,kind);
+    if(alias>=0){const char* types[]={"region","shell","face","loop","edge","vertex"};object=sub_object(f,types[alias]);}
     auto mark=static_cast<SmMarkType>(target);std::unique_ptr<SmNewMarkAndLock> target_lock;
     if(locked&&mark!=SM_MT_NOMARK)target_lock=std::make_unique<SmNewMarkAndLock>(&context,target);
     std::vector<std::pair<unsigned long long,const SmTopology*>> pool;
@@ -48,7 +63,18 @@ static SubObserved observe_subtopology(SmContext& context,const SubKeys& keys,co
     const SmMarkType types[]={SM_MT_MARK,SM_MT_MARK2,SM_MT_MARK3,SM_MT_MARKIO,SM_MT_MARKASSERT};
     std::array<ULONG,5> before{};for(size_t i=0;i<5;++i)before[i]=context.GetCurrentMark(types[i]);
     SubObserved result;
-    for(int i=0;i<repeats;++i)result.status=SmTopologyTraverser::GetSubTopology(*object,mask&1?&regions:nullptr,mask&2?&shells:nullptr,mask&4?&faces:nullptr,mask&8?&loops:nullptr,mask&16?&edges:nullptr,mask&32?&vertices:nullptr,reset,mark);
+    SmTArray<SmTopology*> input;for(auto object:objects)input.Add(object);
+    // Match the SDK's documented pointer-array alias operation only in this
+    // native observer; Rust uses explicit typed selectors and no unsafe casts.
+    SmTArray<SmTopology*>* alias_input=nullptr;
+    switch(alias){case 0:alias_input=reinterpret_cast<SmTArray<SmTopology*>*>(&regions);break;
+        case 1:alias_input=reinterpret_cast<SmTArray<SmTopology*>*>(&shells);break;
+        case 2:alias_input=reinterpret_cast<SmTArray<SmTopology*>*>(&faces);break;
+        case 3:alias_input=reinterpret_cast<SmTArray<SmTopology*>*>(&loops);break;
+        case 4:alias_input=reinterpret_cast<SmTArray<SmTopology*>*>(&edges);break;
+        case 5:alias_input=reinterpret_cast<SmTArray<SmTopology*>*>(&vertices);break;}
+    for(int i=0;i<repeats;++i){if(batch)result.status=SmTopologyTraverser::GetSubTopologies(alias_input?*alias_input:input,mask&1?&regions:nullptr,mask&2?&shells:nullptr,mask&4?&faces:nullptr,mask&8?&loops:nullptr,mask&16?&edges:nullptr,mask&32?&vertices:nullptr,reset,mark);
+        else result.status=SmTopologyTraverser::GetSubTopology(*object,mask&1?&regions:nullptr,mask&2?&shells:nullptr,mask&4?&faces:nullptr,mask&8?&loops:nullptr,mask&16?&edges:nullptr,mask&32?&vertices:nullptr,reset,mark);}
     std::ostringstream output;output<<'[';
     auto array=[&](const auto& values,bool requested){if(!requested){output<<"null";return;}output<<'[';for(ULONG i=0;i<values.GetSize();++i){if(i)output<<',';output<<keys.at(values[i]);}output<<']';};
     array(regions,mask&1);output<<',';array(shells,mask&2);output<<',';array(faces,mask&4);output<<',';array(loops,mask&8);output<<',';array(edges,mask&16);output<<',';array(vertices,mask&32);output<<']';result.output=output.str();

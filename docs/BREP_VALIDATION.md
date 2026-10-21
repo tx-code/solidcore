@@ -531,6 +531,53 @@ cargo build --locked -p solidcore --example brep_validation_probe
 python scripts/brep_subtopology_compare.py --cpp <validation-observer> --rust bin/debug/examples/brep_validation_probe.exe --receipt bin/brep-subtopology.local.json
 ```
 
-The plural `GetSubTopologies` entry, including its input distribution and
-input/output-alias behavior, remains a separate migration task. A verified
-single-receiver collector or local walk does not establish that batch API.
+The plural entry now has its own implementation and qualification below;
+single-receiver results alone do not establish its distribution/alias contract.
+
+
+## Batch inputs and output-array aliases
+
+`get_subtopologies` follows `SmTopologyTraverser.cpp`2094--2181 at `d8ed45a`.
+`SubTopologyInput::Objects` supplies a separate heterogeneous input slice;
+`OutputRegions`/`OutputShells`/`OutputFaces`/`OutputLoops`/`OutputEdges`/
+`OutputVertices` explicitly select an existing output as the actual input.
+These selectors preserve native shared-array behavior without unsafe Rust aliasing
+or heterogeneous pointer-array casts. All identities belong to the borrowed model.
+
+The batch routine returns before reset for empty input or no requested output.
+Otherwise it resets requested arrays when asked, distributes inputs with **Add**,
+then delegates to the singular routine with reset=false and **all six** working
+arrays. Omitted outputs use local arrays and can therefore affect traversal and
+marks before being discarded. Unlike singular marked partial outputs, batch
+marked partial outputs are defined. No new traversal algorithm or sorting is used.
+
+A single Brep overrides the other roots and triggers the singular root's reset.
+A second Brep returns native status1007 with earlier distribution writes retained.
+Non-Brep inputs are included in their typed working arrays; duplicates and even
+an input Vertex can remain in output despite the source uniqueness/descendant
+comments. Invalid use types are ignored during distribution. If the first input
+is invalid and no Brep overrides it, singular resets the work arrays and returns
+SM_ERR; a later invalid use does not select the receiver.
+
+Actual input/output aliasing skips distribution and reads the selected array
+**after** reset. Append aliases retain their actual input storage and seed order.
+An initially empty alias returns before clearing any other output. Reset of a
+nonempty alias clears every requested output, then native reads the now-empty
+first pointer. `SmTArray.h`1075--1084 zeroes those entries, while its Release
+operator[]454--478 does not bound the read: the SDK access violation is recorded
+separately. Rust keeps the reset outputs and returns a checked error; it never
+continues on a saved copy of the old input. A selector for an absent output is
+also a checked error. Ordinary batch status failures retain their partial outputs.
+
+The batch SDK comparison covers all output masks, mixed/duplicate/empty inputs,
+Brep precedence and duplicate-Brep errors, marked partial outputs, each typed
+alias, append/reset, target locking and repeated calls over the synthetic graph
+roles. Its status/arrays/order and current mark epochs/counter advances are exact;
+independent distribution and early-return checks supplement parity. The unsafe
+native reset-alias case is not a passing or deferred numerical result. This
+runtime topology capability does not qualify general STEP import or the full SDK.
+
+```text
+cargo build --locked -p solidcore --example brep_validation_probe
+python scripts/brep_batch_subtopology_compare.py --cpp <validation-observer> --rust bin/debug/examples/brep_validation_probe.exe --receipt bin/brep-batch-subtopology.local.json
+```

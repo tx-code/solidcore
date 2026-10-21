@@ -9,6 +9,8 @@
 //! duplicate-output behavior are retained; these queries do not repair graphs.
 
 use super::Marks;
+
+mod batch;
 use crate::error::{EntityRef, Result, SolidError};
 use crate::geom::context::{with_mark_lock, MarkType, ALL_MARKS};
 use crate::kernel::Kernel;
@@ -16,6 +18,7 @@ use crate::topology::{
     brep::p1 as bp, face::p2 as face, loopuse, shell, topology::Topology, Brep, EdgeId, FaceId,
     LoopId, RegionId, ShellId, VertexId,
 };
+pub use batch::{get_subtopologies, SubTopologyInput};
 
 const OP: &str = "topology::topology_traverser::get_subtopology";
 

@@ -202,3 +202,11 @@ Undefined native marked-partial-output accesses remain checked failures; source
 Faceuse marking and duplicate Face behavior are preserved. Whole-root
 coincidence/ray checks and general projection are still separate implementation
 requirements; this does not complete the full migration ledger.
+
+
+Batch subgraph collection now shares the actual singular collector, with native
+input distribution, duplicate/precedence/early-return rules, all-six temporary
+arrays and explicit safe Rust output-alias selectors. Native reset-alias invalid
+reads remain checked errors with the reset state retained. Root coincidence,
+general projection and the rest of the full SDK/import/binding/viewer ledger
+remain required implementation work; batch topology parity is not completion.

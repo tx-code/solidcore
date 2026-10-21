@@ -8,7 +8,9 @@ use solidcore::{
     kernel::Kernel,
     topology::{
         brep::p2::object_ref,
-        topology_traverser::{get_subtopology, SubTopology, SubTopologyOptions},
+        topology_traverser::{
+            get_subtopologies, get_subtopology, SubTopology, SubTopologyInput, SubTopologyOptions,
+        },
         Brep, EdgeId, EdgeuseId, FaceId, FaceuseId, LoopId, LoopuseId, RegionId, ShellId, VertexId,
         VertexuseId,
     },
@@ -44,6 +46,43 @@ pub fn object(f: &Fixture, kind: &str) -> Result<EntityRef> {
         "vertexuse" => EntityRef::Vertexuse(f.vu),
         _ => return Err(invalid()),
     })
+}
+fn batch_input(
+    f: &Fixture,
+    recipe: &str,
+) -> Result<(Vec<EntityRef>, Option<SubTopologyInput<'static>>)> {
+    let alias = match recipe {
+        "aliasregions" => Some(SubTopologyInput::OutputRegions),
+        "aliasshells" => Some(SubTopologyInput::OutputShells),
+        "aliasfaces" => Some(SubTopologyInput::OutputFaces),
+        "aliasloops" => Some(SubTopologyInput::OutputLoops),
+        "aliasedges" => Some(SubTopologyInput::OutputEdges),
+        "aliasvertices" => Some(SubTopologyInput::OutputVertices),
+        _ => None,
+    };
+    if alias.is_some() {
+        return Ok((Vec::new(), alias));
+    }
+    let kinds = match recipe {
+        "empty" => vec![],
+        "duplicate" => vec!["face", "face"],
+        "mixed" => vec!["face", "edge", "vertex", "loop", "shell", "region"],
+        "faceedge" => vec!["face", "edge"],
+        "mixbrep" => vec!["face", "brep", "edge"],
+        "twobrep" => vec!["brep", "brep"],
+        "doublemixed" => vec!["face", "brep", "edge", "brep"],
+        "firstuse" => vec!["edgeuse", "face"],
+        "lateuse" => vec!["face", "edgeuse"],
+        "alluses" => vec!["faceuse", "loopuse", "edgeuse", "vertexuse"],
+        other => vec![other],
+    };
+    Ok((
+        kinds
+            .into_iter()
+            .map(|kind| object(f, kind))
+            .collect::<Result<Vec<_>>>()?,
+        None,
+    ))
 }
 fn entities(b: &Brep) -> Vec<EntityRef> {
     let mut v = vec![EntityRef::Brep(solidcore::topology::BrepId::from_index(0))];
@@ -94,7 +133,29 @@ pub fn observe(
         .split('_')
         .next()
         .ok_or_else(invalid)?;
-    let root = object(f, kind)?;
+    let batch = kind.strip_prefix("batch");
+    let (objects, alias) = if let Some(recipe) = batch {
+        batch_input(f, recipe)?
+    } else {
+        (Vec::new(), None)
+    };
+    let root = if batch.is_some() {
+        if let Some(alias) = alias {
+            Some(match alias {
+                SubTopologyInput::OutputRegions => EntityRef::Region(f.region),
+                SubTopologyInput::OutputShells => EntityRef::Shell(f.shell),
+                SubTopologyInput::OutputFaces => EntityRef::Face(f.face),
+                SubTopologyInput::OutputLoops => EntityRef::Loop(f.loop_),
+                SubTopologyInput::OutputEdges => EntityRef::Edge(f.edge),
+                SubTopologyInput::OutputVertices => EntityRef::Vertex(f.vertex),
+                SubTopologyInput::Objects(_) => return Err(invalid()),
+            })
+        } else {
+            objects.first().copied()
+        }
+    } else {
+        Some(object(f, kind)?)
+    };
     let mut run = |k: &mut Kernel| -> Result<Observed> {
         let mut out = SubTopology::default();
         macro_rules! input {
@@ -118,7 +179,7 @@ pub fn observe(
             for entity in pool
                 .iter()
                 .copied()
-                .filter(|e| *premark == 2 || (*premark == 1 && *e == root))
+                .filter(|e| *premark == 2 || (*premark == 1 && Some(*e) == root))
             {
                 b.notification_topology_mut(entity)?
                     .mark(Some(&k.context), target);
@@ -134,16 +195,22 @@ pub fn observe(
         let before = types.map(|m| k.context.current_mark(m));
         let mut status = 1000;
         for _ in 0..*repeats {
-            match get_subtopology(
-                k,
-                b,
-                root,
-                &mut out,
-                SubTopologyOptions {
-                    reset: *reset != 0,
-                    mark: target,
-                },
-            ) {
+            let options = SubTopologyOptions {
+                reset: *reset != 0,
+                mark: target,
+            };
+            let result = if batch.is_some() {
+                get_subtopologies(
+                    k,
+                    b,
+                    alias.unwrap_or(SubTopologyInput::Objects(&objects)),
+                    &mut out,
+                    options,
+                )
+            } else {
+                get_subtopology(k, b, root.ok_or_else(invalid)?, &mut out, options)
+            };
+            match result {
                 Ok(()) => status = 1000,
                 Err(SolidError::Upstream { code, .. }) => status = code,
                 Err(error) => return Err(error),

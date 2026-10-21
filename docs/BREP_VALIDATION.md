@@ -149,6 +149,13 @@ Rotating the mate's starting edge is legal. Reversing its traversal order is
 reported. CheckLoop's ordinary status is ignored exactly where native ignores
 it, while reports and checked Rust access failures remain observable.
 
+CheckLoop's conditional singularity searches resolve the working tolerance
+through the loop's primary-use face and the supplied surface's geometry owner.
+Exact evaluation copies keep that owner. An unknown or different face cannot
+supply the loop's tolerance. Plane overrides and loops without UV gaps retain
+their early paths; the pole search threshold remains a separate argument. This
+lookup changes neither defining geometry nor the installed UV curves.
+
 The new edgeuse/loopuse side module preserves the six-sample default, optional
 known periodicities, existing/missing UV conventions, boundary priority, and
 zero/one sample behavior. It evaluates an existing UV curve at the EDGE

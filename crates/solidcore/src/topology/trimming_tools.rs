@@ -2036,6 +2036,35 @@ fn edge_zone_tol(k: &Kernel, b: &Brep, e: Option<EdgeId>) -> Result<f64> {
     })
 }
 
+/// Resolve only the working tolerance of this loop surface's actual face.
+/// Lengths stay in native model units (millimeters in the STEP bridge).
+fn loop_surface_face_tolerance(b: &Brep, surface: &Surface, l: LoopId) -> Result<Option<f64>> {
+    // SmTrimmingTools.cpp::CheckLoop calls IsSingularity on its supplied surface;
+    // SmPlane's override returns false without asking any owner for a tolerance.
+    if matches!(surface.kind(), SurfaceKind::Plane(_)) {
+        return Ok(None);
+    }
+    let Some(owner) = surface.face()? else {
+        return Ok(None); // Preserve the unowned surface's original convention.
+    };
+    // The surface may be an exact evaluation copy. Compare geometry-owner IDs,
+    // not addresses or Loop.face (a convenience cache, not defining incidence).
+    // A different/opaque owner must not borrow this loop's face tolerance.
+    let face = lu1::loop_face(b, l)?;
+    if face.is_none_or(|face| {
+        crate::topology::brep_cache::arena_identity(crate::topology::brep_cache::CacheObject::Face(
+            face,
+        )) != owner
+    }) {
+        // UNPORTED(topology.face_p2): no matching face in this loop's model.
+        return Err(SolidError::unported(
+            "SmFace::GetTolerance outside loop owning face",
+            "topology.face_p2",
+        ));
+    }
+    crate::topology::surface_cache::owning_face_tolerance(b, owner).map(Some)
+}
+
 /// `CheckLoop`: for each pair of consecutive edge uses of the loop whose UV ends differ
 /// (by more than `1e-10`), the surface points must be within the edges' intersection
 /// tolerance (else closure 3, signalled only) and the UV jump must stay under a tenth of
@@ -2097,11 +2126,33 @@ pub fn check_loop(
             }
 
             let dom = surface.natural_uv_domain();
+            // Preserve CheckLoop's conditional pole search and its original
+            // tol_3d threshold. The separate face value is the native working
+            // tolerance used inside GetSingularities, never a search/repair
+            // allowance. Resolve it here so prior reports and no-gap paths keep
+            // their original order; neither geometry nor its owner is detached.
+            let face_tolerance = loop_surface_face_tolerance(b, surface, l)?;
             let sing1 = surface
-                .is_singularity(k, previous_end, tol_3d, false)?
+                .is_singularity_with_owner_tolerance(
+                    k,
+                    previous_end,
+                    crate::surface::surface::p5::SS_UNKNOWN,
+                    None,
+                    tol_3d,
+                    false,
+                    face_tolerance,
+                )?
                 .direction;
             let sing2 = surface
-                .is_singularity(k, current_start, tol_3d, false)?
+                .is_singularity_with_owner_tolerance(
+                    k,
+                    current_start,
+                    crate::surface::surface::p5::SS_UNKNOWN,
+                    None,
+                    tol_3d,
+                    false,
+                    face_tolerance,
+                )?
                 .direction;
             let large_u = (current_start.x - previous_end.x).abs() > dom.x_length() * 0.10;
             let large_v = (current_start.y - previous_end.y).abs() > dom.y_length() * 0.10;
@@ -2333,6 +2384,7 @@ mod tests {
     use super::*;
     use crate::nurbs::crv_basic::Curve as NlCurve;
     use crate::nurbs::math::{CPoint, NOW, NOZ};
+    use crate::topology::brep_constructor::{BrepConstructor, VertexNode};
 
     fn uv_line(a: [f64; 2], b: [f64; 2]) -> Curve {
         let pw = vec![
@@ -2350,6 +2402,225 @@ mod tests {
         ];
         let nl = NlCurve::new(pw, 1, vec![0.0, 0.0, 1.0, 1.0]).unwrap();
         Curve::from(BSplineCurve::from_nurb(nl, 3, false))
+    }
+
+    fn unit_patch() -> Surface {
+        let net = vec![
+            vec![CPoint::new(0., 0., 0., NOW), CPoint::new(0., 1., 0., NOW)],
+            vec![CPoint::new(1., 0., 0., NOW), CPoint::new(1., 1., 0., NOW)],
+        ];
+        let knots = vec![0., 0., 1., 1.];
+        let nurb = crate::nurbs::srf_basic::Surface::new(net, 1, 1, knots.clone(), knots).unwrap();
+        Surface::from(BSplineSurface::from_nurb(nurb, false))
+    }
+
+    fn owned_patch_loop(k: &mut Kernel, gap: f64) -> (Brep, FaceId, LoopId, FaceId) {
+        // Two actual faces provide a negative control with a resolvable but
+        // different owner. S(u,v)=(u,v,0) independently gives each UV gap's
+        // physical length; BSpline dispatch must still search for poles.
+        let mut builder = BrepConstructor::new().unwrap();
+        builder.start_shell().unwrap();
+        let mut faces = Vec::new();
+        let mut loops = Vec::new();
+        for face_index in 0..2 {
+            let face = builder.start_face(OrientType::Same).unwrap();
+            let surface = unit_patch();
+            let domain = surface.natural_uv_domain();
+            builder.set_face_surface(surface, domain).unwrap();
+            let l = builder.start_loop(OrientType::Same).unwrap();
+            let points = [[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]];
+            for i in 0..3 {
+                let edge = builder
+                    .start_edge(k, OrientType::Same, None, None, None)
+                    .unwrap();
+                let a = points[i];
+                let end = points[(i + 1) % 3];
+                builder.set_edge_curve(k, line3(a, end), false).unwrap();
+                builder
+                    .set_limits(k, VertexNode::Parameter(0.), VertexNode::Parameter(1.))
+                    .unwrap();
+                let start_u = if face_index == 0 && i == 0 { gap } else { a[0] };
+                builder
+                    .set_edge_curve(k, uv_line([start_u, a[1]], [end[0], end[1]]), true)
+                    .unwrap();
+                builder.brep_mut().edge_mut(edge).unwrap().tolerance = 1e-6;
+                builder.end_edge().unwrap();
+            }
+            builder.end_loop(k).unwrap();
+            builder.end_face().unwrap();
+            faces.push(face);
+            loops.push(l);
+        }
+        builder.end_shell(k, false).unwrap();
+        (builder.finish().unwrap(), faces[0], loops[0], faces[1])
+    }
+
+    #[test]
+    fn loop_gap_singularity_search_uses_its_actual_face_without_detaching_geometry() {
+        const GAP: f64 = 2e-8;
+        const SEARCH_TOLERANCE: f64 = 6e-9;
+        for face_tolerance in [7e-8, 2e-5] {
+            let mut k = Kernel::default();
+            k.tolerances.zone_tol_3d = 3e-3;
+            let (mut b, face, l, _) = owned_patch_loop(&mut k, GAP);
+            b.face_mut(face).unwrap().tolerance = face_tolerance;
+            // This field is not the loop's defining face incidence.
+            b.loop_mut(l).unwrap().face = FaceId::from_index(u32::MAX);
+            let surface = b.face(face).unwrap().surface.as_ref().unwrap();
+            let owner = surface.owner();
+            let definition = surface.clone_for_evaluation().unwrap();
+            let domain = surface.natural_uv_domain();
+            let SurfaceKind::BSpline(base) = surface.kind() else {
+                panic!()
+            };
+            let before = base.canonical().unwrap();
+            // Opaque borrowed evaluation still cannot manufacture a working
+            // tolerance for an owned surface, even with the same search limit.
+            assert!(matches!(
+                definition.is_singularity(&k, Point2::new(0., 0.), SEARCH_TOLERANCE, false),
+                Err(SolidError::Unported {
+                    upstream: "SmFace::GetTolerance",
+                    unit: "topology.face_p2",
+                })
+            ));
+            // The constructor may select any incidence as the loop head.
+            // Snapshot every actual use rather than treating that choice as
+            // source order; the geometric truth S(u,v)=(u,v,0) is independent.
+            let uses = loop_edgeuses(&b, l).unwrap();
+            let uv_before: Vec<_> = uses
+                .iter()
+                .map(|&eu| {
+                    let ends = edge_uv_ends(&k, &mut b, eu).unwrap();
+                    let curve = eu1::uv_trim_curve(&b, eu).unwrap().0.unwrap();
+                    (
+                        eu,
+                        ends,
+                        eu1::orientation(&b, eu).unwrap(),
+                        bspline_of(curve).unwrap().canonical().unwrap(),
+                    )
+                })
+                .collect();
+            assert!(uv_before
+                .iter()
+                .any(|(_, ends, _, _)| ends.0 == Point2::new(GAP, 0.)));
+            for (_, (start, end), _, _) in &uv_before {
+                for uv in [start, end] {
+                    assert_eq!(
+                        definition.evaluate_point(&k, *uv).unwrap(),
+                        Point3::new(uv.x, uv.y, 0.)
+                    );
+                }
+            }
+            let mut reports = AssertArray::new();
+            assert_eq!(
+                check_loop(
+                    &k,
+                    &mut b,
+                    &definition,
+                    l,
+                    SEARCH_TOLERANCE,
+                    Some(&mut reports)
+                )
+                .unwrap(),
+                0
+            );
+            assert!(reports.is_empty());
+            assert_eq!(loop_edgeuses(&b, l).unwrap(), uses);
+            for (eu, ends, orientation, curve_definition) in uv_before {
+                assert_eq!(edge_uv_ends(&k, &mut b, eu).unwrap(), ends);
+                assert_eq!(eu1::orientation(&b, eu).unwrap(), orientation);
+                let curve = eu1::uv_trim_curve(&b, eu).unwrap().0.unwrap();
+                assert_eq!(
+                    bspline_of(curve).unwrap().canonical().unwrap(),
+                    curve_definition
+                );
+            }
+            let actual = b.face(face).unwrap();
+            let surface = actual.surface.as_ref().unwrap();
+            assert_eq!(surface.owner(), owner);
+            assert_eq!(definition.owner(), owner);
+            assert_eq!(surface.natural_uv_domain(), domain);
+            let SurfaceKind::BSpline(base) = surface.kind() else {
+                panic!()
+            };
+            assert_eq!(base.canonical().unwrap(), before);
+            assert_eq!(actual.tolerance, face_tolerance);
+            assert_eq!(k.tolerances.zone_tol_3d, 3e-3);
+            assert_ne!(face_tolerance, SEARCH_TOLERANCE);
+        }
+    }
+
+    #[test]
+    fn loop_gap_refuses_foreign_owner_after_the_original_physical_gap_report() {
+        let mut k = Kernel::default();
+        let (mut b, face, l, other_face) = owned_patch_loop(&mut k, 1e-3);
+        let mut surface = b
+            .face(face)
+            .unwrap()
+            .surface
+            .as_ref()
+            .unwrap()
+            .clone_for_evaluation()
+            .unwrap();
+        for wrong_face in [other_face, FaceId::from_index(u32::MAX)] {
+            surface.set_owner(Some(crate::topology::brep_cache::arena_identity(
+                crate::topology::brep_cache::CacheObject::Face(wrong_face),
+            )));
+            let mut reports = AssertArray::new();
+            assert!(matches!(
+                check_loop(&k, &mut b, &surface, l, 6e-9, Some(&mut reports)),
+                Err(SolidError::Unported {
+                    upstream: "SmFace::GetTolerance outside loop owning face",
+                    unit: "topology.face_p2",
+                })
+            ));
+            assert_eq!(reports.len(), 1);
+            let report = &reports.reports()[0];
+            assert_eq!(
+                (report.reporting_type, report.list_index, report.test_index),
+                (TYPE, LIST_CHECK_LOOP, 0)
+            );
+            assert_eq!(report.reporter, Some(topo_key(EntityRef::Loop(l))));
+            assert_eq!(report.owner, Some(topo_key(EntityRef::Loop(l))));
+            assert_eq!(report.owner_type, LOOP_TYPE);
+            assert_eq!(report.owner_type_string, Some("SmLoop"));
+            assert_eq!(report.tol3d, 2e-6);
+            assert_eq!(report.value, 1e-3);
+        }
+    }
+
+    #[test]
+    fn no_gap_and_plane_paths_do_not_resolve_an_unneeded_surface_owner() {
+        let mut k = Kernel::default();
+        let (mut b, face, l, _) = owned_patch_loop(&mut k, 0.);
+        let unknown = crate::topology::brep_cache::arena_identity(
+            crate::topology::brep_cache::CacheObject::Face(FaceId::from_index(u32::MAX)),
+        );
+        let mut surface = b
+            .face(face)
+            .unwrap()
+            .surface
+            .as_ref()
+            .unwrap()
+            .clone_for_evaluation()
+            .unwrap();
+        surface.set_owner(Some(unknown));
+        assert_eq!(check_loop(&k, &mut b, &surface, l, 6e-9, None).unwrap(), 0);
+
+        let (mut b, _, l, _) = owned_patch_loop(&mut k, 2e-8);
+        let domain = Extent2d::from_bounds(0., 0., 1., 1.);
+        let mut plane = Surface::from(crate::surface::plane::Plane::new(
+            Point3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            crate::math::Vec2::new(1., 1.),
+            &domain,
+        ));
+        plane.set_owner(Some(unknown));
+        assert_eq!(check_loop(&k, &mut b, &plane, l, 6e-9, None).unwrap(), 0);
+        let mut unowned = unit_patch();
+        assert!(unowned.set_owner(None).is_none());
+        assert_eq!(check_loop(&k, &mut b, &unowned, l, 6e-9, None).unwrap(), 0);
     }
 
     #[test]

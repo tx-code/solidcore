@@ -330,6 +330,7 @@ pub(super) fn squared(a: Vector) -> Result<R, ExactError> {
 pub(super) fn check(upstream: &s::Outcome, quality: Quality, limits: Limits) -> Outcome {
     let mut out = Outcome {
         source_capture: upstream.captured_owner(),
+        checked_evidence: None,
         status: Status::UpstreamFailure,
         quality,
         limits,
@@ -493,6 +494,13 @@ pub(super) fn check(upstream: &s::Outcome, quality: Quality, limits: Limits) -> 
         {
             last.evaluation = "Indeterminate";
         }
+    }
+    // Keep the existing mutable diagnostic projection for report compatibility.
+    // The private immutable witness prevents its later edits (or a rewritten
+    // public status) from authorizing source-to-native construction. The source
+    // snapshot itself is shared; retained exact evidence consumes extra memory.
+    if out.status == Status::Checked {
+        out.checked_evidence = Some(std::sync::Arc::new(out.evidence.clone()));
     }
     out
 }

@@ -7,6 +7,13 @@ includes the kernel, public API, STEP pipeline, bindings, viewer/workbench and
 supporting build/validation/distribution tools. Preserve caller-visible behavior,
 source semantics, numerical/ownership contracts and actual failure behavior.
 
+STEP model-import milestones belong in solidcore: successful source inspection
+or kernel test counts cannot replace actual complete Rust BRep imports. Connect
+the maintained source pipeline to the Rust builder before unrelated kernel work.
+There is currently no native viewer implementation in this Rust repository.
+The requested standalone viewer must use wgpu and support CLI file launch while
+retaining the maintained progress/HUD, rendering and selection/measurement goals.
+
 ## Authoritative source and evidence
 
 The maintained usd-brep fork is the source, not just NVIDIA's kernel pin

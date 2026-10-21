@@ -114,9 +114,11 @@ heals source defects, or relaxes quality thresholds.
 Source parsing must land before typed binding; typed binding before construction.
 Neither a mesh nor a successful kernel method qualifies the intervening stages.
 The new crate does not depend on the kernel, so importer edits do not rebuild it.
-Kernel arena APIs exist, but their existence does not establish a verified STEP
-construction path. The C++ kernel's custom model/translator APIs must not be
-assumed to exist or have the same ownership rules in Rust.
+An initial separate [native Rust bridge](../solidcore-step-native/README.md) now
+constructs planar candidates and qualifies a single open affine face under
+explicit budgets. It does not establish general/closed-shape import, complete
+publication/report migration or real-model acceptance. The C++ kernel's custom
+model/translator APIs must not be assumed to have the same ownership in Rust.
 
 ## Validation
 

@@ -1,0 +1,25 @@
+[package]
+name = "solidcore-step-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version = "1.86"
+description = "Source-preserving STEP construction on the Rust solidcore kernel"
+
+[dependencies]
+solidcore = { path = "../solidcore" }
+solidcore-step = { path = "../solidcore-step" }
+serde_json = "1"
+softfloat = "=1.0.0"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+cli = []
+
+[[bin]]
+name = "step-native-import"
+path = "src/main.rs"
+required-features = ["cli"]

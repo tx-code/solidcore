@@ -18,6 +18,13 @@ are refused before rule admission; no AP214/global evidence is fabricated. Only
 the original complete conversion-unit deferral may resume. Source errors and
 unsupported, resource, request and numeric failures retain distinct statuses.
 
+Successful outcomes retain a private immutable witness exposed through
+`Outcome::checked_evidence()`. A downstream native builder uses that witness,
+not the editable public diagnostic projection or a rewritten status. Failure
+outcomes have no witness. Keeping the existing diagnostic interface currently
+requires an additional evidence copy on success; original source bytes remain
+shared. No extra rule work is charged and report content/order remains unchanged.
+
 The initial per-record admission charge precedes all phases. Local rules, global
 rules and geometry execute in the original order, with the original predicate
 short-circuiting, denied-charge accounting and evidence insertion timing. An

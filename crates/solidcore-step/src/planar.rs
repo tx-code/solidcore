@@ -240,6 +240,7 @@ pub struct UnitConversion {
     pub exponents: [Rational; 7],
 }
 /// Owning diagnostic evidence; partial evidence is never an accepted native model.
+#[derive(Clone)]
 pub struct Evidence {
     /// The immutable original semantic/source owner, even after outcomes are dropped.
     pub source: Option<semantics::Snapshot>,
@@ -279,6 +280,9 @@ pub enum Status {
 /// Diagnostic result, bound to one original source; native/model work is unrun.
 pub struct Outcome {
     source_capture: Option<Arc<[u8]>>,
+    // Only the checker can install this success witness. Public status/evidence
+    // remain editable diagnostic projections and cannot mint native eligibility.
+    checked_evidence: Option<Arc<Evidence>>,
     /// Final planar source status.
     pub status: Status,
     /// Explicit quality actually selected.
@@ -295,10 +299,19 @@ pub struct Outcome {
     pub geometry: &'static str,
     /// Actual unit conversion interpretation progress.
     pub conversion_units: &'static str,
-    /// Ordered partial/complete diagnostic observations, never native acceptance.
+    /// Ordered partial/complete diagnostic observations, never native eligibility.
+    /// Editing these does not change the checker's immutable success witness.
     pub evidence: Evidence,
     /// Original diagnostic identities, positions, responsibility and witnesses.
     pub diagnostics: Vec<semantics::Diagnostic>,
+}
+impl Outcome {
+    /// Borrow the original evidence from a successful source check. Only this
+    /// immutable witness can authorize a subsequent native construction stage;
+    /// an edited public status or diagnostic projection does not qualify it.
+    pub fn checked_evidence(&self) -> Option<&Evidence> {
+        self.checked_evidence.as_deref()
+    }
 }
 /// Check source rules and directed regions using an explicit quality and budget.
 pub fn check(upstream: &semantics::Outcome, quality: Quality, limits: Limits) -> Outcome {

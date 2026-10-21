@@ -55,8 +55,9 @@ The ordered root implementation still reaches missing operations:
 - The root `AssertSubTopology` branch now collects the actual stored lists and
   face-derived loops, then runs Region, Shell, Face and Loop checks in native
   order. Edge/Vertex local validators and the non-root `GetSubTopology` branch
-  remain explicit missing operations. Face execution still requires dynamic
-  surface assertions and, on periodic surfaces, full seam classification.
+  remain explicit missing operations. Face execution now includes Plane and
+  BSplineSurface assertions; other concrete surface subclasses and periodic
+  seam classification remain required.
 - Underlying geometric paths such as a repeated gap check constructing a
   `CrvOnSurf` over an analytic plane, where concrete surface dispatch is missing.
 
@@ -174,10 +175,10 @@ native callees retain their documented UV/tolerance/trim side effects. Exact
 UV references are reacquired after mutable curve generation so physical aliasing
 still selects the native self-intersection path.
 
-Face remains partial: dynamic Surface/BSplineSurface assertions and periodic
+Face remains partial: remaining concrete surface subclass assertions and periodic
 FaceProps seam classification are explicit dependencies, as are unavailable
-coincidence failure outputs. Given-selected planar calls can finish, but do not
-include the skipped base/surface validation. Root walk reaches these actual
+coincidence failure outputs. Selected planar calls and their non-Given Plane/BSplineSurface assertions can
+finish; Given still does not include skipped base chains. Root walk reaches these actual
 dependencies, or Edge/Vertex after completed selected Face/Loop checks, rather
 than stopping at an unexecuted blanket Face placeholder. Non-root walk remains
 unported. Complete migration and native import acceptance remain unestablished.
@@ -195,3 +196,61 @@ Known native invalid-domain classification crashes are listed separately as
 `unsafe_native`, and never counted as matches or deferred numerical evidence.
 Rust safety checks require rejection/error and preserve the original invalid
 input; the SDK crash is not used as an approximation oracle.
+
+
+## Plane and B-spline surface assertions
+
+`assert_surface` now executes the native Surface -> BSplineSurface -> Plane
+chain with the concrete virtual class convention. A Given Plane call skips its
+BSpline parent and may retain an absent NURB; a non-Given call performs the
+inherited checks and materializes the actual model-owned representation. Plane
+position, analytic domain, analytic/NURB corner agreement and positive UV scales
+are checked in source order. Revolution and other concrete subclass bodies
+remain explicit dependencies; a BSpline base check cannot stand in for them.
+
+Surface checks use actual flat corners, degeneracy, knot continuity, exact versus
+approximate singular sides and opposite-boundary coincidence. Native continuity
+status is separate from its partial outputs: the existing fallible API remains,
+while an internal output-preserving entry lets this original caller consume its
+initialized minimum after an ordinary failure. Failure before initialization is
+explicitly unestablished; no guessed continuity is supplied.
+
+BSpline checks include actual NURB presence, knot multiplicity, internal poles,
+degenerate control rows and repeated end-point queries, followed by the native
+control-grid monotonicity predicate. Repeated-end output is warning-only; its
+query is executed without inventing a failed assertion. Native warning-stream
+transport is outside the selected report-field comparison. The
+source asymmetry in internal-pole confirmation and early row-exit behavior are
+preserved. `GetMaxDimension` means the native absolute-coordinate convention,
+not a replacement span measure. No control point or knot is moved to obtain a
+pass. GetOrCreate never regenerates an already stored NURB: a conflicting
+analytic/cache representation is retained and diagnosed.
+
+`IsClosed`'s third pointer is INPUT tolerance (`SmSurface.h1498`); it does not
+modify the BSD grid tolerance. The native `1e-6` defaults and `dTol*1000` grid
+argument are retained as SDK behavior, not production import-quality defaults.
+The U closure flag is the grid's closed-column argument and V is closed-row.
+
+The separate geometric `PointGrid` follows `SmPointSet.cpp` query/cache order.
+It preserves setters that keep cached results, ClearCache that resets monotonicity
+but not coincidence, the stale first-length comparison and the column branch
+writing the row flag. Undefined native zero-row/undersized accesses become
+checked Rust failures. This predicate remains a local-turn heuristic, not an
+injectivity or continuous-geometry proof.
+
+Report observers now also compare the virtual owner class string, preserving
+concrete Plane/UV curve names separately from static assertion class codes.
+This extends the selected record-field evidence, without claiming full binary
+record/ABI or all optional diagnostic parameter qualification.
+
+```text
+cargo build --locked -p solidcore --example brep_surface_probe
+python scripts/build_brep_constructor_reference.py --source <cpp-checkout> --sdk <release-sdk> --toolchain-env <msvc-env.json> --output bin/surface-validation-reference --probe surface
+python scripts/brep_surface_validation_compare.py --cpp bin/surface-validation-reference/brep-surface-reference.exe --rust bin/debug/examples/brep_surface_probe.exe --receipt bin/brep-surface-validation.local.json
+```
+
+Synthetic inputs cover folds, repeated points, translated/late collapsed rows,
+U/V pole asymmetry, rational weights and full interior multiplicity, alongside
+levels, repeated arrays and cached-grid flags. They qualify selected native
+operations only. Dynamic geometry attributes, other subclass validators, full
+root/local validation and strict STEP acceptance remain required work.

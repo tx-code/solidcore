@@ -31,6 +31,7 @@ mod local_base;
 mod loops;
 mod pointers;
 mod presence;
+mod surfaces;
 #[cfg(test)]
 mod tests;
 mod tolerances;
@@ -40,6 +41,7 @@ pub use assertions::{assert_valid, AssertValidOptions};
 pub use faces::assert_face;
 pub use local::{assert_region, assert_shell};
 pub use loops::assert_loop;
+pub use surfaces::assert_surface;
 pub use tolerances::{validate_and_update_tolerances, ToleranceReport};
 pub use uses::{assert_faceuse, assert_loopuse};
 
@@ -131,8 +133,9 @@ enum Object {
     Edgeuse(EdgeuseId),
     Vertex(VertexId),
     Vertexuse(VertexuseId),
-    Surface(FaceId),
-    UvCurve(EdgeuseId),
+    Placement(FaceId),
+    Surface(FaceId, &'static str),
+    UvCurve(EdgeuseId, &'static str),
 }
 impl Object {
     const fn identity(self) -> (i64, u32, &'static str) {
@@ -148,16 +151,18 @@ impl Object {
             Self::Edgeuse(id) => (labels::EDGEUSE_TYPE, id.index(), "SmEdgeuse"),
             Self::Vertex(id) => (labels::VERTEX_TYPE, id.index(), "SmVertex"),
             Self::Vertexuse(id) => (labels::VERTEXUSE_TYPE, id.index(), "SmVertexuse"),
-            Self::Surface(id) => (labels::SURFACE_TYPE, id.index(), "SmSurface"),
-            Self::UvCurve(id) => (labels::B_SPLINE_CURVE_TYPE, id.index(), "SmBSplineCurve"),
+            Self::Placement(id) => (labels::AXIS2_PLACEMENT_TYPE, id.index(), "SmAxis2Placement"),
+            Self::Surface(id, name) => (labels::SURFACE_TYPE, id.index(), name),
+            Self::UvCurve(id, name) => (labels::B_SPLINE_CURVE_TYPE, id.index(), name),
         }
     }
     fn key(self) -> ObjectKey {
         // Geometry and topology are distinct objects even when their arena index
         // and concrete type repeat. Keep physical UV ownership in the key.
         match self {
-            Self::Surface(id) => return ObjectKey((1_u64 << 63) | u64::from(id.index())),
-            Self::UvCurve(id) => return ObjectKey((3_u64 << 62) | u64::from(id.index())),
+            Self::Placement(id) => return ObjectKey((1_u64 << 61) | u64::from(id.index())),
+            Self::Surface(id, _) => return ObjectKey((1_u64 << 63) | u64::from(id.index())),
+            Self::UvCurve(id, _) => return ObjectKey((3_u64 << 62) | u64::from(id.index())),
             _ => {}
         }
         let (ty, index, _) = self.identity();

@@ -27,4 +27,5 @@ pub mod torus;
 pub mod trim_srf_cache;
 pub mod twist_volume;
 pub mod unbend_volume;
+pub mod validity;
 pub mod volume;

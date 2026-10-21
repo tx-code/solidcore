@@ -97,26 +97,21 @@ fn stored_uv_changes_the_native_missing_uv_periodic_side_allowance() {
 }
 
 #[test]
-fn face_request_guards_do_not_replace_missing_dynamic_surface_assertions() {
+fn selected_and_full_planar_face_checks_both_reach_real_surface_assertions() {
     let (mut b, face, _, _) = tests::fixture();
     assert!(assert_face(&mut Kernel::default(), &mut b, face, options(), None).unwrap());
     let (mut b, face, _, _) = tests::fixture();
-    assert!(matches!(
-        assert_face(
-            &mut Kernel::default(),
-            &mut b,
-            face,
-            AssertValidOptions {
-                walk: false,
-                ..AssertValidOptions::default()
-            },
-            None
-        ),
-        Err(SolidError::Unported {
-            upstream: "SmSurface::AssertValid dynamic dispatch",
-            ..
-        })
-    ));
+    assert!(assert_face(
+        &mut Kernel::default(),
+        &mut b,
+        face,
+        AssertValidOptions {
+            walk: false,
+            ..AssertValidOptions::default()
+        },
+        None
+    )
+    .unwrap());
 }
 
 #[test]

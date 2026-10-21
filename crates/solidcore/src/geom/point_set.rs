@@ -27,8 +27,9 @@
 //! | [`PointSequence::point_containment`]   | `SmPointSequence::PointContainment`              |
 //! | [`PointContainment`]                   | `SmPointObjectContainmentType` (`SmTypes.h`)     |
 //!
+//! Point-grid queries are migrated separately in [`crate::geom::point_grid`].
 //! The other members of `SmPointSet.cpp` (`SetUpData`, `SetUpPointSetType`,
-//! `SetUpDeviation`, coincidence/monotonicity, `SmPointGrid`, copy/assignment/equality,
+//! `SetUpDeviation`, PointSequence coincidence/monotonicity, copy/assignment/equality,
 //! the empty constructors, `Draw`, `Dump`) are not reached by in-scope code
 //! (`harness/callgraph`) and are not ported.
 //!

@@ -398,7 +398,7 @@ mod tests {
         assert!(matches!(
             error,
             SolidError::Unported {
-                upstream: "SmSurface::AssertValid dynamic dispatch",
+                upstream: "SmEdge::AssertValid",
                 ..
             }
         ));

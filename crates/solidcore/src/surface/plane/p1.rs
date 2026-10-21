@@ -2363,4 +2363,57 @@ mod tests {
             .unwrap();
         assert!(e.gw_nurb().is_some());
     }
+
+    #[test]
+    fn validity_does_not_rebuild_an_existing_nurb_to_hide_an_analytic_mismatch() {
+        let mut plane = Plane::new(
+            Point3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            Vec2::new(1., 1.),
+            &Extent2d::from_bounds(0., 0., 1., 1.),
+        );
+        plane.make_nurb().unwrap();
+        plane
+            .base
+            .get_or_create_gw_nurb()
+            .unwrap()
+            .cpt_mut(0, 0)
+            .unwrap()
+            .x = 0.5;
+        let mut surface = Surface::from(plane);
+        crate::surface::validity::materialize_bspline(&Kernel::default(), &mut surface).unwrap();
+        let control = crate::surface::validity::bspline_base(&surface)
+            .unwrap()
+            .control_point_net()
+            .unwrap();
+        assert_eq!(control.points[0].x, 0.5);
+        let mut k = Kernel::default();
+        let mut builder = crate::topology::brep_constructor::BrepConstructor::new().unwrap();
+        builder.start_shell().unwrap();
+        let f = builder
+            .start_face(crate::nurbs::b_spline_surface_n_lib::p2::OrientType::Same)
+            .unwrap();
+        builder
+            .set_face_surface(surface, Extent2d::from_bounds(0., 0., 1., 1.))
+            .unwrap();
+        builder.end_face().unwrap();
+        builder.end_shell(&mut k, false).unwrap();
+        let mut b = builder.finish().unwrap();
+        let mut reports = crate::geom::assert_array::AssertArray::new();
+        assert!(!crate::topology::brep_validation::assert_surface(
+            &mut k,
+            &mut b,
+            f,
+            crate::topology::brep_validation::AssertValidOptions {
+                walk: false,
+                ..Default::default()
+            },
+            Some(&mut reports)
+        )
+        .unwrap());
+        assert!(reports.reports().iter().any(|r| r.reporting_type
+            == crate::geom::assert_array::labels::PLANE_TYPE
+            && r.test_index == 5));
+    }
 }

@@ -196,6 +196,30 @@ impl Surface {
         d3d_tol: f64,
         pt_test_only: bool,
     ) -> Result<Singularity> {
+        self.is_singularity_with_owner_tolerance(
+            k,
+            uv,
+            singularities,
+            pole_points,
+            d3d_tol,
+            pt_test_only,
+            None,
+        )
+    }
+
+    /// The same native path with its actual owning-face working tolerance for
+    /// the conditional `GetSingularities` call; owner/geometry are never cleared.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(crate) fn is_singularity_with_owner_tolerance(
+        &self,
+        k: &Kernel,
+        uv: Point2,
+        singularities: u64,
+        pole_points: Option<&[Point3]>,
+        d3d_tol: f64,
+        pt_test_only: bool,
+        face_tolerance: Option<f64>,
+    ) -> Result<Singularity> {
         // the SmPlane overrides: a plane has no singularity
         if let SurfaceKind::Plane(p) = self.kind() {
             let (singular, direction) = if pole_points.is_some() || singularities != SS_UNKNOWN {
@@ -318,19 +342,23 @@ impl Surface {
 
         if direction == SurfParamType::Neither && !pt_test_only {
             // when still SM_SP_NEITHER check 3d distances to poles
-            let (sides, poles) = match pole_points {
-                Some(p) => (singularities, p.to_vec()),
-                None => {
-                    // GetSingularities returns no status; a failing evaluation inside it
-                    // leaves its initial outputs (SM_SS_NONE)
-                    match ignored(self.get_singularities(k, true, false))? {
-                        Some(r) => (
-                            u64::from(r.singular),
-                            r.pole_points
-                                .map_or_else(|| vec![Vec3::UNDEF; 4], |p| p.to_vec()),
-                        ),
-                        None => (SS_NONE, vec![Vec3::UNDEF; 4]),
-                    }
+            let (sides, poles) = if let Some(p) = pole_points {
+                (singularities, p.to_vec())
+            } else {
+                // GetSingularities returns no status; a failing evaluation inside it
+                // leaves its initial outputs (SM_SS_NONE)
+                let found = if let Some(tolerance) = face_tolerance {
+                    self.get_singularities_of_face(k, tolerance, true, false)
+                } else {
+                    self.get_singularities(k, true, false)
+                };
+                match ignored(found)? {
+                    Some(r) => (
+                        u64::from(r.singular),
+                        r.pole_points
+                            .map_or_else(|| vec![Vec3::UNDEF; 4], |p| p.to_vec()),
+                    ),
+                    None => (SS_NONE, vec![Vec3::UNDEF; 4]),
                 }
             };
 

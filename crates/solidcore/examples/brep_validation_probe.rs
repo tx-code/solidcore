@@ -861,7 +861,8 @@ fn run() -> Result<Value> {
                 r.name,
                 r.message,
                 r.tol3d,
-                r.value
+                r.value,
+                r.owner_type_string
             ])
         })
         .collect();

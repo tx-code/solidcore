@@ -16,7 +16,7 @@ def main():
     parser.add_argument('--sdk', type=Path, required=True, help='Release SDK directory, matching source headers')
     parser.add_argument('--toolchain-env', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--probe', choices=['constructor', 'validation', 'notification'], default='constructor')
+    parser.add_argument('--probe', choices=['constructor', 'validation', 'notification', 'surface'], default='constructor')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)

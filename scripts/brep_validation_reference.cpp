@@ -547,7 +547,7 @@ int main(int argc, char **argv) {
             quote(r->m_pName);
             std::cout << ',';
             quote(r->m_pMessage);
-            std::cout << ',' << r->m_sTol3d << ',' << r->m_dValue << ']';
+            std::cout << ',' << r->m_sTol3d << ',' << r->m_dValue << ',';quote(r->m_sOwnerTypeString);std::cout<<']';
         }
         std::cout << "]";
         if (argc == 5 && !tolerance && !box_mode) {

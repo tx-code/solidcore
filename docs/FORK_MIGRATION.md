@@ -147,3 +147,11 @@ queries and checked owner tolerance resolution are reusable native operations.
 Dynamic surface assertions, periodic seam classification, Edge/Vertex validators
 and non-root traversal still gate complete validation. Selected Given calls do
 not qualify skipped base/surface checks; see [validation scope](BREP_VALIDATION.md).
+
+
+Native Plane/Surface/BSplineSurface assertions and geometric PointGrid dependencies
+now execute real control-net/geometry checks, preserve existing NURBs and retain
+native failed-status partial outputs. Concrete Revolution/other subclass bodies,
+periodic seam checks, remaining local validators and root dependencies still gate
+complete validity and strict native import. Selected operation equivalence does
+not establish all SDK ownership/attribute or diagnostic ABI behavior.

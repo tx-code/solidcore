@@ -217,6 +217,24 @@ impl Surface {
         k: &Kernel,
         surf_param: SurfParamType,
     ) -> Result<(ContinuityType, Vec<ContinuityType>)> {
+        let mut minimum = None;
+        let mut values = Vec::new();
+        self.calculate_continuities_into(k, surf_param, &mut minimum, &mut values)?;
+        Ok((minimum.ok_or_else(|| SolidError::sm_err(OP_CONT))?, values))
+    }
+
+    /// Original status plus caller-retained partial output. Native `AssertValid`
+    /// ignores this status and still consumes the initialized minimum. None means
+    /// the native routine failed BEFORE initializing that out-parameter.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn calculate_continuities_into(
+        &self,
+        k: &Kernel,
+        surf_param: SurfParamType,
+        minimum: &mut Option<ContinuityType>,
+        conts_at_knots: &mut Vec<ContinuityType>,
+    ) -> Result<()> {
+        conts_at_knots.clear();
         // Get unique knot values for eSurfParam direction
         let (other_knots, _) = self.knots(surf_param, None)?;
 
@@ -226,8 +244,8 @@ impl Surface {
         }
 
         // init output continuities to [Discontinuous, G1, ... G1, Discontinuous]
-        let mut conts_at_knots = vec![ContinuityType::G1; other_knots.len()];
-        let mut min_continuity = ContinuityType::G1;
+        *conts_at_knots = vec![ContinuityType::G1; other_knots.len()];
+        let min_continuity = minimum.get_or_insert(ContinuityType::G1);
         if let Some(c) = conts_at_knots.first_mut() {
             *c = ContinuityType::Discontinuous;
         }
@@ -342,7 +360,7 @@ impl Surface {
                 } else {
                     // save continuity values at original knot values (the others stay
                     // SM_CT_UNDEFINED, the zeroed memory of SetSize)
-                    conts_at_knots = vec![ContinuityType::Undefined; surface_knot_cnt];
+                    *conts_at_knots = vec![ContinuityType::Undefined; surface_knot_cnt];
                     for (jj, cont) in tmp_conts.iter().enumerate() {
                         let iso_knot = iso_knots
                             .get(jj)
@@ -355,11 +373,11 @@ impl Surface {
                         }
                     }
                 }
-                min_continuity = tmp_min;
+                *min_continuity = tmp_min;
             } else {
                 // save minimum continuity values
-                if code(tmp_min) < code(min_continuity) {
-                    min_continuity = tmp_min;
+                if code(tmp_min) < code(*min_continuity) {
+                    *min_continuity = tmp_min;
                 }
 
                 // for every knot
@@ -382,7 +400,7 @@ impl Surface {
             }
         }
 
-        Ok((min_continuity, conts_at_knots))
+        Ok(())
     }
 
     /// The trimming loop of `uv_domain` (`CreateNaturalUVTrimCurves`), counter-clockwise

@@ -285,12 +285,7 @@ pub fn assert_face(
     )?;
     // Composite/obsolete rules remain disabled. Rule30 is SM_NMTLIB_7166-only.
     if b.face(id)?.surface.is_some() && !matches!(options.level, CheckLevel::Given(_)) {
-        // UNPORTED(fork.topology_validation): actual dynamic surface assertions;
-        // root/Face success cannot substitute for this remaining owner.
-        return Err(SolidError::unported(
-            "SmSurface::AssertValid dynamic dispatch",
-            "fork.topology_validation",
-        ));
+        valid &= super::assert_surface(k, b, id, child_options, report.reports.as_deref_mut())?;
     }
     if options.walk {
         return Err(local::non_root_walk());

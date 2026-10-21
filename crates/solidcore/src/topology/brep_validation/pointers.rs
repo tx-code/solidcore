@@ -164,7 +164,7 @@ pub(super) fn check(
                     let f = eu::face(b, *id)?.ok_or(SolidError::null_pointer(OP))?;
                     let domain = b.face(f)?.uv_domain;
                     let ivl = b.edge(e)?.interval;
-                    let who = Object::UvCurve(curve_owner);
+                    let who = Object::UvCurve(curve_owner, curve.class_string());
                     let mut previous = Point3::UNDEF;
                     for (test, param) in [
                         (70, ivl.min()),
@@ -394,7 +394,7 @@ fn check_face(k: &Kernel, b: &mut Brep, f: FaceId, c: &mut Checks<'_, '_, '_>) -
         .as_ref()
         .ok_or(SolidError::null_pointer(OP))?;
     c.test(7, who, true)?;
-    let swho = Object::Surface(f);
+    let swho = Object::Surface(f, surface.class_string());
     c.test(8, swho, true)?;
     c.test(9, swho, surface.owner().is_some())?;
     // Surface validity predicate 10 is commented out in the native source.

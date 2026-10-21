@@ -65,9 +65,8 @@
 //!   (`blend.fillet_solver_p2`); `SmFilletGeom::GetRailIndexOfSideEU`,
 //!   `RailEdgeuseIntersect` and `SmFilletEdge::ShouldSwapFaces`
 //!   (`blend.fillet_geom_p6`); `SmTemporaryRadiusChange` (`blend.fillet_executive_p2`)
-//!   for a solver (its set-up is a no-op for a `NULL` solver); `SmSurface::DropCurve`
-//!   (`intersect.surface_drop_lib_p3`) on anything but a plane (the `SmPlane` override
-//!   is ported). Each stub replaces only its call; the code behind it is ported.
+//!   for a solver (its set-up is a no-op for a `NULL` solver).
+//!   Projection dispatches to the shared `SmSurface::DropCurve` port.
 //! - **Record writes.** `SetPoint` on a fillet vertex and `SetCurve` on a fillet edge
 //!   apply the `SM_NO_CHANGE_GEOMETRY` resets directly (as `_p1` and `_p4` do: the
 //!   pseudo B-rep has no notification environment); `SetOwner` of the new curve is
@@ -267,24 +266,11 @@ fn surface_drop_curve(
     approx_tol: f64,
 ) -> Result<Vec<Curve>> {
     let approx_tol = approx_tol3d(k, approx_tol);
-    match surface.kind() {
-        SurfaceKind::Plane(p) => Ok(p
-            .drop_curve(k, domain, curve, interval, approx_tol, true, true)?
-            .uv_curves),
-        SurfaceKind::BSpline(_)
-        | SurfaceKind::CurveBounded(_)
-        | SurfaceKind::SrfInVolume(_)
-        | SurfaceKind::SurfOfRevolution(_)
-        | SurfaceKind::Step(_)
-        | SurfaceKind::OffsetSurface(_) => {
-            // UNPORTED(intersect.surface_drop_lib_p3): SmSurface::DropCurve
-            unported_on(
-                (k, surface, domain, curve, interval, approx_tol),
-                "SmSurface::DropCurve",
-                "intersect.surface_drop_lib_p3",
-            )
-        }
-    }
+    Ok(surface
+        .drop_curve::<crate::topology::ObjectHandle>(
+            k, domain, curve, interval, approx_tol, true, None, true,
+        )?
+        .uv_curves)
 }
 
 /// The surface as upstream's `GetNaturalUVDomain` leaves it: a plane without a NURB gets

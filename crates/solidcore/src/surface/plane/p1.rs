@@ -1392,8 +1392,7 @@ impl Plane {
     /// # Errors
     ///
     /// Those of the curve evaluations and constructions;
-    /// [`SolidError::Unported`] for the general `SmSurface::DropCurve`
-    /// (`intersect.surface_drop_lib_p3`).
+    /// downstream dependencies of the general `SmSurface::DropCurve` fallback.
     pub fn drop_curve(
         &self,
         k: &Kernel,
@@ -1510,7 +1509,9 @@ impl Plane {
         // when the curve is a BSpline Curve
         if curve.is_kind_of(BSplineCurve::TYPE) {
             let Some(b_spline) = b_spline_part(curve) else {
-                return surface_drop_curve();
+                return surface_drop_curve(
+                    k, self, uv_domain, curve, interval, approx_tol, keep_all,
+                );
             };
 
             // copy and trim the original crv to the given interval
@@ -1547,7 +1548,9 @@ impl Plane {
 
                 // if clamping moves the control point - give up - pass the call along
                 if dev_from_srf_nrm_line > approx_tol {
-                    return surface_drop_curve();
+                    return surface_drop_curve(
+                        k, self, uv_domain, curve, interval, approx_tol, keep_all,
+                    );
                 }
 
                 // save the dropped control point
@@ -1581,7 +1584,7 @@ impl Plane {
         }
 
         // else pass the call along to the general DropCurve method
-        surface_drop_curve()
+        surface_drop_curve(k, self, uv_domain, curve, interval, approx_tol, keep_all)
     }
 
     // ---- coincidence ------------------------------------------------------------------
@@ -2180,12 +2183,33 @@ fn surface_drop_point(
 }
 
 /// The general `SmSurface::DropCurve`.
-fn surface_drop_curve() -> Result<PlaneDropCurve> {
-    // UNPORTED(intersect.surface_drop_lib_p3): SmSurface::DropCurve
-    Err(SolidError::unported(
-        "SmSurface::DropCurve",
-        "intersect.surface_drop_lib_p3",
-    ))
+fn surface_drop_curve(
+    k: &Kernel,
+    plane: &Plane,
+    domain: &Extent2d,
+    curve: &Curve,
+    interval: &Extent1d,
+    tolerance: f64,
+    keep_all: bool,
+) -> Result<PlaneDropCurve> {
+    // Keep the concrete Plane evaluator, but explicitly invoke the base body
+    // after its shortcut failed. The flag is restored by the snapshot lifetime.
+    let surface = Surface::from(plane.clone_exact());
+    let out = surface.drop_curve_base_with_knots::<crate::topology::ObjectHandle>(
+        k,
+        domain,
+        curve,
+        interval,
+        tolerance,
+        keep_all,
+        None,
+        &mut || Ok(()),
+    )?;
+    Ok(PlaneDropCurve {
+        max_drop_to_surf: out.max_drop_to_surf,
+        max_approx_dev: out.max_approx_dev,
+        uv_curves: out.uv_curves,
+    })
 }
 
 #[cfg(test)]

@@ -281,14 +281,14 @@ mod tests {
             None,
         )
         .unwrap_err();
-        // Live owner tolerance is now resolved. The actual next dependency is
-        // UV projection; that failure must still restore every temporary flag.
+        // General UV projection now runs. A deeper owned solver still needs
+        // its live face tolerance; that failure must restore every temporary flag.
         assert!(
             matches!(
                 error,
                 SolidError::Unported {
-                    upstream: "SmSurface::DropCurve",
-                    unit: "intersect.surface_drop_lib_p3"
+                    upstream: "SmFace::GetTolerance",
+                    unit: "topology.face_p2"
                 }
             ),
             "{error:?}"

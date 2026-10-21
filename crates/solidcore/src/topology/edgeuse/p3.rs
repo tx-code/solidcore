@@ -152,33 +152,37 @@ fn surface_drop_curve(
     interval: &Extent1d,
     approx_tol_3d: f64,
     keep_all_drop_curves: bool,
-    _record: Option<&mut DropCurveFail<ObjectHandle>>,
+    record: Option<crate::intersect::surface_drop_lib::p1::DropFailRecord<'_, ObjectHandle>>,
+    mut owned_curve: Option<(&mut Brep, EdgeId)>,
 ) -> Result<DropCurveOut> {
-    if let SurfaceKind::Plane(plane) = surface.kind() {
-        // SmSurface virtual dispatch selects SmPlane::DropCurve. Preserve its
-        // actual curve kinds (not a B-spline stand-in) and native default
-        // bCreatingUVTrimCurve=TRUE, SmSurface.h::DropCurve.
-        let dropped = plane.drop_curve(
-            k,
-            domain,
-            curve,
-            interval,
-            approx_tol_3d,
-            keep_all_drop_curves,
-            true,
-        )?;
-        return Ok(DropCurveOut {
-            max_dist_to_surf: dropped.max_drop_to_surf,
-            max_approx_dev: dropped.max_approx_dev,
-            uv_curves: dropped.uv_curves,
-        });
-    }
-    // The plane override does not write the optional failure record.
-    // UNPORTED(intersect.surface_drop_lib_p3): SmSurface::DropCurve
-    Err(SolidError::unported(
-        "SmSurface::DropCurve",
-        "intersect.surface_drop_lib_p3",
-    ))
+    let dropped = surface.drop_curve_with_knots(
+        k,
+        domain,
+        curve,
+        interval,
+        approx_tol_3d,
+        keep_all_drop_curves,
+        record,
+        true,
+        &mut || {
+            if let Some((b, edge)) = owned_curve.as_mut() {
+                let curve = b
+                    .edge_mut(*edge)?
+                    .curve
+                    .as_mut()
+                    .ok_or_else(|| null("DropCurve: edge without curve"))?;
+                if curve.is_kind_of(crate::curve::curve::p2::BSPLINE_CURVE_TYPE) {
+                    crate::curve::validity::materialize_bspline(k, curve)?;
+                }
+            }
+            Ok(())
+        },
+    )?;
+    Ok(DropCurveOut {
+        max_dist_to_surf: dropped.max_drop_to_surf,
+        max_approx_dev: dropped.max_approx_dev,
+        uv_curves: dropped.uv_curves,
+    })
 }
 
 /// `pSurface->GetSingularities() != SM_SS_NONE` (the virtual, without pole outputs; it
@@ -577,7 +581,12 @@ pub fn create_uv_trim_curve(
                     &edge_domain,
                     zone_tol,
                     false,
-                    Some(&mut *fail),
+                    Some(crate::intersect::surface_drop_lib::p1::DropFailRecord {
+                        fail,
+                        surface: Some(surface_handle),
+                        curve: Some(curve_handle),
+                    }),
+                    Some((b, e)),
                 ))?;
                 l_ok = r.is_some();
                 if let Some(out) = r {
@@ -631,6 +640,7 @@ pub fn create_uv_trim_curve(
                     &new_ivl,
                     zone_tol,
                     true,
+                    None,
                     None,
                 ))?;
                 l_ok = r.is_some();
@@ -1175,6 +1185,7 @@ fn two_singular_end_points(
         zone_tol,
         true,
         None,
+        None,
     ))?;
     let mut l_result = false;
     // when 1st half dropped successfully - carry on
@@ -1191,6 +1202,7 @@ fn two_singular_end_points(
                 &second_half,
                 zone_tol,
                 true,
+                None,
                 None,
             ))?;
             // when 2nd half dropped successfully - carry on

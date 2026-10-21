@@ -52,8 +52,8 @@
 //! - **`DropAndTrimCurve`.** The record's `pUVCurvesArg` (the caller's output array)
 //!   has no handle; it stays `None`. The surface and curve handles the record keeps
 //!   come with the record ([`DropFailRecord`]).
-//! - **Unported callees.** `SmSurfaceDropCurve` (`SetCurveIsOnSurface`, `DoTrace`;
-//!   `intersect.surface_drop_curve`) return [`SolidError::Unported`].
+//! - **Trace bridge.** `DropAndTrimCurve` invokes the real `SurfaceDropCurve`
+//!   algorithm; its unresolved downstream cache/solver operations stay explicit.
 //! - **Not ported here.** The `SM_DEBUG_CODE` blocks, `Dump`, `Draw`,
 //!   `my_AssertAndDrawDropCurve` (graphics) and the `SM_ASSERT`s.
 
@@ -918,19 +918,39 @@ struct Trace {
 /// `SmSurfaceDropCurve sDrop(this, domain, curve, interval);
 /// sDrop.SetCurveIsOnSurface(on_surface); sDrop.DoTrace(ctx, tol, NULL, NULL, ...)`.
 fn drop_curve_trace(
-    _k: &Kernel,
-    _surface: &Surface,
-    _uv_domain: &Extent2d,
-    _curve: &Curve,
-    _interval: &Extent1d,
-    _curve_is_on_surface: bool,
-    _approx_tol_3d: Option<f64>,
+    k: &Kernel,
+    surface: &Surface,
+    uv_domain: &Extent2d,
+    curve: &Curve,
+    interval: &Extent1d,
+    curve_is_on_surface: bool,
+    approx_tol_3d: Option<f64>,
 ) -> Result<Trace> {
-    // UNPORTED(intersect.surface_drop_curve): SmSurfaceDropCurve::DoTrace
-    Err(SolidError::unported(
-        "SmSurfaceDropCurve::DoTrace",
-        "intersect.surface_drop_curve",
-    ))
+    use crate::intersect::surface_drop_curve::SurfaceDropCurve;
+    use crate::intersect::surface_tracer::tracer_surface_cache;
+    use crate::topology::ObjectHandle;
+    let mut tracer = SurfaceDropCurve::new(surface, uv_domain, curve, interval)?;
+    tracer.set_curve_is_on_surface(curve_is_on_surface);
+    let mut cache = tracer_surface_cache::<ObjectHandle>(k, &tracer.base)?;
+    let out = tracer.drop_trace(k, &mut cache, approx_tol_3d, None)?;
+    // Native DoTrace returns SmBSplineCurve*. Preserve the generated UV curves;
+    // reject a broken producer contract rather than truncating paired arrays.
+    let uv_curves = out
+        .uv_curves
+        .into_iter()
+        .map(|uv| crate::curve::validity::bspline_base(&uv).cloned())
+        .collect::<Result<Vec<_>>>()?;
+    if uv_curves.len() != out.max_drop_dists.len() || uv_curves.len() != out.deviations.len() {
+        return Err(SolidError::invalid_input(
+            "intersect::surface_drop_lib::drop_curve_trace",
+            "unpaired drop diagnostics",
+        ));
+    }
+    Ok(Trace {
+        uv_curves,
+        max_drop_dists: out.max_drop_dists,
+        deviations: out.deviations,
+    })
 }
 
 /// The outputs of [`Surface::drop_iso_curve`].
@@ -966,8 +986,8 @@ impl Surface {
     ///
     /// # Errors
     ///
-    /// Those of the trace ([`SolidError::Unported`] until
-    /// `intersect.surface_drop_curve` is ported).
+    /// Those of the real trace; unresolved downstream geometry/cache operations
+    /// remain explicit [`SolidError::Unported`] dependencies.
     pub fn drop_and_trim_curve<O: SolutionObject>(
         &self,
         k: &Kernel,
@@ -1072,6 +1092,28 @@ impl Surface {
         start_uv: Point2,
         approx_tol_3d: f64,
     ) -> Result<IsoDrop> {
+        self.drop_iso_curve_with_knots(
+            uv_domain,
+            curve,
+            interval,
+            start_uv,
+            approx_tol_3d,
+            &mut || Ok(()),
+        )
+    }
+
+    // Native GetKnots is const but may create the *owned* analytic NURB. Scoped
+    // model bridges supply that effect before the borrowed numerical query;
+    // ordinary value callers retain the existing non-owning interface.
+    pub(crate) fn drop_iso_curve_with_knots(
+        &self,
+        uv_domain: &Extent2d,
+        curve: &Curve,
+        interval: &Extent1d,
+        start_uv: Point2,
+        approx_tol_3d: f64,
+        curve_knots: &mut impl FnMut() -> Result<()>,
+    ) -> Result<IsoDrop> {
         let one_deg = 1.0 * PI / 180.0;
 
         // Check Curve Tangent == one of Surface 1st parametric derivatives
@@ -1162,6 +1204,7 @@ impl Surface {
         }
 
         // get Curve knots - trim them to the input interval range
+        curve_knots()?;
         let (mut knots, _) = curve.knots(None)?;
         while knots
             .first()
@@ -1375,7 +1418,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_and_trim_is_unported() {
+    fn drop_and_trim_reaches_polymorphic_iso_cache_dependency() {
         let s = plane();
         let c = Curve::from(crate::curve::line::Line::from_points(
             Vec3::new(0.0, 0.5, 0.0),
@@ -1392,6 +1435,15 @@ mod tests {
             false,
             None,
         );
-        assert!(matches!(r, Err(SolidError::Unported { .. })));
+        assert!(
+            matches!(
+                r,
+                Err(SolidError::Unported {
+                    upstream: "SmPlane::CreateIsoParametricCurve",
+                    unit: "surface.surface_cache_p1"
+                })
+            ),
+            "{r:?}"
+        );
     }
 }

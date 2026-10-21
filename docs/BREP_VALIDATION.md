@@ -581,3 +581,62 @@ runtime topology capability does not qualify general STEP import or the full SDK
 cargo build --locked -p solidcore --example brep_validation_probe
 python scripts/brep_batch_subtopology_compare.py --cpp <validation-observer> --rust bin/debug/examples/brep_validation_probe.exe --receipt bin/brep-batch-subtopology.local.json
 ```
+
+## Complete-curve projection and owned knot effects
+
+`intersect::surface_drop_lib::p3` implements the maintained fork's actual
+`SmSurface::DropCurve` body (`SmSurfaceDropLib.cpp`4194--6255), with virtual Plane
+dispatch. This is separate from `DropAndTrimCurve`/`DoTrace`: a complete projection
+can return two seam images, or no curves when the walk crosses a boundary/pole.
+The existing tracer and fillet callers now call the shared implementation; the
+previous `DropAndTrimCurve` bridge to `DoTrace` is also wired.
+Plane's failed control-polygon shortcut explicitly calls the base body while
+retaining its concrete evaluator; re-entering virtual Plane dispatch would recurse.
+
+The base path retains domain fallback/containment, original curve intervals,
+per-axis UV tolerances, duplicate/seam start-point ordering, pole treatment,
+iso shortcuts, curve-cache spans, six-try midpoint subdivision, native short-span
+acceptance, boundary tangent/polygon handling, sampled normal-distance/deviation
+checks, and all four failure-record scopes. It preserves the source's repeated
+X-domain degeneracy test and signed-distance filtering quirks: the postpass only
+culls when more than one curve exists and tests distance strictly below tolerance.
+Those are compatibility behavior, not new repair or import-quality allowances.
+
+Candidates are owned values and are released on error. Temporary out-of-bounds
+evaluation uses exact concrete snapshots; caller geometry/parameters are not
+normalized. The model bridge materializes the original edge curve's lazy NURB
+at the native `DropIsoCurve::GetKnots` or curve-cache query site, including a
+failed walk. It does not move that effect ahead of domain/start-point rejection.
+Source ownership handles remain in failure reports. Borrowed standalone calls
+cannot mutate an external owner's cache. Shared cache-manager checkout, persistent
+cache aliases, and all owned solver-context paths remain separate requirements.
+Value-only gap-query errors propagate where failed native output variables are
+inaccessible; no zero-error success is invented. Iterative subdivision has an
+explicit resource bound and rejects excess work rather than relaxing tolerance.
+
+The direct SDK observer uses real unowned raw B-spline and Plane receivers:
+flat/saddle patches, a rational cylinder with two seam images, a conical pole,
+nonlinear curves, clipped intervals, subdomains, outside/fallback domains, and
+small/large/translated coordinates. It compares status, failure identity, UV
+degree/dimension/knots/multiplicities/sample order, sampled gap/deviation and
+temporary flags at `1e-9` relative with no absolute floor. Independent analytic
+checks establish original parameters and the two cylinder seam sides. These are
+synthetic operation comparisons, not imported-model counts, continuous bounds,
+complete native BRep validity, or promotion of the base FFI unit's green gate.
+
+`DoTrace` still encounters the cache's explicit Plane-isocurve storage dependency
+(`SmLine` virtual behavior cannot be kept in its current `BSplineCurve`-only
+array). Deeper owned tolerance resolution is also incomplete. Existing cleanup
+regressions check the actual next dependency while retaining model flag/owner
+restoration, instead of continuing to expect the removed entrypoint stubs.
+The traced B-spline cases also reach the pre-existing classification-reset
+bridge (`intersect.curve_class_p4`), whose geometry handles still lack a complete
+resolver. The NLib rational-curve-to-UV helper still lacks its originating Kernel
+parameter and remains an explicit projection dependency; it must not manufacture
+a default context. These are outstanding migration work, not successful cases.
+
+```text
+cargo build --locked -p solidcore --example brep_drop_curve_probe --example brep_validation_probe
+python scripts/build_brep_constructor_reference.py --source <cpp-fork> --sdk <existing-sdk> --toolchain-env <local-env> --output bin/drop-curve-reference --probe drop_curve
+python scripts/brep_drop_curve_compare.py --cpp bin/drop-curve-reference/brep-drop_curve-reference.exe --rust bin/debug/examples/brep_drop_curve_probe.exe --receipt bin/brep-drop-curve.local.json
+```

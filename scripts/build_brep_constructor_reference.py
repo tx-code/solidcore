@@ -18,7 +18,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--probe',
                         choices=['constructor', 'validation', 'notification', 'surface', 'curve',
-                                 'curve_validation', 'edge_queries'], default='constructor')
+                                 'curve_validation', 'edge_queries', 'drop_curve'], default='constructor')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)

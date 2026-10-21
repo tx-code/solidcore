@@ -1549,13 +1549,13 @@ mod tests {
     }
 
     #[test]
-    fn leading_point_defers_on_classification() {
+    fn leading_coincident_point_expands_to_the_full_projected_range() {
         let k = Kernel::default();
         let mut sols = SolutionArray::new();
         let mut s = range(0.2, 0.2);
         s.solution_type = SolutionType::SingleValue;
         sols.add(&s);
-        let e = global_curve_intersect_combine_solutions(
+        global_curve_intersect_combine_solutions(
             &k,
             &plane(),
             &Extent2d::from_bounds(0.0, 0.0, 1.0, 1.0),
@@ -1565,8 +1565,12 @@ mod tests {
             &CombineContext::default(),
             &mut sols,
         )
-        .unwrap_err();
-        assert!(e.is_unported());
+        .unwrap();
+        assert_eq!(sols.len(), 1);
+        let retained = sols.get_at(0).unwrap();
+        assert_eq!(retained.solution_type, SolutionType::RangeOfValues);
+        assert_eq!(retained.start.parameters[0], 0.);
+        assert_eq!(retained.end.parameters[0], 1.);
     }
 
     #[test]

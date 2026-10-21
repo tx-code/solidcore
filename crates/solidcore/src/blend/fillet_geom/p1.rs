@@ -148,8 +148,7 @@
 //!   mate's gap too) and the cached gaps of their vertex uses. The examine routine
 //!   then drops the new rail onto the solver's offset surface with its offset distance
 //!   at `0` over its `GetNaturalUVDomain`: `SmSurface::DropCurve`
-//!   (`intersect.surface_drop_lib_p3`) is a call stub, so it returns
-//!   [`SolidError::Unported`] there; the tail behind them (a failed drop
+//!   (`intersect.surface_drop_lib_p3`) now executes; its tail (a failed drop
 //!   skips the rail, a single UV curve becomes the mate edge use's UV curve through
 //!   `SetUVCurve` with its defaults) is ported.
 //! - **Difftest coverage.** The shim builds plain `SmBSplineSurface` / `SmBSplineCurve`
@@ -3419,18 +3418,26 @@ fn offset_natural_uv_domain(surface: &OffsetSurface) -> Extent2d {
 /// `intersect.surface_drop_lib_p3`): the out-parameters `(rdMaxDistToSurf,
 /// rdDeviation, rUVCurves)`.
 fn offset_surface_drop_curve(
-    _k: &Kernel,
-    _surface: &OffsetSurface,
-    _drop_domain: &Extent2d,
-    _curve_3d: &Curve,
-    _interval: &Extent1d,
-    _dist_tol: f64,
+    k: &Kernel,
+    surface: &OffsetSurface,
+    drop_domain: &Extent2d,
+    curve_3d: &Curve,
+    interval: &Extent1d,
+    dist_tol: f64,
 ) -> Result<(f64, f64, Vec<Curve>)> {
-    // UNPORTED(intersect.surface_drop_lib_p3): SmSurface::DropCurve
-    Err(SolidError::unported(
-        "SmSurface::DropCurve",
-        "intersect.surface_drop_lib_p3",
-    ))
+    // The offset receiver retains its exact basis/owner, not an approximated BSD.
+    let receiver = Surface::from(surface.surface.clone_for_evaluation(0)?);
+    let r = receiver.drop_curve::<crate::topology::ObjectHandle>(
+        k,
+        drop_domain,
+        curve_3d,
+        interval,
+        dist_tol,
+        true,
+        None,
+        true,
+    )?;
+    Ok((r.max_drop_to_surf, r.max_approx_dev, r.uv_curves))
 }
 
 /// `JoinVertsByCapping`: when the end of `uv_curve1` (at its max parameter, or min when
@@ -4018,7 +4025,7 @@ mod tests {
     }
 
     #[test]
-    fn examine_copies_the_good_row_rebuilds_the_rail_and_stops_at_the_drop() {
+    fn examine_rebuilds_and_drops_the_rail_then_rejects_missing_second_surface() {
         use crate::blend::fillet_custom_solver::SurfaceId;
         let k = Kernel::default();
         let (mut fb, [g0, g1], [start_fv, end_fv], eu, vu) = corner_for_examine(&k);
@@ -4073,14 +4080,16 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SolidError::Unported {
-                    upstream: "SmSurface::DropCurve",
-                    unit: "intersect.surface_drop_lib_p3"
+                SolidError::Upstream {
+                    operation: OP_EXAMINE,
+                    code: 1006,
+                    ..
                 }
             ),
             "{err:?}"
         );
-        // the offset distance was zeroed for the drop and restored
+        // The first drop now completes. The second rail is rebuilt before this
+        // fixture's absent second solver surface causes NER; offset 0 restores.
         assert_eq!(
             solver.solver.surfaces[0]
                 .as_ref()
@@ -4110,7 +4119,7 @@ mod tests {
             curve.evaluate_point(ivl.max()).unwrap(),
             Point3::new(3.5, 0.0, 0.0)
         ));
-        assert!(fb.brep().edge(rails[1].unwrap()).unwrap().curve.is_none());
+        assert!(fb.brep().edge(rails[1].unwrap()).unwrap().curve.is_some());
         // the SetCurve notification cleared the cached state of rail 0's uses
         let rec = fb.brep().edgeuse(eu).unwrap();
         assert!(rec.uv_trim_curve.is_none());

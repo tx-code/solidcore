@@ -977,13 +977,24 @@ impl FilletCorner {
             .fillet_edge(fe_on_extended_edge)?
             .original_face()
             .ok_or_else(|| SolidError::null_pointer(OP_3X2))?;
-        let _surface = env.target.face(orig_face)?.surface.as_ref();
-        let _ = (&curve1, self.approx_tol_3d);
-        // UNPORTED(intersect.surface_drop_lib_p3): SmSurface::DropCurve
-        let uv_curves: Vec<BSplineCurve> = Err(unported(
-            "SmSurface::DropCurve",
-            "intersect.surface_drop_lib_p3",
-        ))?;
+        let surface = env
+            .target
+            .face(orig_face)?
+            .surface
+            .as_ref()
+            .ok_or_else(|| SolidError::null_pointer(OP_3X2))?;
+        let uv_curves = surface
+            .drop_curve::<crate::topology::ObjectHandle>(
+                env.k,
+                &surface.natural_uv_domain(),
+                &curve1,
+                &curve1.natural_interval(),
+                self.approx_tol_3d,
+                true,
+                None,
+                true,
+            )?
+            .uv_curves;
         if uv_curves.len() != 1 {
             return Err(SolidError::sm_err(OP_3X2)); // Unknown problem
         }
@@ -995,7 +1006,7 @@ impl FilletCorner {
         let mate_eu =
             eu1::mate(env.pseudo.brep(), prim)?.ok_or_else(|| SolidError::null_pointer(OP_3X2))?;
         env.pseudo
-            .set_edgeuse_uv_curve(mate_eu, Some(Curve::from(new_ps_curve)), true, true)?;
+            .set_edgeuse_uv_curve(mate_eu, Some(new_ps_curve), true, true)?;
 
         // Create a 3-sided corner patch
         self.create_corner_patch_default(env)

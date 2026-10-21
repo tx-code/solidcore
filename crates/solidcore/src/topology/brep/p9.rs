@@ -40,7 +40,7 @@ use crate::kernel::Kernel;
 use crate::math::{Point3, Vec3, EFF_ZERO_PARAM};
 use crate::nurbs::b_spline_surface::p1::SurfParamType;
 use crate::nurbs::b_spline_surface_n_lib::p2::OrientType;
-use crate::surface::surface::{Surface, SurfaceKind};
+use crate::surface::surface::Surface;
 use crate::topology::edge;
 use crate::topology::vertex;
 use crate::topology::vertexuse;
@@ -2117,19 +2117,13 @@ fn drop_curve(
     interval: &Extent1d,
     tolerance: f64,
 ) -> Result<(Vec<Curve>, f64, f64)> {
-    if let SurfaceKind::Plane(plane) = surface.kind() {
-        // The real SmPlane override; its generic fallback retains the p3 deferral.
-        let dropped = plane.drop_curve(k, domain, curve, interval, tolerance, true, true)?;
-        return Ok((
-            dropped.uv_curves,
-            dropped.max_drop_to_surf,
-            dropped.max_approx_dev,
-        ));
-    }
-    // UNPORTED(intersect.surface_drop_lib_p3): SmSurface::DropCurve
-    Err(SolidError::unported(
-        "SmSurface::DropCurve",
-        "intersect.surface_drop_lib_p3",
+    let dropped = surface.drop_curve::<crate::topology::ObjectHandle>(
+        k, domain, curve, interval, tolerance, true, None, true,
+    )?;
+    Ok((
+        dropped.uv_curves,
+        dropped.max_drop_to_surf,
+        dropped.max_approx_dev,
     ))
 }
 

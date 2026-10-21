@@ -270,13 +270,14 @@ fn radial_dependency_error_removes_the_temporary_edge_before_propagating() {
             Some(vertices[0]),
         )
         .unwrap_err();
-    // The planar virtual drop now runs; the radial fallback reaches real DoTrace.
+    // Real DoTrace now runs; its cache still cannot retain polymorphic Plane
+    // iso curves (SmLine) in the current BSplineCurve-only storage.
     assert!(
         matches!(
             error,
             SolidError::Unported {
-                upstream: "SmSurfaceDropCurve::DoTrace",
-                unit: "intersect.surface_drop_curve"
+                upstream: "SmPlane::CreateIsoParametricCurve",
+                unit: "surface.surface_cache_p1"
             }
         ),
         "{error:?}"

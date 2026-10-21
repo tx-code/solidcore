@@ -128,7 +128,8 @@ impl SolutionObject for CurveHandle {
 
 /// The native object domain used by solution identity, independent of the
 /// interval currently being queried or recursively subdivided.
-type ParameterIntervalLookup<'a, O> = dyn Fn(&Solution<O>, usize) -> Result<Option<Extent1d>> + 'a;
+pub(crate) type ParameterIntervalLookup<'a, O> =
+    dyn Fn(&Solution<O>, usize) -> Result<Option<Extent1d>> + 'a;
 
 /// Keeps the caller's actual owner lookup scoped to a split-solution merge.
 struct CoincidenceMergeSolver<'a, O> {

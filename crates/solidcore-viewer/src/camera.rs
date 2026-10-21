@@ -122,7 +122,9 @@ impl Default for Camera {
     fn default() -> Self {
         Self {
             yaw: 0.8,
-            pitch: 0.65,
+            // A lower oblique start keeps tapered sidewalls visible rather
+            // than looking almost along a common 45-degree cone generator.
+            pitch: 0.45,
             distance: 3.8,
         }
     }
@@ -207,5 +209,69 @@ mod tests {
             assert!(a.pixel.distance(center.pixel) < 1e-8);
             assert!(frame.ray(DVec2::new(0., 0.)).is_none());
         }
+    }
+
+    #[test]
+    fn default_and_fit_show_public_conical_band_thickness_and_its_actual_native_side() {
+        use crate::scene::public_controls::scene;
+        use solidcore::{math::Vec3 as NativePoint, EntityRef};
+
+        const BAND: &[u8] =
+            include_bytes!("../../solidcore-step-native/tests/fixtures/cone-band.step");
+        let mut scene = scene(BAND);
+        let side_record = scene
+            .owner
+            .source()
+            .source()
+            .records()
+            .iter()
+            .position(|record| record.id == "182")
+            .unwrap();
+        let side = *scene.owner.faces().get(&side_record).unwrap();
+        let mut camera = Camera::default();
+        // Independent source truth is r(z)=2+z for 0<=z<=4 mm. On its
+        // near-side 45-degree meridian, these are the bottom/top boundaries
+        // and an interior point, not samples copied from the display mesh.
+        let sqrt_two = 2_f64.sqrt();
+        let bottom = DVec3::new(sqrt_two, sqrt_two, 0.);
+        let top = DVec3::new(3. * sqrt_two, 3. * sqrt_two, 4.);
+        let interior = DVec3::new(2. * sqrt_two, 2. * sqrt_two, 2.);
+        for after_fit in [false, true] {
+            if after_fit {
+                camera.orbit(110., -60.);
+                camera.zoom(4.);
+                camera.fit();
+            }
+            for scale in [1., 2.] {
+                let frame = camera.frame(
+                    egui::Rect::from_min_max(egui::pos2(300., 0.), egui::pos2(1180., 800.)),
+                    scale,
+                    [(1180. * scale) as u32, (800. * scale) as u32],
+                );
+                let normalized = |point| (point - scene.center_mm) / scene.radius_mm;
+                let bottom_pixel = frame.project(normalized(bottom)).unwrap().pixel;
+                let top_pixel = frame.project(normalized(top)).unwrap().pixel;
+                assert!(frame.contains(bottom_pixel) && frame.contains(top_pixel));
+                // This is a visibility criterion in screen space, independent
+                // of native geometric precision. The old near-generator view
+                // collapsed the entire side to less than this 2% height.
+                assert!(bottom_pixel.y - top_pixel.y >= 0.02 * f64::from(frame.height));
+
+                let pixel = frame.project(normalized(interior)).unwrap().pixel;
+                let (origin, direction) = frame.ray(pixel).unwrap();
+                let origin_mm = scene.center_mm + origin * scene.radius_mm;
+                let native = |point: DVec3| NativePoint::new(point.x, point.y, point.z);
+                let hit = scene
+                    .owner
+                    .ray_hit(native(origin_mm), native(direction), 1e-6, None)
+                    .unwrap()
+                    .unwrap();
+                // A cap occluding this pixel would fail the face and point
+                // truth, even if a misleading projected outline looked wide.
+                assert_eq!(hit.entity, EntityRef::Face(side));
+                assert!(hit.point_mm.distance(native(interior)) < 1e-6);
+            }
+        }
+        assert_eq!(scene.owner.source().source().bytes(), BAND);
     }
 }

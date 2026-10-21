@@ -323,7 +323,7 @@ impl<O: ClassObject> CurveClassification<O> {
                 solutions.push(sol);
             }
         } else {
-            let found = working.global_curve_intersect(
+            let found = working.global_curve_intersect_with_parameter_intervals(
                 k,
                 &self.interval(),
                 target,
@@ -332,6 +332,24 @@ impl<O: ClassObject> CurveClassification<O> {
                 &CurveIntersectOptions {
                     handles: [Some(Side::Source), Some(Side::Target)],
                     ..CurveIntersectOptions::default()
+                },
+                &|solution, parameter| {
+                    // SmCurveClass.cpp::IntersectEdges passes the prepared
+                    // working/target SmCurve objects, not their source edges.
+                    // SmSolutionArray.cpp:730--828 therefore reads the complete
+                    // defining curves' natural domains when split coincidence
+                    // answers are compared. Keep the classification/edge query
+                    // restrictions above separate, including closed seam ends.
+                    if let Some((index, 0)) =
+                        solution.object_index_for_parameter_index(parameter)?
+                    {
+                        match solution.objects.get(index).copied().flatten() {
+                            Some(Side::Source) => return Ok(Some(working.natural_interval())),
+                            Some(Side::Target) => return Ok(Some(target.natural_interval())),
+                            None => {}
+                        }
+                    }
+                    solution.parameter_interval(parameter)
                 },
             )?;
             solutions.extend(

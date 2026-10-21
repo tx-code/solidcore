@@ -142,7 +142,7 @@ unit dependencies, defining curve parameter mappings, directed loop occurrences,
 shared native vertex/edge identities, and computational chart-cut correspondence.
 `Candidate::edges()` and `Imported::edges()` return every target piece for each
 source edge, ordered by the original defining-curve parameter. Strict planar
-certification requires exactly one piece. General two-ring cylindrical chart
+certification requires exactly one piece. General two-ring cylindrical/conical chart
 normalization can partition a closed circle without changing its complete
 analytic/NURBS definition or moving either original source vertex. Cuts are
 planned globally before native construction and reused by all neighboring faces;
@@ -152,6 +152,24 @@ Source loop receipts retain the original unsplit directed source boundaries.
 Additional full-curve copies are charged before copying; unsplit curves move
 without an added copy. Material and trim checkpoints account for every piece and
 derived vertex. This does not grant general continuous qualification.
+
+The conical two-ring code path applies that same chart mechanism to two complete
+circular boundaries on the positive-radius sheet `R(h)=r0+tan(alpha)*h`, retaining
+the signed source semi-angle and its declared unit conversion. The two seam ends
+use their distinct support radii; a reference radius of zero is allowed when both
+complete rings and the band stay off the pole. The conservative whole-circle
+support screen includes centre eccentricity, radius mismatch, and both radial
+and slope-dependent axial effects of circle-plane tilt. Its rejection means the
+selected support budget was not established by that screen, not that the source
+declarations were rewritten or the source geometry proved invalid. A closed
+surface-model carrier remains a surface model and is refused by this material-only
+constructor. An ordinary `FACE_BOUND`-only region retains the source checker's
+explicit region-evidence deferral even when types, units, ownership and dependency
+closure pass; its preserved source role must not be promoted to overall `Checked`
+or a material claim. Public controls cover aligned/split rings, source roles,
+equivalent apex references, axis and direction changes, units and budgets, with
+independent analytic material truth. This code path does not grant a continuous
+general certificate or accepted import.
 
 LINE, conics, trimmed conics and supported rational B-splines are materialized as
 defining native curves. Supported receivers retain their actual plane, cylinder,
@@ -228,7 +246,8 @@ succeeds. Revalidation or a later owning UV query invalidates both receipts.
 
 The CLI selects this checkpoint with `--measure-material-accuracy VALUE`. It keeps
 `accepted_import:false` and distinguishes numerical observations from continuous
-error bounds. Public box, explicit-seam cylinder, phase-mismatched two-ring cylinder and annular-cylinder tests use
+error bounds. Public box, explicit-seam cylinder, phase-mismatched two-ring cylinder,
+positive-sheet conical band and annular-cylinder tests use
 independent analytic area/volume/centroid truth. They do not qualify arbitrary
 general sources or production tolerances.
 

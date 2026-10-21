@@ -50,6 +50,7 @@ use crate::curve::curve::p1::refine_cc_solutions;
 use crate::curve::curve::p2::{at, CciGlobalSolver, Curve};
 use crate::curve::curve::p4::{analytic_curve_intersect, point_or_undef, AnalyticOperand};
 use crate::curve::curve::p5::make_curve_cache;
+use crate::curve::curve::p6::ParameterIntervalLookup;
 use crate::curve::curve_cache::CurveCache;
 use crate::error::{ignored, Result, SolidError};
 use crate::geom::extent1d::Extent1d;
@@ -204,6 +205,32 @@ impl Curve {
         other_interval: &Extent1d,
         dist_tol: f64,
         opts: &CurveIntersectOptions<O>,
+    ) -> Result<SolutionArray<O>> {
+        self.global_curve_intersect_with_parameter_intervals(
+            k,
+            interval,
+            other,
+            other_interval,
+            dist_tol,
+            opts,
+            &Solution::parameter_interval,
+        )
+    }
+
+    /// The same ordered intersector with the caller's actual solution-object
+    /// domains available to recursive coincidence merges. A prepared curve pair
+    /// resolves its complete defining curves; a topology-edge caller resolves
+    /// its original edge restrictions. Query/split intervals are not substitutes.
+    /// The public opaque entry point retains its original dependency deferrals.
+    pub(crate) fn global_curve_intersect_with_parameter_intervals<O: SolutionObject>(
+        &self,
+        k: &Kernel,
+        interval: &Extent1d,
+        other: &Self,
+        other_interval: &Extent1d,
+        dist_tol: f64,
+        opts: &CurveIntersectOptions<O>,
+        parameter_interval: &ParameterIntervalLookup<'_, O>,
     ) -> Result<SolutionArray<O>> {
         let [h_this, h_other] = opts.handles;
         let same_curve = core::ptr::eq(self, other);
@@ -461,7 +488,7 @@ impl Curve {
             let mut needs_more_work = true; // GlobalCoincidenceChecker() might set it to False.
             if !opts.skip_global_coincidence_check {
                 // execute search for coincidence
-                let r = self.global_coincidence_checker(
+                let r = self.global_coincidence_checker_with_parameter_intervals(
                     k,
                     interval,
                     other,
@@ -469,6 +496,11 @@ impl Curve {
                     dist_tol,
                     false,
                     opts.handles,
+                    // Reborrow the same scoped dyn lookup for p6's existing
+                    // sized callback interface. The large intersector is now
+                    // instantiated only per O, not per caller closure type;
+                    // invocation remains lazy at the original merge comparison.
+                    &parameter_interval,
                 )?;
                 needs_more_work = r.additional_work_needed;
                 sols.reset();
@@ -1487,5 +1519,242 @@ mod tests {
             Ok(s) => assert!(!s.is_empty()),
             Err(e) => assert!(e.is_unported()),
         }
+    }
+
+    fn closed_cubic() -> Curve {
+        // Exact de Casteljau split at u=1/2 of the ONE polynomial with
+        // P0=P3=0, P1=(3,0,0), P2=(0,4,0). Two spans preserve that independent
+        // Bernstein truth while preventing the single-leaf intersector shortcut
+        // from answering before recursive coincidence comparison is reached.
+        let mut nurb = allocate_nurb_curve(6, 3, 10).unwrap();
+        for (point, [x, y, z]) in nurb.cpts_mut().iter_mut().zip([
+            [0., 0., 0.],
+            [1.5, 0., 0.],
+            [1.5, 1., 0.],
+            [1.125, 1.5, 0.],
+            [0.75, 2., 0.],
+            [0., 2., 0.],
+            [0., 0., 0.],
+        ]) {
+            point.x = x;
+            point.y = y;
+            point.z = z;
+            point.w = -f64::MAX;
+        }
+        nurb.knots_mut()
+            .copy_from_slice(&[2., 2., 2., 2., 4., 4., 4., 6., 6., 6., 6.]);
+        Curve::from(BSplineCurve::from_nurb(nurb, 3, false))
+    }
+
+    #[test]
+    fn closed_prepared_pair_keeps_natural_domains_through_coincidence_and_seam_merge() {
+        use std::cell::{Cell, RefCell};
+        let kernel = Kernel::default();
+        let first = closed_cubic();
+        let mut second = first.clone();
+        second
+            .edit_parameterization(&kernel, &Extent1d::from_min_max(20., 80.))
+            .unwrap();
+        let natural = [first.natural_interval(), second.natural_interval()];
+        let query = Extent1d::from_min_max(2., 4.);
+        assert_ne!(query, natural[0]);
+        let calls = [Cell::new(0usize), Cell::new(0usize)];
+        let requests = RefCell::new(Vec::new());
+        let resolve = |solution: &Solution<H>, parameter| -> Result<Option<Extent1d>> {
+            requests.borrow_mut().push(parameter);
+            let Some((index, 0)) = solution.object_index_for_parameter_index(parameter)? else {
+                return solution.parameter_interval(parameter);
+            };
+            let side = match solution.objects.get(index).copied().flatten() {
+                Some(H(0)) => 0,
+                Some(H(1)) => 1,
+                _ => return solution.parameter_interval(parameter),
+            };
+            calls[side].set(calls[side].get() + 1);
+            Ok(Some(natural[side]))
+        };
+        let found = first
+            .global_curve_intersect_with_parameter_intervals(
+                &kernel,
+                &query,
+                &second,
+                &natural[1],
+                1e-6,
+                &opts(),
+                &resolve,
+            )
+            .unwrap();
+        // Distinct contiguous source ranges fail comparison in slot 0. The
+        // native comparator is lazy and must not read slot 1 after that return.
+        assert!(
+            calls[0].get() > 0 && calls[1].get() == 0,
+            "actual callback counts={:?}, request order={:?}",
+            [calls[0].get(), calls[1].get()],
+            requests.borrow()
+        );
+        assert!(!found.is_empty());
+        let mut ranges = Vec::new();
+        for solution in found.as_slice() {
+            assert_eq!(&solution.objects[..2], &opts().handles);
+            let values = if solution.solution_type == SolutionType::RangeOfValues {
+                ranges.push((solution.start.parameters[0], solution.end.parameters[0]));
+                vec![solution.start, solution.end]
+            } else {
+                vec![solution.start]
+            };
+            for end in values {
+                let t = end.parameters[0];
+                let other_t = end.parameters[1];
+                assert!(query.contains_value(t, 1e-6));
+                // Independent Bernstein polynomial truth for P0=P3=0,
+                // P1=(3,0,0), P2=(0,4,0). The second basis uses [20,80].
+                let u = (t - 2.) / 4.;
+                let expected = Vec3::new(9. * (1. - u) * (1. - u) * u, 12. * (1. - u) * u * u, 0.);
+                assert!(first.evaluate_point(&kernel, t).unwrap().distance(expected) < 1e-6);
+                assert!(
+                    second
+                        .evaluate_point(&kernel, other_t)
+                        .unwrap()
+                        .distance(expected)
+                        < 1e-6
+                );
+                assert!(
+                    (other_t - (20. + 60. * u)).abs() < 1e-5,
+                    "a closed-seam alias survived: {t}, {other_t}"
+                );
+            }
+        }
+        ranges.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert!((ranges.first().unwrap().0 - query.min()).abs() < 1e-6);
+        assert!((ranges.last().unwrap().1 - query.max()).abs() < 1e-6);
+        for pair in ranges.windows(2) {
+            assert!(
+                (pair[0].1 - pair[1].0).abs() < 1e-6,
+                "coincident range gap or duplicate"
+            );
+        }
+        assert!(matches!(
+            first.global_curve_intersect(&kernel, &query, &second, &natural[1], 1e-6, &opts()),
+            Err(SolidError::Unported {
+                upstream: "SmCurve::GetNaturalInterval",
+                ..
+            })
+        ));
+        let failed = first.global_curve_intersect_with_parameter_intervals(
+            &kernel,
+            &query,
+            &second,
+            &natural[1],
+            1e-6,
+            &opts(),
+            &|_, _| {
+                Err(SolidError::invalid_input(
+                    "test::prepared_curve_domain",
+                    "unresolved prepared pair",
+                ))
+            },
+        );
+        assert!(matches!(
+            failed,
+            Err(SolidError::InvalidInput {
+                operation: "test::prepared_curve_domain",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn closed_seam_comparison_requires_the_second_actual_domain_without_eager_reads() {
+        use crate::geom::global_solver::{GlobalSolver, SolutionPairType};
+        let kernel = Kernel::default();
+        let first = closed_cubic();
+        let mut second = first.clone();
+        second
+            .edit_parameterization(&kernel, &Extent1d::from_min_max(20., 60020.))
+            .unwrap();
+        let domains = [first.natural_interval(), second.natural_interval()];
+        let target_query = Extent1d::from_min_max(20., 30.);
+        let mut canonical = Solution::new();
+        canonical.solution_type = SolutionType::SingleValue;
+        canonical.num_objects = 2;
+        canonical.num_variables = 2;
+        canonical.objects[..2].copy_from_slice(&opts().handles);
+        canonical.start.parameters[0] = domains[0].min();
+        canonical.start.parameters[1] = domains[1].min();
+        let source_point = first
+            .evaluate_point(&kernel, canonical.start.parameters[0])
+            .unwrap();
+        let mut near = canonical;
+        near.start.parameters[1] += 0.003;
+        near.start.solution_value = source_point.distance(
+            second
+                .evaluate_point(&kernel, near.start.parameters[1])
+                .unwrap(),
+        );
+        assert!(near.start.solution_value > 0. && near.start.solution_value < 1e-6);
+        assert!(target_query.contains_value(near.start.parameters[1], 0.));
+        let compare = |a: &Solution<H>, b: &Solution<H>, target_domain: Extent1d| {
+            let mut requests = Vec::new();
+            let result =
+                GlobalSolver::identical_solutions_with_intervals(a, b, |solution, parameter| {
+                    requests.push(parameter);
+                    let Some((index, 0)) = solution.object_index_for_parameter_index(parameter)?
+                    else {
+                        return solution.parameter_interval(parameter);
+                    };
+                    match solution.objects.get(index).copied().flatten() {
+                        Some(H(0)) => Ok(Some(domains[0])),
+                        Some(H(1)) => Ok(Some(target_domain)),
+                        _ => solution.parameter_interval(parameter),
+                    }
+                })
+                .unwrap();
+            (result.0, requests)
+        };
+        // These are actual nearby curve/curve candidates within the public
+        // 1e-6 mm control tolerance, with measured solution gaps. Only the full
+        // target basis domain gives the native identity threshold: its short
+        // query interval would incorrectly leave this duplicate unmerged.
+        let natural = compare(&canonical, &near, domains[1]);
+        assert_eq!(natural, (SolutionPairType::Identical, vec![0, 0, 1, 1]));
+        let restricted = compare(&canonical, &near, target_query);
+        assert_eq!(
+            restricted,
+            (SolutionPairType::DiffParameters, vec![0, 0, 1, 1])
+        );
+
+        let mut alias = canonical;
+        alias.start.parameters[1] = domains[1].max();
+        alias.start.solution_value = source_point.distance(
+            second
+                .evaluate_point(&kernel, alias.start.parameters[1])
+                .unwrap(),
+        );
+        assert!(alias.start.solution_value < 1e-12);
+        // A whole-period seam alias has the SAME physical point, but its two
+        // raw native parameters stay distinct in the comparison. The existing
+        // coincidence controller, not a fabricated zero domain, handles seams.
+        assert_eq!(
+            compare(&canonical, &alias, domains[1]),
+            (SolutionPairType::DiffParameters, vec![0, 0, 1, 1])
+        );
+
+        let mut source_diff = canonical;
+        source_diff.start.parameters[0] += 0.001;
+        source_diff.start.parameters[1] =
+            20. + 60000. * ((source_diff.start.parameters[0] - 2.) / 4.);
+        source_diff.start.solution_value = first
+            .evaluate_point(&kernel, source_diff.start.parameters[0])
+            .unwrap()
+            .distance(
+                second
+                    .evaluate_point(&kernel, source_diff.start.parameters[1])
+                    .unwrap(),
+            );
+        assert!(source_diff.start.solution_value < 1e-9);
+        assert_eq!(
+            compare(&canonical, &source_diff, domains[1]),
+            (SolutionPairType::DiffParameters, vec![0, 0])
+        );
     }
 }

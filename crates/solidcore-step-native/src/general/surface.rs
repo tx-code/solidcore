@@ -41,7 +41,7 @@ pub(super) struct RingSplit {
     pub point: Vec3,
 }
 
-/// Equivalent chart normalization for two closed circular cylinder boundaries.
+/// Equivalent chart normalization for two closed circular cylinder/cone boundaries.
 /// Edge/vertex indices address the original source plan, in face-loop order.
 #[derive(Clone, Debug)]
 pub(super) struct ImplicitRingPlan {
@@ -58,6 +58,7 @@ struct RingSupport {
     frame: Frame,
     height: f64,
     radius: f64,
+    support_radius: f64,
     point: Vec3,
 }
 
@@ -132,7 +133,8 @@ fn implicit_rings(
     frame: Frame,
     quality: &GeneralQuality,
 ) -> Result<Option<ImplicitRings>> {
-    if !g.is(face.geometry, "CYLINDRICAL_SURFACE") || face.loops.len() != 2 {
+    let conical = g.is(face.geometry, "CONICAL_SURFACE");
+    if (!g.is(face.geometry, "CYLINDRICAL_SURFACE") && !conical) || face.loops.len() != 2 {
         return Ok(None);
     }
     let mut candidates = Vec::new();
@@ -154,8 +156,24 @@ fn implicit_rings(
     }
     let consistency = scalar(quality.consistency_mm);
     let radius = g.number(face.geometry, "radius")? * g.length_scale();
+    // STEP CONICAL_SURFACE retains its signed physical semi-angle and source
+    // reference radius. Axial height h has radius R(h)=r0+tan(alpha)*h;
+    // reversing the source axis does not make either radius constant. Only the
+    // source-owned angle conversion is authoritative (including its receipt).
+    let slope = if conical {
+        (g.number(face.geometry, "semi_angle")?
+            * g.angle_scale(face.geometry, "GeneralConeAngleUnitUnestablished")?)
+        .tan()
+    } else {
+        0.
+    };
     need(
-        radius.is_finite() && radius > 0.,
+        radius.is_finite()
+            && if conical {
+                radius >= 0. && slope.is_finite() && slope != 0.
+            } else {
+                radius > 0.
+            },
         "GeneralImplicitRingSupport",
         face.record,
     )?;
@@ -168,17 +186,36 @@ fn implicit_rings(
         let height = center.dot(frame.z);
         let center_offset = norm(center - frame.z * height);
         let tilt = norm(cf.z.cross(frame.z));
-        // Analytic whole-circle support bound: displaced center + possible
-        // out-of-normal-plane excursion + radius mismatch. A pair of matching
-        // anchors alone cannot establish that the complete rings lie on the
-        // cylinder. Antiparallel ring normals remain valid source conventions.
-        let support_gap = center_offset + circle_radius * tilt + (circle_radius - radius).abs();
+        let support_radius = if conical {
+            radius + slope * height
+        } else {
+            radius
+        };
+        // Whole-circle analytic support, not anchor sampling: for any point on
+        // the tilted circle, |delta h|<=r*tilt and radial projection changes its
+        // radius by at most r*tilt. Cone support therefore additionally changes
+        // by at most |slope|*r*tilt. At the same actual height, this bounds the
+        // distance to the cone's positive-radius sheet. Keep the original
+        // cylinder expression/order exactly; these are consistency residuals,
+        // never working tolerances or permission to move either source circle.
+        // Antiparallel ring normals remain valid source conventions.
+        let support_gap = if conical {
+            center_offset
+                + (circle_radius - support_radius).abs()
+                + (1. + slope.abs()) * circle_radius * tilt
+        } else {
+            center_offset + circle_radius * tilt + (circle_radius - radius).abs()
+        };
+        let positive_sheet = !conical
+            || (support_radius.is_finite()
+                && support_radius - slope.abs() * circle_radius * tilt > 0.);
         need(
             height.is_finite()
                 && circle_radius.is_finite()
                 && circle_radius > 0.
                 && tilt.is_finite()
                 && tilt <= 1e-12
+                && positive_sheet
                 && support_gap.is_finite()
                 && support_gap <= consistency,
             "GeneralImplicitRingSupport",
@@ -209,6 +246,7 @@ fn implicit_rings(
             frame: cf,
             height,
             radius: circle_radius,
+            support_radius,
             point: anchor,
         });
     }
@@ -238,8 +276,11 @@ fn implicit_rings(
         face.record,
     )?;
     let radial = radial * (1. / length);
-    let actual_a = frame.origin + frame.z * first.height + radial * radius;
-    let actual_b = frame.origin + frame.z * second.height + radial * radius;
+    // R(h) is affine: strictly positive support over both complete rings also
+    // keeps the band between their (possibly reversed) heights off the pole.
+    // The derived seam is a generator; its ends need different radii on a cone.
+    let actual_a = frame.origin + frame.z * first.height + radial * first.support_radius;
+    let actual_b = frame.origin + frame.z * second.height + radial * second.support_radius;
     need(
         norm(actual_a - first.point) <= consistency,
         "GeneralImplicitRingVertexGap",
@@ -292,7 +333,7 @@ pub(super) fn plan_implicit_rings(
     quality: &GeneralQuality,
     execution: &mut Execution,
 ) -> Result<Option<ImplicitRingPlan>> {
-    if !g.is(face.geometry, "CYLINDRICAL_SURFACE") {
+    if !g.is(face.geometry, "CYLINDRICAL_SURFACE") && !g.is(face.geometry, "CONICAL_SURFACE") {
         return Ok(None);
     }
     let frame = g.placement(g.reference(face.geometry, "position")?)?;
@@ -1132,6 +1173,54 @@ mod ring_tests {
         assert!(actual > working_tolerance && actual < scalar(quality().consistency_mm));
         assert_eq!(vertices[1].point, Vec3::new(0., 3., height));
         assert_eq!(source.source().bytes(), text.as_bytes());
+    }
+
+    #[test]
+    fn conical_support_bound_keeps_the_axial_slope_excursion() {
+        // A large but finite public circle makes a below-alignment-limit tilt
+        // relevant to the unchanged micrometer consistency budget. Its +X
+        // anchor remains exact. Without the |slope|*r*tilt contribution the
+        // conservative bound would be about 0.75 um; with it, about 1.5 um.
+        // Rejection means this bound did not qualify support, not that sampling
+        // proved the source surface geometrically wrong.
+        let large = include_str!("../../tests/fixtures/cone-band.step")
+            .replace(
+                "#101=CARTESIAN_POINT('',(0.,0.,4.));",
+                "#101=CARTESIAN_POINT('',(0.,0.,9999998.));",
+            )
+            .replace(
+                "#103=CARTESIAN_POINT('',(0.,6.,4.));",
+                "#103=CARTESIAN_POINT('',(10000000.,0.,9999998.));",
+            )
+            .replace(
+                "#111=CIRCLE('',#107,6.);",
+                "#111=CIRCLE('',#107,10000000.);",
+            );
+        let tilted = large.replace("#107=AXIS2_PLACEMENT_3D('',#101,#104,#105);",
+            "#108=DIRECTION('',(0.,0.000000000000075,1.));\n#107=AXIS2_PLACEMENT_3D('',#101,#108,#105);");
+        for (text, expected) in [(&large, true), (&tilted, false)] {
+            let source = source(text);
+            let kernel = solidcore::kernel::Kernel::default();
+            let g = Geometry::new(&source, &kernel, 1e-6, 1e-6).unwrap();
+            let (face, edges, vertices) = inputs(&source, &g);
+            let mut execution = Execution { used: 0, max: 100 };
+            let result =
+                plan_implicit_rings(&g, &face, &edges, &vertices, &quality(), &mut execution);
+            if expected {
+                assert!(result.unwrap().is_some());
+                assert_eq!(execution.used, 2);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(Error::General {
+                        key: "GeneralImplicitRingSupport",
+                        kind: crate::GeneralFailureKind::Postcheck,
+                        ..
+                    })
+                ));
+                assert_eq!(execution.used, 0);
+            }
+        }
     }
 
     #[test]

@@ -523,6 +523,9 @@ impl<'a> Checker<'a> {
         Ok(())
     }
     fn foreign(&mut self) -> Checked<()> {
+        // vertex-loop-v1 explicitly adds N916's verified VERTEX_LOOP transport;
+        // it does not admit any borrowed N2635 descriptors below. The separate
+        // manifest identity records the addition without rewriting the C++ base.
         const N916: &[&str] = &[
             "DERIVED_UNIT",
             "DERIVED_UNIT_ELEMENT",

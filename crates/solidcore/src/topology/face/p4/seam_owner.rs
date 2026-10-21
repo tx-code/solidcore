@@ -24,10 +24,15 @@ use crate::intersect::curve_class::p4::{
     evaluate_crossing_binormal, map_crossing_sector, LoopCrossingsExecution, UvSectorIo,
 };
 use crate::intersect::curve_class::p5::{prepare_vertex_intersection, VertexIntersectionExecution};
+use crate::intersect::curve_class::p7::{
+    EndInside, FaceIntervalEdgeQuery, FaceIntervalExecution, FaceIntervalVertexQuery,
+};
 use crate::intersect::curve_class::p9::{BoundaryEdge, EdgeIntersectionExecution};
-use crate::intersect::point_class::{ClassGeometry, ClassObject, ClassObjectKind};
+use crate::intersect::point_class::{
+    ClassGeometry, ClassObject, ClassObjectKind, PointClassification,
+};
 use crate::kernel::Kernel;
-use crate::math::Point3;
+use crate::math::{Point2, Point3};
 use crate::nurbs::b_spline_surface::SurfParamType;
 use crate::query::face::p2::{curve_on_classify_using, CurveOnClassifyObjects, CurveOnExecution};
 use crate::surface::surface::Surface;
@@ -370,7 +375,7 @@ struct OwningCurveOn<'b, 's> {
     curves: &'s SeamCurves,
     direction: SurfParamType,
 }
-impl OwningCurveOn<'_, '_> {
+impl<'s> OwningCurveOn<'_, 's> {
     fn objects(&self) -> NativeGeometry<'_> {
         NativeGeometry {
             brep: self.brep,
@@ -378,6 +383,163 @@ impl OwningCurveOn<'_, '_> {
             direction: self.direction,
         }
     }
+    fn interval_curve(&self, object: NativeObject) -> Result<&'s Curve> {
+        // This actual seam pass classifies caller-owned temporary curves. Borrow
+        // them independently of the mutable model instead of cloning the model
+        // or retaining an immutable arena borrow across native lazy writes.
+        let (curve, uv) = seam_handles::<NativeObject>(self.direction)?;
+        if object == curve {
+            Ok(&self.curves.curve)
+        } else if object == uv {
+            Ok(&self.curves.uv_curve)
+        } else {
+            Err(missing())
+        }
+    }
+    fn interval_face(&self, object: NativeObject) -> Result<FaceId> {
+        if object == NativeObject::Topology(EntityRef::Face(self.face)) {
+            self.brep.face(self.face)?;
+            Ok(self.face)
+        } else {
+            Err(missing())
+        }
+    }
+}
+
+impl FaceIntervalExecution<NativeObject> for OwningCurveOn<'_, '_> {
+    fn classification_curve(&self, object: NativeObject) -> Option<&Curve> {
+        self.objects().resolve_curve(object)
+    }
+    fn vertex_sector(
+        &mut self,
+        k: &Kernel,
+        query: &FaceIntervalVertexQuery<NativeObject>,
+    ) -> Result<EndInside> {
+        let face = self.interval_face(query.face)?;
+        let NativeObject::Topology(EntityRef::Vertex(vertex)) = query.vertex else {
+            return Err(missing());
+        };
+        let curve = self.interval_curve(query.curve)?;
+        let uv_curve = query
+            .uv_curve
+            .map(|object| self.interval_curve(object))
+            .transpose()?;
+        // SmCurveClass.cpp::ClassifyFaceInterval always requests validation of
+        // the selected vertex sector, forwards then backwards. Keep the actual
+        // arena/context and carry its doubtful-answer flag into the same conflict
+        // resolution algorithm; a successful call alone is not an inside answer.
+        let sector = super::find_vertex_sector(
+            k,
+            self.brep,
+            face,
+            super::FindVertexSectorArgs {
+                vertex,
+                curve,
+                uv_curve,
+                param_at_vertex: query.from,
+                param_ivl_end: query.to,
+                orientation: query.direction,
+                zone_tol_3d: query.tolerance,
+                validate_sector: true,
+                uv_space_okay: query.uv_space_okay,
+            },
+        )?;
+        Ok(EndInside {
+            inside: sector.vertexuse.is_some(),
+            possible_problem: sector.possible_problem,
+        })
+    }
+    fn edge_side(
+        &mut self,
+        k: &Kernel,
+        query: &FaceIntervalEdgeQuery<NativeObject>,
+    ) -> Result<EndInside> {
+        let face = self.interval_face(query.face)?;
+        let NativeObject::Topology(EntityRef::Edge(edge)) = query.edge else {
+            return Err(missing());
+        };
+        let curve = self.interval_curve(query.curve)?;
+        let result = crate::query::face::p1::edge_curve_on_classify(
+            k,
+            self.brep,
+            face,
+            Some(edge),
+            curve,
+            &crate::query::face::p1::EdgeCurveOnOptions {
+                edge_param: query.edge_parameter,
+                curve_interval: query.interval,
+                curve_orientation: query.direction,
+                curve_tolerance: query.tolerance,
+                uv_space_okay: query.uv_space_okay,
+                face_index: query.face_index,
+            },
+        )?;
+        Ok(EndInside {
+            inside: result.inside,
+            possible_problem: result.possible_problem,
+        })
+    }
+    fn classify_uv(
+        &mut self,
+        k: &Kernel,
+        face: NativeObject,
+        uv: Point2,
+        tolerance: f64,
+        do_xsects: bool,
+        use_uv: bool,
+        point: &mut PointClassification<NativeObject>,
+    ) -> Result<()> {
+        let face = self.interval_face(face)?;
+        let mut native = point.map_objects(&mut native_entity)?;
+        let result = crate::query::face::p2::point_classify(
+            k,
+            self.brep,
+            face,
+            uv,
+            &mut native,
+            crate::query::face::p2::PointClassifyOptions {
+                src_zone_tol_3d: tolerance,
+                do_boundary_intersections: do_xsects,
+                use_uv_classification: use_uv,
+                ..Default::default()
+            },
+        );
+        // Native classifications retain writes made before ordinary or unported
+        // failure. Copy the complete state back before returning that same status.
+        *point = native.map_objects(&mut |entity| Ok(NativeObject::Topology(entity)))?;
+        result
+    }
+    fn classify_point(
+        &mut self,
+        k: &Kernel,
+        face: NativeObject,
+        point: Point3,
+        tolerance: f64,
+        do_xsects: bool,
+        classification: &mut PointClassification<NativeObject>,
+    ) -> Result<()> {
+        let face = self.interval_face(face)?;
+        let mut native = classification.map_objects(&mut native_entity)?;
+        let result = crate::query::face::p1::point_3d_classify(
+            k,
+            self.brep,
+            face,
+            point,
+            tolerance,
+            do_xsects,
+            &mut native,
+            crate::query::face::p1::Point3dClassifyOptions::default(),
+        );
+        *classification = native.map_objects(&mut |entity| Ok(NativeObject::Topology(entity)))?;
+        result
+    }
+}
+
+fn native_entity(object: NativeObject) -> Result<EntityRef> {
+    let NativeObject::Topology(entity) = object else {
+        return Err(missing());
+    };
+    Ok(entity)
 }
 impl LoopCrossingsExecution<NativeObject> for OwningCurveOn<'_, '_> {
     type Geometry<'a>
@@ -503,13 +665,13 @@ impl CurveOnExecution<NativeObject> for OwningCurveOn<'_, '_> {
         do_point_classify: bool,
         uv_space_okay: bool,
     ) -> Result<()> {
-        let objects = self.objects();
-        cc.classify_face_interval(
+        let face = NativeObject::Topology(EntityRef::Face(self.face));
+        cc.classify_face_interval_using(
             k,
-            &objects,
+            self,
             index,
             do_point_classify,
-            objects.face(self.face),
+            face,
             None,
             uv_space_okay,
             None,

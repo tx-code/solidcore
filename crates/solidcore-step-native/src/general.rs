@@ -29,7 +29,7 @@ use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::topology::{
     brep_constructor::{BrepConstructor, VertexNode},
     face::p3 as fp3,
-    EdgeId, EdgeuseId, FaceId, RegionId, VertexId,
+    Brep, EdgeId, EdgeuseId, FaceId, LoopId, RegionId, VertexId,
 };
 use solidcore_step::{planar::Rational, semantics as s};
 use std::collections::{BTreeMap, BTreeSet};
@@ -112,6 +112,27 @@ pub struct GeneralLoopMapping {
     pub bound_orientation: bool,
     /// Oriented-edge/edge source identities and effective native-curve directions.
     pub uses: Vec<(usize, usize, bool)>,
+    /// Source `VERTEX_POINT` record for an explicit vertex loop; no invented edge.
+    pub source_vertex: Option<usize>,
+}
+/// A source singular point boundary represented at a computational chart corner.
+/// The original point loop and its role remain in the source loop receipt.
+#[derive(Clone, Debug)]
+pub struct GeneralVertexBoundMapping {
+    /// Original `ADVANCED_FACE` record.
+    pub source_face: usize,
+    /// Original `FACE_BOUND` record.
+    pub source_bound: usize,
+    /// Original `VERTEX_LOOP` record.
+    pub source_loop: usize,
+    /// Original `VERTEX_POINT` record.
+    pub source_vertex: usize,
+    /// Actual owning native face.
+    pub native_face: FaceId,
+    /// Actual source-associated pole vertex, with no coordinate welding.
+    pub native_vertex: VertexId,
+    /// Outer chart loop whose meridian incidences meet at that singular boundary.
+    pub native_loop: LoopId,
 }
 /// Read-only development observations belonging to one owning candidate.
 /// These retain source diagnostics and parameter conventions, without granting
@@ -129,6 +150,8 @@ pub struct GeneralReport<'a> {
     pub length_unit_conversions: &'a [UnitConversion],
     /// Exact source length-to-mm factor.
     pub length_scale_mm: Rational,
+    /// Source point-boundary correspondence after singular chart normalization.
+    pub vertex_bounds: &'a [GeneralVertexBoundMapping],
     /// Source face/native derived-edge identities of chart cuts.
     pub chart_cuts: &'a [(usize, EdgeId)],
     /// Complete provenance of added chart vertices; original source points stay separate.
@@ -160,12 +183,30 @@ pub(super) struct SourceUse {
     record: usize,
     forward: bool,
 }
+pub(super) enum LoopContent {
+    Edges(Vec<SourceUse>),
+    Vertex(usize),
+}
 pub(super) struct SourceLoop {
     record: usize,
     bound: usize,
     outer: bool,
     orientation: bool,
-    uses: Vec<SourceUse>,
+    content: LoopContent,
+}
+impl SourceLoop {
+    fn edge_uses(&self) -> &[SourceUse] {
+        match &self.content {
+            LoopContent::Edges(uses) => uses,
+            LoopContent::Vertex(_) => &[],
+        }
+    }
+    fn vertex(&self) -> Option<usize> {
+        match self.content {
+            LoopContent::Vertex(vertex) => Some(vertex),
+            LoopContent::Edges(_) => None,
+        }
+    }
 }
 pub(super) struct SourceFace {
     record: usize,
@@ -187,6 +228,7 @@ pub(super) struct Plan {
     mappings: Vec<ParameterMapping>,
     observations: GeneralObservations,
     normalizations: Vec<(usize, EdgeId)>,
+    vertex_bounds: Vec<GeneralVertexBoundMapping>,
     pub(super) derived_vertices: Vec<GeneralDerivedVertex>,
     loop_mappings: Vec<GeneralLoopMapping>,
     unit_conversions: Vec<UnitConversion>,
@@ -200,6 +242,57 @@ impl Plan {
     pub(super) fn invalidate_final_trim_measurements(&mut self) {
         self.final_trim_measurements = None;
         self.material_measurements = None;
+    }
+    fn check_vertex_bounds(
+        &self,
+        brep: &Brep,
+        vertices: &BTreeMap<usize, VertexId>,
+        faces: &BTreeMap<usize, FaceId>,
+    ) -> Result<()> {
+        let mappings: BTreeMap<_, _> = self
+            .vertex_bounds
+            .iter()
+            .map(|m| ((m.source_face, m.source_bound), m))
+            .collect();
+        if mappings.len() != self.vertex_bounds.len() {
+            return Err(Error::Invalid("GeneralVertexBoundCorrespondence"));
+        }
+        let mut required = 0usize;
+        for face in &self.faces {
+            for bound in &face.loops {
+                let Some(index) = bound.vertex() else {
+                    continue;
+                };
+                required = required.checked_add(1).ok_or(Error::ResourceLimit)?;
+                let original = self
+                    .vertices
+                    .get(index)
+                    .ok_or(Error::Invalid("GeneralVertexIndex"))?;
+                let mapping = mappings
+                    .get(&(face.record, bound.bound))
+                    .ok_or(Error::Invalid("GeneralVertexBoundCorrespondence"))?;
+                if mapping.source_loop != bound.record
+                    || mapping.source_vertex != original.record
+                    || vertices.get(&original.record) != Some(&mapping.native_vertex)
+                    || faces.get(&face.record) != Some(&mapping.native_face)
+                    || brep.loop_(mapping.native_loop)?.face != mapping.native_face
+                    || !brep
+                        .face(mapping.native_face)?
+                        .loops
+                        .contains(&mapping.native_loop)
+                    || !solidcore::topology::loopuse::loop_vertices(brep, mapping.native_loop)?
+                        .into_iter()
+                        .flatten()
+                        .any(|v| v == mapping.native_vertex)
+                {
+                    return Err(Error::Invalid("GeneralVertexBoundCorrespondence"));
+                }
+            }
+        }
+        if mappings.len() != required {
+            return Err(Error::Invalid("GeneralVertexBoundCorrespondence"));
+        }
+        Ok(())
     }
     pub fn source(&self) -> &s::Snapshot {
         &self.source
@@ -216,6 +309,7 @@ impl Plan {
             length_unit_conversions: &self.unit_conversions,
             length_scale_mm: self.length_scale_mm,
             chart_cuts: &self.normalizations,
+            vertex_bounds: &self.vertex_bounds,
             derived_vertices: &self.derived_vertices,
             observations: self.observations,
             final_trim_measurements: self.final_trim_measurements.as_ref(),
@@ -245,6 +339,9 @@ impl Candidate {
         // A new trim checkpoint supersedes any observation attached to the
         // previous derived representation, even if its queries eventually fail.
         plan.material_measurements = None;
+        // A singular source boundary may live at a chart corner, but its
+        // original role, owner and vertex must still have complete evidence.
+        plan.check_vertex_bounds(&self.brep, &self.vertices, &self.faces)?;
         let mapped_faces: BTreeSet<_> = self.faces.values().copied().collect();
         if mapped_faces.len() != plan.faces.len()
             || self.faces.len() != plan.faces.len()
@@ -538,6 +635,33 @@ impl Plan {
                 let loop_record = geometry.reference(bound, "bound")?;
                 let orientation = geometry.boolean(bound, "orientation")?;
                 let forward = orientation == same_sense;
+                if geometry.is(loop_record, "VERTEX_LOOP") {
+                    if geometry.is(bound, "FACE_OUTER_BOUND") {
+                        return Err(unsupported(
+                            "GeneralOuterVertexLoopNotYetConstructed",
+                            bound,
+                        ));
+                    }
+                    if !geometry.is(face.geometry, "CONICAL_SURFACE") {
+                        return Err(unsupported(
+                            "GeneralVertexLoopSurfaceNotYetConstructed",
+                            loop_record,
+                        ));
+                    }
+                    let vertex = self.vertex(
+                        geometry,
+                        geometry.reference(loop_record, "loop_vertex")?,
+                        &mut vertices,
+                    )?;
+                    face.loops.push(SourceLoop {
+                        record: loop_record,
+                        bound,
+                        outer: false,
+                        orientation,
+                        content: LoopContent::Vertex(vertex),
+                    });
+                    continue;
+                }
                 let mut oriented = geometry.references(loop_record, "edge_list")?;
                 if !forward {
                     oriented.reverse();
@@ -582,10 +706,13 @@ impl Plan {
                     bound,
                     outer: geometry.is(bound, "FACE_OUTER_BOUND"),
                     orientation,
-                    uses,
+                    content: LoopContent::Edges(uses),
                 });
             }
             need(!face.loops.is_empty(), "GeneralFaceBoundsMissing", record)?;
+            if face.loops.iter().all(|bound| bound.edge_uses().is_empty()) {
+                return Err(unsupported("GeneralVertexLoopRequiresEdgeBoundary", record));
+            }
             face.loops.sort_by_key(|l| !l.outer);
             self.faces.push(face);
         }
@@ -597,7 +724,7 @@ impl Plan {
         let mut incidence: BTreeMap<usize, Vec<bool>> = BTreeMap::new();
         for face in &self.faces {
             for bound in &face.loops {
-                for u in &bound.uses {
+                for u in bound.edge_uses() {
                     incidence
                         .entry(u.edge)
                         .or_default()
@@ -693,6 +820,7 @@ pub fn construct_general(
         mappings: Vec::new(),
         observations: GeneralObservations::default(),
         normalizations: Vec::new(),
+        vertex_bounds: Vec::new(),
         derived_vertices: Vec::new(),
         loop_mappings: Vec::new(),
         unit_conversions: geometry.conversions().to_vec(),
@@ -705,7 +833,7 @@ pub fn construct_general(
     for face in &plan.faces {
         for bound in &face.loops {
             let mut uses = Vec::new();
-            for u in &bound.uses {
+            for u in bound.edge_uses() {
                 let edge = plan
                     .edges
                     .get(u.edge)
@@ -719,6 +847,15 @@ pub fn construct_general(
                 declared_outer: bound.outer,
                 bound_orientation: bound.orientation,
                 uses,
+                source_vertex: bound
+                    .vertex()
+                    .map(|index| {
+                        plan.vertices
+                            .get(index)
+                            .map(|v| v.record)
+                            .ok_or(Error::Invalid("GeneralVertexIndex"))
+                    })
+                    .transpose()?,
             });
         }
     }
@@ -824,6 +961,7 @@ pub fn construct_general(
         )?;
         plan.mappings.extend(built.mappings);
         let seam = built.seam;
+        let pole_bound = built.pole_bound;
         let mut surface = built.surface;
         // Borrowed natural-domain queries must see the original receiver's lazy
         // representation, not a default or a sliced B-spline stand-in.
@@ -857,11 +995,11 @@ pub fn construct_general(
                 ]
             };
             execution.step()?;
-            builder.start_loop(OrientType::Same)?;
+            let chart_loop = builder.start_loop(OrientType::Same)?;
             let first = *face
                 .loops
                 .first()
-                .and_then(|l| l.uses.first())
+                .and_then(|l| l.edge_uses().first())
                 .ok_or(Error::Invalid("GeneralSeamUse"))?;
             pieces.append(
                 &mut builder,
@@ -881,19 +1019,21 @@ pub fn construct_general(
                 true,
                 native.work_tolerance_mm,
             )?;
-            let second = *face
-                .loops
-                .get(1)
-                .and_then(|l| l.uses.first())
-                .ok_or(Error::Invalid("GeneralSeamUse"))?;
-            pieces.append(
-                &mut builder,
-                &kernel,
-                &mut execution,
-                second,
-                Some(seam_vertices[1]),
-                native.work_tolerance_mm,
-            )?;
+            if pole_bound.is_none() {
+                let second = *face
+                    .loops
+                    .get(1)
+                    .and_then(|l| l.edge_uses().first())
+                    .ok_or(Error::Invalid("GeneralSeamUse"))?;
+                pieces.append(
+                    &mut builder,
+                    &kernel,
+                    &mut execution,
+                    second,
+                    Some(seam_vertices[1]),
+                    native.work_tolerance_mm,
+                )?;
+            }
             append_seam(
                 &mut builder,
                 &kernel,
@@ -907,11 +1047,46 @@ pub fn construct_general(
             execution.step()?;
             builder.end_loop(&kernel)?;
             plan.normalizations.push((face.record, derived));
+            if let Some(source_loop) = pole_bound {
+                let bound = face
+                    .loops
+                    .iter()
+                    .find(|bound| bound.record == source_loop)
+                    .ok_or(Error::Invalid("GeneralPoleBoundary"))?;
+                let vertex = bound
+                    .vertex()
+                    .and_then(|index| plan.vertices.get(index))
+                    .ok_or(Error::Invalid("GeneralPoleBoundary"))?;
+                plan.vertex_bounds.push(GeneralVertexBoundMapping {
+                    source_face: face.record,
+                    source_bound: bound.bound,
+                    source_loop,
+                    source_vertex: vertex.record,
+                    native_face: id,
+                    native_vertex: seam_vertices[1],
+                    native_loop: chart_loop,
+                });
+            }
         } else {
             for bound in &face.loops {
+                if let Some(index) = bound.vertex() {
+                    let source = plan
+                        .vertices
+                        .get(index)
+                        .ok_or(Error::Invalid("GeneralVertexIndex"))?;
+                    let vertex = *vertices
+                        .get(&source.record)
+                        .ok_or(Error::Invalid("GeneralVertexCorrespondence"))?;
+                    // An explicit source point loop reuses the one source-owned
+                    // vertex. The paired incidence helper creates no geometry,
+                    // edge or source identity; its whole call is precharged.
+                    execution.step()?;
+                    builder.single_vertex_loop_from_vertex(vertex)?;
+                    continue;
+                }
                 execution.step()?;
                 builder.start_loop(OrientType::Same)?;
-                for u in &bound.uses {
+                for u in bound.edge_uses() {
                     pieces.append(
                         &mut builder,
                         &kernel,
@@ -1305,5 +1480,56 @@ mod final_trim_tests {
                 ..
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod vertex_loop_tests {
+    use super::*;
+    use solidcore::geom::assert_array::AssertArray;
+    use solidcore::topology::brep_validation::{validate_pointers, ValidationOptions};
+
+    #[test]
+    fn public_cone_keeps_source_pole_and_passes_cold_native_pointer_validation() {
+        let bytes = include_bytes!("../../solidcore-step/tests/fixtures/cone-pole.step");
+        let raw =
+            solidcore_step::inspect(bytes.to_vec(), solidcore_step::Limits::planar_fixtures());
+        let quality = GeneralQuality {
+            id: "Q-Public-Cone-Pole".into(),
+            definition_mm: Rational::decimal("0.0000001").unwrap(),
+            consistency_mm: Rational::decimal("0.000001").unwrap(),
+            derived_uv_mm: Rational::decimal("0.000001").unwrap(),
+            query_mm: Rational::decimal("0.000001").unwrap(),
+            maximum_work_tolerance_mm: Rational::decimal("0.00001").unwrap(),
+            maximum_tolerance_growth_mm: Rational::ZERO,
+        };
+        let mut candidate = construct_general(
+            &raw,
+            s::Limits::fixtures(),
+            &s::Options::default(),
+            Options {
+                operations: 100_000,
+                work_tolerance_mm: 1e-6,
+            },
+            quality,
+        )
+        .unwrap();
+        let mut reports = AssertArray::new();
+        validate_pointers(
+            &mut candidate.kernel,
+            &mut candidate.brep,
+            ValidationOptions::default(),
+            Some(&mut reports),
+        )
+        .unwrap();
+        assert!(reports.is_empty(), "{reports:?}");
+        let checked = candidate
+            .validate_native()
+            .unwrap()
+            .measure_general_trims()
+            .unwrap()
+            .measure_general_material(1e-7)
+            .unwrap();
+        assert_eq!(checked.source().source().bytes(), bytes);
     }
 }

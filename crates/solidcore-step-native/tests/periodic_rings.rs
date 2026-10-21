@@ -614,4 +614,534 @@ mod tests {
         assert!((material.centroid_mm - Vec3::new(0., 0., 3.5)).length() < 1e-5);
         close(material.boundary_mm, 12. * PI + 7., 1e-5);
     }
+
+    fn replace_public_record(text: &str, original: &str, replacement: &str) -> String {
+        assert_eq!(
+            text.matches(original).count(),
+            1,
+            "public fixture spelling changed"
+        );
+        text.replace(original, replacement)
+    }
+
+    fn swap_public_ring_set(text: &str) -> String {
+        // ADVANCED_FACE.bounds is a SET. Its textual order carries no boundary
+        // role, traversal or geometric meaning; no sense is compensated here.
+        replace_public_record(
+            text,
+            "#182=ADVANCED_FACE('',(#172,#173),#142,.T.);",
+            "#182=ADVANCED_FACE('',(#173,#172),#142,.T.);",
+        )
+    }
+
+    fn rotate_public_cylinder_x_90() -> String {
+        // Independent exact rigid transform R_x(+90deg): (x,y,z)->(x,-z,y).
+        // Both cap placements, their circles and the cylinder share these source
+        // records. The origin #100 and reference X direction #105 stay fixed.
+        let mut text = std::str::from_utf8(SOURCE).unwrap().to_owned();
+        for (original, replacement) in [
+            (
+                "#101=CARTESIAN_POINT('',(0.,0.,7.));",
+                "#101=CARTESIAN_POINT('',(0.,-7.,0.));",
+            ),
+            (
+                "#102=CARTESIAN_POINT('',(0.,3.,0.));",
+                "#102=CARTESIAN_POINT('',(0.,0.,3.));",
+            ),
+            (
+                "#103=CARTESIAN_POINT('',(3.,0.,7.));",
+                "#103=CARTESIAN_POINT('',(3.,-7.,0.));",
+            ),
+            (
+                "#104=DIRECTION('',(0.,0.,1.));",
+                "#104=DIRECTION('',(0.,-1.,0.));",
+            ),
+        ] {
+            text = replace_public_record(&text, original, replacement);
+        }
+        text
+    }
+
+    fn assert_public_changed_records(bytes: &[u8], changed: &[&str]) {
+        let baseline = inspect(SOURCE.to_vec(), Limits::planar_fixtures());
+        let variant = inspect(bytes.to_vec(), Limits::planar_fixtures());
+        let baseline = baseline.source.as_ref().unwrap();
+        let variant = variant.source.as_ref().unwrap();
+        assert_eq!(baseline.records().len(), variant.records().len());
+        for original in baseline.records() {
+            let other = variant.find(&original.id).unwrap();
+            let original_bytes = baseline.raw(original.span).unwrap();
+            let variant_bytes = variant.raw(other.span).unwrap();
+            if changed.contains(&original.id.as_str()) {
+                assert_ne!(
+                    original_bytes, variant_bytes,
+                    "unchanged declared record #{}",
+                    original.id
+                );
+            } else {
+                assert_eq!(
+                    original_bytes, variant_bytes,
+                    "unexpected change to #{}",
+                    original.id
+                );
+            }
+        }
+    }
+
+    /// Material traversal uses the face side bounding the non-void region.
+    /// The primary face use always follows the surface normal, including the
+    /// lower cap whose primary side belongs to the exterior void. Comparing two
+    /// primary uses directly would mistake that source `same_sense` for a crack.
+    fn material_ring_directions(
+        model: &Candidate,
+        face_id: &str,
+        edge_id: &str,
+    ) -> Vec<(usize, bool)> {
+        let face = model.faces()[&record(model, face_id)];
+        let primary = model.brep().face(face).unwrap().faceuse.unwrap();
+        let shell = model.brep().faceuse(primary).unwrap().shell.unwrap();
+        let region = model.brep().shell(shell).unwrap().region.unwrap();
+        let primary_bounds_material = model.brep().region(region).unwrap().is_void == 0;
+        ring_directions(model, face_id, edge_id)
+            .into_iter()
+            .map(|(piece, same)| (piece, same == primary_bounds_material))
+            .collect()
+    }
+
+    fn assert_order_independent_ring_partition(model: &Candidate, rotated: bool) {
+        let transform = |point: Vec3| {
+            if rotated {
+                Vec3::new(point.x, -point.z, point.y)
+            } else {
+                point
+            }
+        };
+        assert_transformed_ring_partition(model, transform, transform, true);
+    }
+
+    fn assert_transformed_ring_partition(
+        model: &Candidate,
+        transform: impl Fn(Vec3) -> Vec3,
+        transform_axis: impl Fn(Vec3) -> Vec3,
+        exact_axes: bool,
+    ) {
+        assert_eq!(
+            (
+                model.vertices().len(),
+                model.edges().len(),
+                model.faces().len()
+            ),
+            (2, 2, 3)
+        );
+        assert_eq!(
+            (
+                model.brep().vertex_list().len(),
+                model.brep().edge_list().len(),
+                model.brep().face_list().len()
+            ),
+            (3, 4, 3)
+        );
+        assert_eq!(
+            model.source().part_definition().unwrap().shape_role,
+            "MaterialSolid"
+        );
+        for (source, point) in [
+            ("120", Vec3::new(0., 3., 0.)),
+            ("121", Vec3::new(3., 0., 7.)),
+        ] {
+            let vertex = model.vertices()[&record(model, source)];
+            assert_eq!(model.brep().vertex(vertex).unwrap().point, transform(point));
+        }
+        let report = model.general_report().unwrap();
+        let side_source = record(model, "182");
+        let side_face = model.faces()[&side_source];
+        let loops = report
+            .loops
+            .iter()
+            .filter(|mapping| mapping.face == side_source)
+            .collect::<Vec<_>>();
+        assert_eq!(loops.len(), 2);
+        assert!(loops.iter().all(|mapping| !mapping.declared_outer
+            && mapping.uses.len() == 1
+            && mapping.bound_orientation));
+        assert_eq!(report.chart_cuts.len(), 1);
+        assert_eq!(report.chart_cuts[0].0, side_source);
+        assert_eq!(report.derived_vertices.len(), 1);
+        let derived = &report.derived_vertices[0];
+        assert!([record(model, "130"), record(model, "131")].contains(&derived.source_edge));
+        assert!(!model
+            .vertices()
+            .values()
+            .any(|vertex| *vertex == derived.native_vertex));
+        let mut piece_counts = Vec::new();
+        let mut ring_native_edges = BTreeSet::new();
+        for (source_edge, cap_id) in [("130", "180"), ("131", "181")] {
+            let source = record(model, source_edge);
+            let pieces = &model.edges()[&source];
+            piece_counts.push(pieces.len());
+            let cap = model.faces()[&record(model, cap_id)];
+            let mapping = report
+                .parameters
+                .iter()
+                .find(|mapping| {
+                    mapping.source_use == source && mapping.kind == "ConicRationalParameter"
+                })
+                .unwrap();
+            let natural = &mapping
+                .parameters
+                .iter()
+                .find(|(name, _)| name == "native_natural_interval")
+                .unwrap()
+                .1;
+            let original_interval = &mapping
+                .parameters
+                .iter()
+                .find(|(name, _)| name == "native_edge_interval")
+                .unwrap()
+                .1;
+            assert_eq!(natural.len(), 2);
+            assert_eq!(original_interval.len(), 2);
+            let mut previous_end = original_interval[0];
+            let mut basis_data = None;
+            for piece in pieces {
+                assert!(ring_native_edges.insert(*piece));
+                let native = model.brep().edge(*piece).unwrap();
+                assert!(native.interval.length() > 0.);
+                assert_eq!(
+                    native.interval.min(),
+                    previous_end,
+                    "incomplete or overlapping source ring #{source_edge}"
+                );
+                previous_end = native.interval.max();
+                let curve = native.curve.as_ref().unwrap();
+                assert_eq!(
+                    (
+                        curve.natural_interval().min(),
+                        curve.natural_interval().max()
+                    ),
+                    (natural[0], natural[1])
+                );
+                let CurveKind::Ellipse(circle) = curve.kind() else {
+                    panic!("complete source circle kind changed")
+                };
+                assert!(circle.is_circle_class());
+                close(circle.radius(), 3., 0.);
+                close(circle.step_interval().length(), 360., 0.);
+                let center = if source_edge == "130" {
+                    Vec3::ZERO
+                } else {
+                    Vec3::new(0., 0., 7.)
+                };
+                assert_eq!(circle.canonical().position.origin(), transform(center));
+                let actual = circle.canonical().position;
+                if exact_axes {
+                    // Preserve the existing identity/exact-quarter-turn assertions.
+                    assert_eq!(actual.z_axis(), transform_axis(Vec3::Z));
+                    assert_eq!(actual.x_axis(), transform_axis(Vec3::X));
+                } else {
+                    // Decimal rotation coefficients are normalized by source
+                    // build_axes. Their rounding remains far below the unchanged
+                    // millimeter budgets; never alter native geometry to match them.
+                    assert!((actual.z_axis() - transform_axis(Vec3::Z)).length() < 1e-12);
+                    assert!((actual.x_axis() - transform_axis(Vec3::X)).length() < 1e-12);
+                }
+                let data = circle.base().gw_nurb().unwrap();
+                if let Some((degree, knots, points)) = &basis_data {
+                    assert_eq!(&data.degree(), degree);
+                    assert_eq!(data.knots(), knots);
+                    assert_eq!(data.cpts(), points);
+                } else {
+                    basis_data = Some((data.degree(), data.knots().to_vec(), data.cpts().to_vec()));
+                }
+                assert_eq!(
+                    edge::faces(model.brep(), *piece, None)
+                        .unwrap()
+                        .into_iter()
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from([cap, side_face])
+                );
+            }
+            assert_eq!(
+                previous_end, original_interval[1],
+                "source ring #{source_edge} lost its final interval"
+            );
+            // Every source piece is reused once by its cap and once by the side;
+            // compare incidence identity and opposite traversal, not list heads.
+            let cap_uses = material_ring_directions(model, cap_id, source_edge);
+            let side_uses = material_ring_directions(model, "182", source_edge);
+            assert_eq!(
+                (cap_uses.len(), side_uses.len()),
+                (pieces.len(), pieces.len())
+            );
+            for index in 0..pieces.len() {
+                let cap_direction = cap_uses
+                    .iter()
+                    .filter(|(piece, _)| *piece == index)
+                    .collect::<Vec<_>>();
+                let side_direction = side_uses
+                    .iter()
+                    .filter(|(piece, _)| *piece == index)
+                    .collect::<Vec<_>>();
+                assert_eq!((cap_direction.len(), side_direction.len()), (1, 1));
+                assert_ne!(cap_direction[0].1, side_direction[0].1);
+            }
+            if source == derived.source_edge {
+                assert_eq!(pieces.len(), 2);
+                let first = model.brep().edge(pieces[0]).unwrap();
+                let second = model.brep().edge(pieces[1]).unwrap();
+                assert_eq!(derived.native_parameter, first.interval.max());
+                assert_eq!(derived.native_parameter, second.interval.min());
+                let point = model.brep().vertex(derived.native_vertex).unwrap().point;
+                assert!(
+                    (first
+                        .curve
+                        .as_ref()
+                        .unwrap()
+                        .evaluate_point(model.kernel(), derived.native_parameter)
+                        .unwrap()
+                        - point)
+                        .length()
+                        < 1e-12
+                );
+            }
+        }
+        piece_counts.sort_unstable();
+        assert_eq!(piece_counts, vec![1, 2]);
+        assert_eq!(ring_native_edges.len(), 3);
+        assert!(!ring_native_edges.contains(&report.chart_cuts[0].1));
+        let cut_uses = face::p4::upward_edgeuses(model.brep(), side_face, false, None)
+            .unwrap()
+            .into_iter()
+            .filter_map(|id| {
+                let use_ = model.brep().edgeuse(id).unwrap();
+                (use_.edge == Some(report.chart_cuts[0].1)).then_some(use_.orientation)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(cut_uses.len(), 2);
+        assert_ne!(cut_uses[0], cut_uses[1]);
+    }
+
+    fn assert_order_independent_cylinder_workflow(bytes: &[u8], rotated: bool) {
+        let candidate = build(bytes).unwrap();
+        assert_eq!(candidate.source().source().bytes(), bytes);
+        // Complete public reports remain available if a new metamorphic control
+        // exposes a genuine native rejection; no report or check is skipped.
+        let checked = candidate.validate_native_detailed().unwrap_or_else(|failure| {
+            panic!("public periodic cylinder validation: stage={:?}, completed={}, error={:?}, reports={:#?}", failure.stage, failure.completed, failure.error, failure.reports)
+        }).measure_general_trims().unwrap().measure_general_material(1e-7).unwrap();
+        assert_eq!(checked.source().source().bytes(), bytes);
+        assert_order_independent_ring_partition(&checked, rotated);
+        let report = checked.general_report().unwrap();
+        let trims = report.final_trim_measurements.unwrap();
+        assert_eq!(trims.edge_uses, 8);
+        assert!(trims.maximum_mm.is_finite() && trims.maximum_mm <= 1e-6);
+        let material = report.material_measurements.unwrap();
+        assert_eq!(
+            (
+                material.vertices,
+                material.edges.len(),
+                material.faces.len()
+            ),
+            (3, 4, 3)
+        );
+        close(material.area_mm2, 60. * PI, 60. * PI * 1e-4);
+        close(material.material_volume_mm3, 63. * PI, 63. * PI * 1e-4);
+        close(material.boundary_mm, 12. * PI + 7., 1e-5);
+        let (centroid, lower, upper) = if rotated {
+            (
+                Vec3::new(0., -3.5, 0.),
+                Vec3::new(-3., -7., -3.),
+                Vec3::new(3., 0., 3.),
+            )
+        } else {
+            (
+                Vec3::new(0., 0., 3.5),
+                Vec3::new(-3., -3., 0.),
+                Vec3::new(3., 3., 7.),
+            )
+        };
+        assert!((material.centroid_mm - centroid).length() < 1e-5);
+        for (actual, expected) in [
+            (material.bounds_mm.min(), lower),
+            (material.bounds_mm.max(), upper),
+        ] {
+            close(actual.x, expected.x, 1e-6);
+            close(actual.y, expected.y, 1e-6);
+            close(actual.z, expected.z, 1e-6);
+        }
+        assert_eq!(
+            material
+                .edges
+                .iter()
+                .filter(|edge| edge.source_edge.is_none())
+                .count(),
+            1
+        );
+        for source in [record(&checked, "130"), record(&checked, "131")] {
+            assert_eq!(
+                material
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.source_edge == Some(source))
+                    .count(),
+                checked.edges()[&source].len()
+            );
+        }
+    }
+
+    #[test]
+    fn face_bound_set_order_preserves_complete_periodic_cylinder_workflow() {
+        let text = swap_public_ring_set(std::str::from_utf8(SOURCE).unwrap());
+        assert_public_changed_records(text.as_bytes(), &["182"]);
+        assert_order_independent_cylinder_workflow(text.as_bytes(), false);
+    }
+
+    #[test]
+    fn exact_x_quarter_turn_preserves_periodic_cylinder_workflow() {
+        let text = rotate_public_cylinder_x_90();
+        assert_public_changed_records(text.as_bytes(), &["101", "102", "103", "104"]);
+        assert_order_independent_cylinder_workflow(text.as_bytes(), true);
+    }
+
+    #[test]
+    fn face_bound_set_order_after_x_quarter_turn_preserves_periodic_cylinder_workflow() {
+        let text = swap_public_ring_set(&rotate_public_cylinder_x_90());
+        assert_public_changed_records(text.as_bytes(), &["101", "102", "103", "104", "182"]);
+        assert_order_independent_cylinder_workflow(text.as_bytes(), true);
+    }
+
+    fn assert_rigid_cylinder_workflow(
+        bytes: &[u8],
+        transform_point: impl Fn(Vec3) -> Vec3,
+        transform_axis: impl Fn(Vec3) -> Vec3,
+        bounds: [Vec3; 2],
+    ) {
+        let checked = build(bytes).unwrap().validate_native_detailed().unwrap_or_else(|failure| {
+            panic!("public rigid cylinder validation: stage={:?}, completed={}, error={:?}, reports={:#?}", failure.stage, failure.completed, failure.error, failure.reports)
+        }).measure_general_trims().unwrap().measure_general_material(1e-7).unwrap();
+        assert_eq!(checked.source().source().bytes(), bytes);
+        assert_transformed_ring_partition(&checked, &transform_point, transform_axis, false);
+        let report = checked.general_report().unwrap();
+        assert_eq!(report.length_scale_mm, Rational::ONE);
+        assert_eq!(
+            report.quality.consistency_mm,
+            quality().unwrap().consistency_mm
+        );
+        assert_eq!(
+            report.quality.derived_uv_mm,
+            quality().unwrap().derived_uv_mm
+        );
+        let trims = report.final_trim_measurements.unwrap();
+        assert_eq!(trims.edge_uses, 8);
+        assert!(trims.maximum_mm.is_finite() && trims.maximum_mm <= 1e-6);
+        let material = report.material_measurements.unwrap();
+        close(material.area_mm2, 60. * PI, 60. * PI * 1e-4);
+        close(material.material_volume_mm3, 63. * PI, 63. * PI * 1e-4);
+        close(material.boundary_mm, 12. * PI + 7., 1e-5);
+        assert!((material.centroid_mm - transform_point(Vec3::new(0., 0., 3.5))).length() < 1e-5);
+        for (actual, expected) in [
+            (material.bounds_mm.min(), bounds[0]),
+            (material.bounds_mm.max(), bounds[1]),
+        ] {
+            close(actual.x, expected.x, 1e-6);
+            close(actual.y, expected.y, 1e-6);
+            close(actual.z, expected.z, 1e-6);
+        }
+        // The bootstrap may choose either source ring. The derived point must
+        // still be the opposite ring's physical phase, not a prescribed native ID
+        // or an assumption that the textual first/last bound owns the split.
+        let derived = &report.derived_vertices[0];
+        let original_cut = if derived.source_edge == record(&checked, "130") {
+            Vec3::new(3., 0., 0.)
+        } else {
+            assert_eq!(derived.source_edge, record(&checked, "131"));
+            Vec3::new(0., 3., 7.)
+        };
+        let actual = checked.brep().vertex(derived.native_vertex).unwrap().point;
+        assert!((actual - transform_point(original_cut)).length() < 1e-12);
+    }
+
+    #[test]
+    fn whole_periodic_cylinder_y_forty_five_rotation_keeps_complete_native_checkpoints() {
+        // R_y(+45): (x,y,z)->(c*x+c*z,y,-c*x+c*z). The cylinder's support
+        // extrema are NOT a rotated axis-aligned box: each x/z radial extent is
+        // 3/sqrt(2), while the axis runs from 0 to 7/sqrt(2).
+        let c = 0.5_f64.sqrt();
+        let rotate = |point: Vec3| {
+            Vec3::new(
+                c * point.x + c * point.z,
+                point.y,
+                -c * point.x + c * point.z,
+            )
+        };
+        let center = rotate(Vec3::new(0., 0., 7.));
+        let anchor = rotate(Vec3::new(3., 0., 7.));
+        let mut text = std::str::from_utf8(SOURCE).unwrap().to_owned();
+        for (original, replacement) in [
+            (
+                "#101=CARTESIAN_POINT('',(0.,0.,7.));",
+                format!("#101=CARTESIAN_POINT('',({},0.,{}));", center.x, center.z),
+            ),
+            (
+                "#103=CARTESIAN_POINT('',(3.,0.,7.));",
+                format!("#103=CARTESIAN_POINT('',({},0.,{}));", anchor.x, anchor.z),
+            ),
+            (
+                "#104=DIRECTION('',(0.,0.,1.));",
+                format!("#104=DIRECTION('',({c},0.,{c}));"),
+            ),
+            (
+                "#105=DIRECTION('',(1.,0.,0.));",
+                format!("#105=DIRECTION('',({c},0.,{}));", -c),
+            ),
+        ] {
+            text = replace_public_record(&text, original, &replacement);
+        }
+        // #100=(0,0,0) and #102=(0,3,0) are fixed by this authored rotation.
+        assert_public_changed_records(text.as_bytes(), &["101", "103", "104", "105"]);
+        assert_rigid_cylinder_workflow(
+            text.as_bytes(),
+            rotate,
+            rotate,
+            [
+                Vec3::new(-3. * c, -3., -3. * c),
+                Vec3::new(10. * c, 3., 10. * c),
+            ],
+        );
+    }
+
+    #[test]
+    fn whole_periodic_cylinder_integer_translation_keeps_complete_native_checkpoints() {
+        // Independent non-origin placement T=(11,-5,13) mm. Only point records
+        // translate: directions, radii, units, source senses and budgets stay fixed.
+        let shift = Vec3::new(11., -5., 13.);
+        let mut text = std::str::from_utf8(SOURCE).unwrap().to_owned();
+        for (original, replacement) in [
+            (
+                "#100=CARTESIAN_POINT('',(0.,0.,0.));",
+                "#100=CARTESIAN_POINT('',(11.,-5.,13.));",
+            ),
+            (
+                "#101=CARTESIAN_POINT('',(0.,0.,7.));",
+                "#101=CARTESIAN_POINT('',(11.,-5.,20.));",
+            ),
+            (
+                "#102=CARTESIAN_POINT('',(0.,3.,0.));",
+                "#102=CARTESIAN_POINT('',(11.,-2.,13.));",
+            ),
+            (
+                "#103=CARTESIAN_POINT('',(3.,0.,7.));",
+                "#103=CARTESIAN_POINT('',(14.,-5.,20.));",
+            ),
+        ] {
+            text = replace_public_record(&text, original, replacement);
+        }
+        assert_public_changed_records(text.as_bytes(), &["100", "101", "102", "103"]);
+        assert_rigid_cylinder_workflow(
+            text.as_bytes(),
+            |point| point + shift,
+            |axis| axis,
+            [Vec3::new(8., -8., 13.), Vec3::new(14., -2., 20.)],
+        );
+    }
 }

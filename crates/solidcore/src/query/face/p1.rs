@@ -26,15 +26,10 @@
 //! face's own tolerance (what `SmBSplineSurface::CalculateBoundingBox` reads through
 //! `GetFace()`): arena surfaces hold no owning face, so the B-spline/plane/revolution
 //! box is computed unexpanded and expanded here, as the override's last step does.
-//! `Point3DClassify` builds no surface cache (the Rust point solvers take none, as in
-//! `topology::vertexuse` and `intersect::curve_class::p1`), so upstream's temporary
-//! switch-off of the cache's point test (SmFace.cpp:12801) has nothing to act on yet:
-//! the face-owned surface's solve stops at `surface::surface::p4`'s
-//! `UNPORTED(query.face_p2)` `SmFace::PointClassify` stub, a call the C++ never makes
-//! here, and that stub's NOTE lists this caller so the switch is added for it when it is
-//! wired. `PointClassify` gets
-//! no trimmed surface cache (a fresh one is never face-containment-complete, so its
-//! cache branch cannot run). `EdgeCurveOnClassify` lifts a 2D curve to a curve on the
+//! `Point3DClassify` borrows its actual mutable model for the surface cache and
+//! point solver. Its temporary point-test flag is restored on success, early
+//! return and failure; the same actual cache is used for the final UV classification.
+//! `EdgeCurveOnClassify` lifts a 2D curve to a curve on the
 //! face's surface only when an upward edge use of the face is found (upstream lifts it
 //! first and ignores `SetAll`'s status); an `SmCrvOnSurf` over a surface other than a
 //! B-spline is a dispatch gap (`curve.crv_on_surf`). No recursion.
@@ -388,6 +383,24 @@ fn solution_uv(parameters: &[f64]) -> Result<Point2> {
     ))
 }
 
+/// `SmTemporaryChangeValue` for `Point3DClassify`'s actual cache. The native scope
+/// also encloses UV classification and gap evaluation, not only the point solve.
+fn with_point_test_disabled<T>(
+    cache: Option<&mut crate::surface::cache_topology::OwnedSurfaceCache<EntityRef>>,
+    body: impl FnOnce(
+        Option<&mut crate::surface::cache_topology::OwnedSurfaceCache<EntityRef>>,
+    ) -> Result<T>,
+) -> Result<T> {
+    let Some(cache) = cache else {
+        return body(None);
+    };
+    let saved = cache.base().point_test_enabled;
+    cache.base_mut().point_test_enabled = false;
+    let result = body(Some(&mut *cache));
+    cache.base_mut().point_test_enabled = saved;
+    result
+}
+
 /// `SmFace::Point3DClassify`: classifies the 3D point `point` against face `f` into `pc`:
 /// the point is dropped onto the face's surface within `src_zone_tol_3d` (a local drop
 /// from [`Point3dClassifyOptions::guess_uv`] first, else the global drop over the face's
@@ -422,21 +435,33 @@ pub fn point_3d_classify(
     pc.set_class_object(PointClassType::Unknown, None);
     pc.set_face(Some(EntityRef::Face(f)));
     pc.set_src_zone_tol_3d(src_zone_tol_3d);
+    fp2::surface(b, f)?
+        .ok_or_else(|| SolidError::invalid_input(OP_POINT, "face without surface"))?;
 
-    let uv = {
+    // SmFace.cpp::Point3DClassify (maintained d8ed45a) checks out the actual
+    // surface cache before either solve. Ordinary cache failure leaves the
+    // native null-cache branch; an unimplemented dependency remains explicit.
+    // The model borrow below supplies the real owner; no B-rep clone or detached
+    // surface can substitute for it. Only exact evaluation geometry is copied.
+    let mut cache = ignored(crate::topology::surface_cache::get_face_surface_cache(
+        k, b, f, None,
+    ))?;
+    let reached_gap_check = with_point_test_disabled(cache.as_mut(), |cache| {
         let surface = fp2::surface(b, f)?
-            .ok_or_else(|| SolidError::invalid_input(OP_POINT, "face without surface"))?;
+            .ok_or_else(|| SolidError::invalid_input(OP_POINT, "face without surface"))?
+            .clone_for_evaluation()?;
 
         // when given a hint - use it in LocalSolve
         let mut found = None;
         if let Some(guess) = opts.guess_uv {
             // intersect 3dPoint with surface
-            let r = surface.local_point_solve::<NoObject>(
+            let r = surface.local_point_solve_for_face::<NoObject>(
                 k,
                 &uv_domain,
                 SolverOperation::Intersect,
                 point,
                 guess,
+                Some(fp2::tolerance(b, f)?),
             )?;
             if r.found {
                 found = Some(solution_uv(&r.solution.start.parameters)?);
@@ -444,58 +469,73 @@ pub fn point_3d_classify(
         }
 
         // when Local Solve did not get an answer - try global solves
-        if let Some(uv) = found {
+        let uv = if let Some(uv) = found {
             uv
         } else {
             // intersect 3DPoint with surface; no retries with larger tolerances
-            let solutions = surface.global_point_solve::<NoObject>(
+            let mut solutions = crate::geom::solution_array::SolutionArray::new();
+            surface.global_point_solve_into_with_surface_cache(
                 k,
-                Some(NoObject),
+                None,
                 &uv_domain,
                 SolverOperation::Intersect,
                 point,
                 src_zone_tol_3d,
                 None,
                 SolutionRequested::Single,
+                &mut solutions,
+                cache
+                    .as_deref()
+                    .map(crate::surface::cache_topology::OwnedSurfaceCache::view),
+                &mut crate::topology::surface_cache::BrepSurfaceContext { brep: b, face: f },
             )?;
             let Some(first) = solutions.as_slice().first() else {
                 // Point may not be inside of the boundary of the face.
-                return Ok(());
+                return Ok(false);
             };
             solution_uv(&first.start.parameters)?
+        };
+
+        // low work - UVPoint not contained by Face's domain
+        let size = uv_domain.size().length();
+        if !uv_domain.contains_point(uv, size / 1000.0) {
+            return Ok(false);
         }
-    };
 
-    // low work - UVPoint not contained by Face's domain
-    let size = uv_domain.size().length();
-    if !uv_domain.contains_point(uv, size / 1000.0) {
+        // Classify against the same cached boundary after the untrimmed point
+        // solve; native PointClassify itself does not use point_test_enabled.
+        let trim_cache = match cache {
+            Some(crate::surface::cache_topology::OwnedSurfaceCache::Trim(cache)) => {
+                Some(cache.as_mut())
+            }
+            _ => None,
+        };
+        super::p2::point_classify(
+            k,
+            b,
+            f,
+            uv,
+            pc,
+            super::p2::PointClassifyOptions {
+                src_zone_tol_3d,
+                do_boundary_intersections,
+                use_uv_classification: false,
+                tgt_loops_only: opts.tgt_loops_only,
+                tgt_loops: opts.tgt_loops,
+                uv_space_okay: opts.uv_space_okay,
+                trim_cache,
+            },
+        )?;
+
+        // PointClassify set the gap to that of the surface point; use the distance
+        // between the 3D point and its surface point instead.
+        if let Some(surface_point) = ignored(surface.evaluate_point(k, uv))? {
+            pc.set_gap_3d(point.distance(surface_point));
+        }
+        Ok(true)
+    })?;
+    if !reached_gap_check {
         return Ok(());
-    }
-
-    // else pass the call along to PointClassify to classify the UVPoint
-    super::p2::point_classify(
-        k,
-        b,
-        f,
-        uv,
-        pc,
-        super::p2::PointClassifyOptions {
-            src_zone_tol_3d,
-            do_boundary_intersections,
-            use_uv_classification: false,
-            tgt_loops_only: opts.tgt_loops_only,
-            tgt_loops: opts.tgt_loops,
-            uv_space_okay: opts.uv_space_okay,
-            trim_cache: None,
-        },
-    )?;
-
-    // PointClassify set the gap to that of the surface point; use the distance between
-    // the 3D point and its surface point instead.
-    let surface = fp2::surface(b, f)?
-        .ok_or_else(|| SolidError::invalid_input(OP_POINT, "face without surface"))?;
-    if let Some(surface_point) = ignored(surface.evaluate_point(k, uv))? {
-        pc.set_gap_3d(point.distance(surface_point));
     }
 
     // If we classified to something but not within the specified tolerance, return no
@@ -717,6 +757,173 @@ pub fn edge_curve_on_classify(
 mod tests {
     use super::*;
     use crate::curve::line::Line;
+
+    fn owned_triangle() -> (Kernel, Brep, FaceId) {
+        use crate::geom::extent2d::Extent2d;
+        use crate::math::Vec2;
+        use crate::surface::plane::Plane;
+        use crate::topology::brep_constructor::{BrepConstructor, VertexNode};
+
+        let mut k = Kernel::default();
+        let mut builder = BrepConstructor::new().unwrap();
+        builder.start_shell().unwrap();
+        let face = builder.start_face(OrientType::Same).unwrap();
+        let domain = Extent2d::from_bounds(0., 0., 1., 1.);
+        builder
+            .set_face_surface(
+                Plane::new(Point3::ZERO, Vec3::X, Vec3::Y, Vec2::new(1., 1.), &domain).into(),
+                domain,
+            )
+            .unwrap();
+        let points = [Point3::ZERO, Vec3::X, Vec3::Y];
+        let vertices = points
+            .iter()
+            .map(|point| builder.start_vertex_of_loop(*point).unwrap())
+            .collect::<Vec<_>>();
+        builder.start_loop(OrientType::Same).unwrap();
+        for index in 0..3 {
+            let next = (index + 1) % 3;
+            builder
+                .start_edge(
+                    &k,
+                    OrientType::Same,
+                    None,
+                    Some(vertices[index]),
+                    Some(vertices[next]),
+                )
+                .unwrap();
+            builder
+                .set_edge_curve(
+                    &k,
+                    Line::from_points(points[index], points[next], 3).into(),
+                    false,
+                )
+                .unwrap();
+            builder
+                .set_limits(&k, VertexNode::Parameter(0.), VertexNode::Parameter(1.))
+                .unwrap();
+            builder.end_edge().unwrap();
+        }
+        builder.end_loop(&k).unwrap();
+        builder.end_face().unwrap();
+        builder.end_shell(&mut k, false).unwrap();
+        (k, builder.finish().unwrap(), face)
+    }
+
+    #[test]
+    fn owned_point_3d_classify_matches_independent_triangle_and_plane_truth() {
+        let (k, mut b, face) = owned_triangle();
+        let owner = b.face(face).unwrap().surface.as_ref().unwrap().owner();
+        let domain = b.face(face).unwrap().uv_domain;
+        let intervals = b
+            .edges()
+            .iter()
+            .map(|(_, edge)| edge.interval)
+            .collect::<Vec<_>>();
+        let vertices = b
+            .vertices()
+            .iter()
+            .map(|(_, vertex)| vertex.point)
+            .collect::<Vec<_>>();
+        // Independent analytic oracle: z=0 and x>=0, y>=0, x+y<=1.
+        // Boundary points and a point inside the plane's rectangular UV domain
+        // but outside the triangle distinguish trim classification from inversion.
+        for (point, expected) in [
+            (Point3::new(0.2, 0.2, 0.), PointClassType::Face),
+            (Point3::new(0.4, 0., 0.), PointClassType::Edge),
+            (Point3::ZERO, PointClassType::Vertex),
+            (Point3::new(0.8, 0.8, 0.), PointClassType::Unknown),
+            (Point3::new(0.2, 0.2, 0.1), PointClassType::Unknown),
+        ] {
+            let mut classified = PointClassification::new(1e-6);
+            point_3d_classify(
+                &k,
+                &mut b,
+                face,
+                point,
+                1e-6,
+                true,
+                &mut classified,
+                Point3dClassifyOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(classified.point_class(), expected, "point {point:?}");
+            assert!(!b.editing_enabled());
+        }
+        assert_eq!(
+            b.face(face).unwrap().surface.as_ref().unwrap().owner(),
+            owner
+        );
+        assert_eq!(b.face(face).unwrap().uv_domain, domain);
+        assert_eq!(
+            b.edges()
+                .iter()
+                .map(|(_, edge)| edge.interval)
+                .collect::<Vec<_>>(),
+            intervals
+        );
+        assert_eq!(
+            b.vertices()
+                .iter()
+                .map(|(_, vertex)| vertex.point)
+                .collect::<Vec<_>>(),
+            vertices
+        );
+    }
+
+    #[test]
+    fn point_3d_classify_cache_scope_restores_flag_after_early_return_and_errors() {
+        let (k, mut b, face) = owned_triangle();
+        let mut cache =
+            crate::topology::surface_cache::get_face_surface_cache(&k, &mut b, face, None).unwrap();
+        for saved in [false, true] {
+            cache.base_mut().point_test_enabled = saved;
+            let early = with_point_test_disabled(Some(&mut cache), |cache| {
+                assert!(!cache.unwrap().base().point_test_enabled);
+                Ok(false)
+            })
+            .unwrap();
+            assert!(!early);
+            assert_eq!(cache.base().point_test_enabled, saved);
+            for error in [
+                SolidError::invalid_input("public::point_test", "injected ordinary failure"),
+                SolidError::unported("public cleanup injection", "query.face_p1"),
+            ] {
+                let result: Result<()> = with_point_test_disabled(Some(&mut cache), |cache| {
+                    assert!(!cache.unwrap().base().point_test_enabled);
+                    Err(error.clone())
+                });
+                assert_eq!(result, Err(error));
+                assert_eq!(cache.base().point_test_enabled, saved);
+            }
+        }
+        assert!(!b.editing_enabled());
+    }
+
+    #[test]
+    fn borrowed_surface_solve_without_owning_model_keeps_explicit_owner_error() {
+        let (k, b, face) = owned_triangle();
+        let surface = b.face(face).unwrap().surface.as_ref().unwrap();
+        let owner = surface.owner();
+        let result = surface.global_point_solve::<NoObject>(
+            &k,
+            Some(NoObject),
+            &b.face(face).unwrap().uv_domain,
+            SolverOperation::Intersect,
+            Point3::new(0.2, 0.2, 0.),
+            1e-6,
+            None,
+            SolutionRequested::Single,
+        );
+        assert!(matches!(
+            result,
+            Err(SolidError::Unported {
+                upstream: "SmFace handle of a surface's face",
+                unit: "topology.face_p2",
+            })
+        ));
+        assert_eq!(surface.owner(), owner);
+    }
 
     #[test]
     fn evaluate_curve_rejects_null_nan_and_outside() {

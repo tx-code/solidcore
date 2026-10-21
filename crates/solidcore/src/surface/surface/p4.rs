@@ -1601,6 +1601,26 @@ pub fn classify_curve_surface_xsect_point(
     current_uv: Point2,
     current_t: f64,
 ) -> Result<XsectClassification> {
+    classify_curve_surface_xsect_point_for_face(
+        k, surface, uv_domain, curve, interval, current_uv, current_t, None,
+    )
+}
+
+/// The same numerical classifier with a caller-resolved live face tolerance.
+/// Only the existing immediate face-owner branch consumes this value. In
+/// particular, an unresolved curve owner still fails first; borrowed callers
+/// retain their explicit owner-lookup error and all early geometric returns.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn classify_curve_surface_xsect_point_for_face(
+    k: &Kernel,
+    surface: &Surface,
+    uv_domain: &Extent2d,
+    curve: &Curve,
+    interval: &Extent1d,
+    current_uv: Point2,
+    current_t: f64,
+    face_tolerance: Option<f64>,
+) -> Result<XsectClassification> {
     let mut out = XsectClassification {
         found_guess: false,
         new_uv_guess: Point2::UNDEF,
@@ -1829,12 +1849,18 @@ pub fn classify_curve_surface_xsect_point(
         curve_tol = curve_radius / 1000.0;
     }
     if surface.owner().is_some_and(|o| o.type_code == FACE_TYPE) {
-        // UNPORTED(topology.face_p2): SmFace::GetTolerance
-        let _ = surface_tol;
-        return Err(SolidError::unported(
-            "SmFace::GetTolerance",
-            "topology.face_p2",
-        ));
+        // The owning LSI resolved THIS face before entering its leaf execution.
+        // Keep that stored zone tolerance in the original arithmetic position;
+        // it is neither the intersection tolerance nor the system default.
+        surface_tol = match face_tolerance {
+            Some(tolerance) => tolerance,
+            None => {
+                return Err(SolidError::unported(
+                    "SmFace::GetTolerance",
+                    "topology.face_p2",
+                ))
+            }
+        };
     } else if !surface_line {
         surface_tol = surface_radius / 1000.0;
     }
@@ -2187,6 +2213,112 @@ mod tests {
         .unwrap();
         assert_eq!(r.point_type, TsectCurveType::Crossing);
         assert!(!r.found_guess);
+    }
+
+    #[test]
+    fn owned_tangent_line_cylinder_classifier_preserves_real_face_tolerance_and_error_order() {
+        use crate::nurbs::b_spline_surface_n_lib::p2::OrientType;
+        use crate::surface::cone::Cone;
+        use crate::topology::brep_constructor::BrepConstructor;
+
+        let mut kernel = Kernel::default();
+        kernel.tolerances.zone_tol_3d = 3e-3;
+        let mut cylinder = Cone::new_cylinder_bounded(
+            Point3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            2.,
+            0.,
+            360.,
+            3.,
+            false,
+            false,
+            false,
+        );
+        cylinder.make_nurb(&kernel).unwrap();
+        let definition = Surface::from(cylinder);
+        let domain = definition.natural_uv_domain();
+        let mut builder = BrepConstructor::new().unwrap();
+        builder.start_shell().unwrap();
+        let face = builder.start_face(OrientType::Same).unwrap();
+        builder.set_face_surface(definition, domain).unwrap();
+        builder.brep_mut().face_mut(face).unwrap().tolerance = 7e-8;
+        let actual = builder.brep().face(face).unwrap();
+        let surface = actual.surface.as_ref().unwrap();
+        let owner = surface.owner();
+        assert!(owner.is_some());
+        assert_ne!(actual.tolerance, kernel.tolerances.zone_tol_3d);
+        // Independent equation x^2+y^2=4: x=2,z=1.5 is tangent at y=0.
+        // A temporary ray line has no topology owner; only the cylinder is owned.
+        let line = Curve::from(Line::from_points(
+            Point3::new(2., -1., 1.5),
+            Point3::new(2., 1., 1.5),
+            3,
+        ));
+        let interval = line.natural_interval();
+        let uv = Point2::new(domain.min().x, domain.v_interval().mid());
+        assert!(
+            surface
+                .evaluate_point(&kernel, uv)
+                .unwrap()
+                .distance(Point3::new(2., 0., 1.5))
+                < 1e-12
+        );
+        let result = classify_curve_surface_xsect_point_for_face(
+            &kernel,
+            surface,
+            &domain,
+            &line,
+            &interval,
+            uv,
+            0.5,
+            Some(actual.tolerance),
+        )
+        .unwrap();
+        assert_eq!(result.point_type, TsectCurveType::Tangent);
+        assert!(!result.found_guess);
+        assert!(matches!(
+            classify_curve_surface_xsect_point(
+                &kernel, surface, &domain, &line, &interval, uv, 0.5
+            ),
+            Err(SolidError::Unported {
+                upstream: "SmFace::GetTolerance",
+                unit: "topology.face_p2",
+            })
+        ));
+        assert_eq!(surface.owner(), owner);
+        assert_eq!(surface.natural_uv_domain(), domain);
+        assert_eq!(builder.brep().face(face).unwrap().tolerance, 7e-8);
+        assert_eq!(kernel.tolerances.zone_tol_3d, 3e-3);
+
+        // An actual edge-owned curve still encounters the old unresolved edge
+        // tolerance BEFORE the face lookup, even when face tolerance is supplied.
+        // This is an unpublished construction fixture, not an accepted model.
+        builder.start_loop(OrientType::Same).unwrap();
+        let edge = builder
+            .start_edge(&kernel, OrientType::Same, None, None, None)
+            .unwrap();
+        builder.set_edge_curve(&kernel, line, false).unwrap();
+        let actual = builder.brep().face(face).unwrap();
+        let surface = actual.surface.as_ref().unwrap();
+        let owned_line = builder.brep().edge(edge).unwrap().curve.as_ref().unwrap();
+        assert!(owned_line.owner().is_some());
+        assert!(matches!(
+            classify_curve_surface_xsect_point_for_face(
+                &kernel,
+                surface,
+                &domain,
+                owned_line,
+                &interval,
+                uv,
+                0.5,
+                Some(actual.tolerance),
+            ),
+            Err(SolidError::Unported {
+                upstream: "SmEdge::GetTolerance",
+                unit: "topology.edge",
+            })
+        ));
     }
 
     #[test]

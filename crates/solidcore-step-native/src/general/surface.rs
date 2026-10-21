@@ -70,6 +70,7 @@ struct ImplicitRings {
 pub(super) struct BuiltSurface {
     pub surface: Surface,
     pub seam: Option<Seam>,
+    pub pole_bound: Option<usize>,
     pub mappings: Vec<ParameterMapping>,
 }
 fn curve(edges: &[SourceEdge], index: usize) -> Result<&SourceEdge> {
@@ -82,9 +83,12 @@ fn point(vertices: &[SourceVertex], index: usize) -> Result<Vec3> {
         .ok_or(Error::Invalid("GeneralVertexIndex"))
 }
 fn envelope(face_loop: &super::SourceLoop, edges: &[SourceEdge]) -> Result<f64> {
+    if face_loop.vertex().is_some() {
+        return Ok(0.);
+    }
     let mut min = Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
     let mut max = Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for u in &face_loop.uses {
+    for u in face_loop.edge_uses() {
         let b = edge_bounds(curve(edges, u.edge)?)?;
         min = Vec3::new(
             min.x.min(b.min().x),
@@ -133,10 +137,14 @@ fn implicit_rings(
     }
     let mut candidates = Vec::new();
     for l in &face.loops {
-        if l.uses.len() != 1 {
+        if l.edge_uses().len() != 1 {
             return Ok(None);
         }
-        let index = l.uses.first().ok_or(Error::Invalid("GeneralLoopUse"))?.edge;
+        let index = l
+            .edge_uses()
+            .first()
+            .ok_or(Error::Invalid("GeneralLoopUse"))?
+            .edge;
         let e = curve(edges, index)?;
         let [a, b] = e.vertices;
         if !g.is(e.geometry, "CIRCLE") || a != b {
@@ -372,6 +380,92 @@ pub(super) fn plan_implicit_rings(
         },
     }))
 }
+// A full circular cone boundary and a source pole need a computational
+// meridian. Keeping the source point loop as a second native loop would share
+// its pole vertex with the chart outer loop and change its incidence semantics.
+// Record that singular boundary explicitly; no source edge/point is discarded.
+fn cone_pole_seam(
+    g: &Geometry<'_>,
+    face: &SourceFace,
+    edges: &[SourceEdge],
+    vertices: &[SourceVertex],
+    frame: Frame,
+    quality: &GeneralQuality,
+) -> Result<Option<(Seam, usize)>> {
+    if !face.loops.iter().any(|bound| bound.vertex().is_some()) {
+        return Ok(None);
+    }
+    if !g.is(face.geometry, "CONICAL_SURFACE") || face.loops.len() != 2 {
+        return Err(unsupported(
+            "GeneralVertexLoopRegionNotYetConstructed",
+            face.record,
+        ));
+    }
+    let outer = face
+        .loops
+        .first()
+        .ok_or(Error::Invalid("GeneralPoleBoundary"))?;
+    let inner = face
+        .loops
+        .get(1)
+        .ok_or(Error::Invalid("GeneralPoleBoundary"))?;
+    let Some(pole) = inner.vertex() else {
+        return Err(unsupported(
+            "GeneralVertexLoopRegionNotYetConstructed",
+            face.record,
+        ));
+    };
+    let [usage] = outer.edge_uses() else {
+        return Err(unsupported(
+            "GeneralVertexLoopRegionNotYetConstructed",
+            face.record,
+        ));
+    };
+    let circle = curve(edges, usage.edge)?;
+    if !g.is(circle.geometry, "CIRCLE") || circle.vertices[0] != circle.vertices[1] {
+        return Err(unsupported(
+            "GeneralVertexLoopRequiresCircularRing",
+            face.record,
+        ));
+    }
+    let circle_frame = g.placement(g.reference(circle.geometry, "position")?)?;
+    let delta = circle_frame.origin - frame.origin;
+    let height = delta.dot(frame.z);
+    let radius = g.number(circle.geometry, "radius")? * g.length_scale();
+    let slope = (g.number(face.geometry, "semi_angle")?
+        * g.angle_scale(face.geometry, "GeneralConeAngleUnitUnestablished")?)
+    .tan();
+    let support_radius = g.number(face.geometry, "radius")? * g.length_scale() + slope * height;
+    let tilt = norm(circle_frame.z.cross(frame.z));
+    let support_gap =
+        norm(delta - frame.z * height) + radius * tilt + (radius - support_radius).abs();
+    need(
+        tilt.is_finite()
+            && tilt <= 1e-12
+            && support_radius > 0.
+            && support_gap.is_finite()
+            && support_gap <= scalar(quality.consistency_mm),
+        "GeneralVertexLoopRingSupport",
+        face.record,
+    )?;
+    let ring = circle.vertices[0];
+    let point_on_ring = circle
+        .built
+        .as_ref()
+        .ok_or(Error::Invalid("GeneralDefiningCurveMissing"))?
+        .endpoints[0];
+    let pole_point = point(vertices, pole)?;
+    let radial = point_on_ring - frame.origin;
+    Ok(Some((
+        Seam {
+            vertices: [ring, pole],
+            endpoints: [point_on_ring, pole_point],
+            angle: radial.dot(frame.y).atan2(radial.dot(frame.x)),
+        },
+        inner.record,
+    )))
+}
+
 fn full_period(start: f64) -> [f64; 2] {
     let degrees = start * 180. / PI;
     [degrees, degrees + 360.]
@@ -411,7 +505,7 @@ fn angles(
         }));
     }
     let mut counts = BTreeMap::new();
-    for u in face.loops.iter().flat_map(|l| &l.uses) {
+    for u in face.loops.iter().flat_map(super::SourceLoop::edge_uses) {
         *counts.entry(u.edge).or_insert(0usize) += 1;
     }
     for (i, count) in &counts {
@@ -435,7 +529,7 @@ fn angles(
         }
     }
     let mut cover = Vec::new();
-    for u in face.loops.iter().flat_map(|l| &l.uses) {
+    for u in face.loops.iter().flat_map(super::SourceLoop::edge_uses) {
         let e = curve(edges, u.edge)?;
         let [va, vb] = e.vertices;
         if g.is(e.geometry, "CIRCLE") {
@@ -591,13 +685,14 @@ pub(super) fn make(
         return Ok(BuiltSurface {
             surface: native.into(),
             seam: None,
+            pole_bound: None,
             mappings,
         });
     }
     let frame = g.placement(g.reference(record, "position")?)?;
     let mut min = Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
     let mut max = Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for u in face.loops.iter().flat_map(|l| &l.uses) {
+    for u in face.loops.iter().flat_map(super::SourceLoop::edge_uses) {
         let b = edge_bounds(curve(edges, u.edge)?)?;
         for mask in 0..8 {
             let p = Vec3::new(
@@ -610,12 +705,39 @@ pub(super) fn make(
             max = Vec3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z));
         }
     }
+    for index in face.loops.iter().filter_map(super::SourceLoop::vertex) {
+        let delta = point(vertices, index)? - frame.origin;
+        let local = Vec3::new(delta.dot(frame.x), delta.dot(frame.y), delta.dot(frame.z));
+        min = Vec3::new(min.x.min(local.x), min.y.min(local.y), min.z.min(local.z));
+        max = Vec3::new(max.x.max(local.x), max.y.max(local.y), max.z.max(local.z));
+        // This first native scope supports analytic cone poles only. The STEP
+        // WR7/WR8 rules prove types; they do NOT prove this geometric condition.
+        let slope = (g.number(record, "semi_angle")?
+            * g.angle_scale(record, "GeneralConeAngleUnitUnestablished")?)
+        .tan();
+        let radius = g.number(record, "radius")? * g.length_scale();
+        need(
+            slope.is_finite() && slope != 0.,
+            "GeneralVertexLoopPoleUnestablished",
+            face.record,
+        )?;
+        let pole = frame.origin + frame.z * (-radius / slope);
+        need(
+            norm(point(vertices, index)? - pole) <= scalar(quality.consistency_mm),
+            "GeneralVertexLoopOffPole",
+            face.record,
+        )?;
+    }
     let padding =
         scalar(quality.definition_mm).max(64. * f64::EPSILON * (1. + norm(min) + norm(max)));
     let pad = Vec3::new(padding, padding, padding);
     min -= pad;
     max += pad;
-    let seam = if let Some(plan) = ring_plan {
+    let pole_cut = cone_pole_seam(g, face, edges, vertices, frame, quality)?;
+    let pole_bound = pole_cut.as_ref().map(|(_, bound)| *bound);
+    let seam = if let Some((seam, _)) = pole_cut {
+        Some(seam)
+    } else if let Some(plan) = ring_plan {
         Some(Seam {
             vertices: plan.source_vertices,
             endpoints: plan.seam_endpoints,
@@ -672,7 +794,16 @@ pub(super) fn make(
         }
         let mut shifted = frame;
         shifted.origin += frame.z * min.z;
-        let [begin, end] = angles(g, face, edges, vertices, frame, None, quality, execution)?;
+        let [begin, end] = angles(
+            g,
+            face,
+            edges,
+            vertices,
+            frame,
+            seam.as_ref(),
+            quality,
+            execution,
+        )?;
         execution.step()?;
         let mut cone = Cone::create_canonical(
             g.kernel(),
@@ -715,6 +846,7 @@ pub(super) fn make(
     Ok(BuiltSurface {
         surface,
         seam,
+        pole_bound,
         mappings: Vec::new(),
     })
 }
@@ -812,11 +944,11 @@ mod ring_tests {
                 bound: record(source, bound),
                 outer: i == 0,
                 orientation: true,
-                uses: vec![super::super::SourceUse {
+                content: super::super::LoopContent::Edges(vec![super::super::SourceUse {
                     edge: i,
                     record: record(source, oriented),
                     forward: i == 0,
-                }],
+                }]),
             });
         }
         (

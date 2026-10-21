@@ -700,6 +700,14 @@ pub fn catalog_source_sha256() -> &'static str {
     generated::SOURCE_SHA256
 }
 
+/// Separate fingerprint of the explicitly compiled standard-addition manifest.
+/// `None` means only the unchanged C++ baseline descriptors were generated.
+/// This identity is not part of that export, a new source schema, or evidence
+/// of full EXPRESS/native import qualification.
+pub fn catalog_extensions_sha256() -> Option<&'static str> {
+    generated::EXTENSIONS_SHA256
+}
+
 /// Semantic report could not be compiled; callers must publish no partial JSON.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReportError {

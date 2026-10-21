@@ -120,6 +120,7 @@ struct Inventory {
 }
 
 fn inventory(model: &Candidate, plan: &Plan) -> Result<Inventory> {
+    plan.check_vertex_bounds(&model.brep, &model.vertices, &model.faces)?;
     let native_faces = brep_lists::faces(&model.brep, None)?;
     let native_edges = brep_lists::edges(&model.brep, None)?;
     let native_vertices = brep_lists::vertices(&model.brep, None)?;

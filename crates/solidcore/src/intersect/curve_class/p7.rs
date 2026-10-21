@@ -945,7 +945,34 @@ impl<O: ClassObject> CurveClassification<O> {
         uv_space_okay: bool,
         face_index: Option<u64>,
     ) -> Result<()> {
-        // locals
+        self.classify_face_interval_using(
+            k,
+            &mut BorrowedFaceInterval { geometry },
+            index,
+            do_point_classify,
+            face,
+            old_face,
+            uv_space_okay,
+            face_index,
+        )
+    }
+
+    /// The same native interval algorithm with queries executed on the actual
+    /// mutable owner at their original call positions. No model copy supplies
+    /// topology, caches or tolerance state to this route.
+    pub(crate) fn classify_face_interval_using(
+        &mut self,
+        k: &Kernel,
+        execution: &mut impl FaceIntervalExecution<O>,
+        index: usize,
+        do_point_classify: bool,
+        face: O,
+        old_face: Option<O>,
+        uv_space_okay: bool,
+        face_index: Option<u64>,
+    ) -> Result<()> {
+        // Keep the existing partial-interval writes on failure: the source
+        // ClassifyFaceInterval updates the original interval as each phase runs.
         let mut ivl = *self.at(index)?;
         let src_zone_tol_3d = src_zone_tol_3d_of(k, Some(&*self));
         let ctx = FaceIntervalContext {
@@ -958,7 +985,7 @@ impl<O: ClassObject> CurveClassification<O> {
             uv_space_okay,
             face_index,
         };
-        let r = classify_face_interval_on(k, geometry, &ctx, &mut ivl);
+        let r = classify_face_interval_on(k, execution, &ctx, &mut ivl);
         *self.at_mut(index)? = ivl;
         r
     }
@@ -1320,16 +1347,144 @@ struct FaceIntervalContext<O> {
 /// The answer of a face query on an interval end: inside the face, and whether the
 /// answer is to be doubted (`bPossibleProblem`).
 #[derive(Debug, Clone, Copy, Default)]
-struct EndInside {
-    inside: bool,
-    possible_problem: bool,
+pub(crate) struct EndInside {
+    pub(crate) inside: bool,
+    pub(crate) possible_problem: bool,
+}
+
+/// Inputs to the native vertex-sector query; all values retain source order.
+pub(crate) struct FaceIntervalVertexQuery<O> {
+    pub(crate) face: O,
+    pub(crate) vertex: O,
+    pub(crate) curve: O,
+    pub(crate) uv_curve: Option<O>,
+    pub(crate) from: f64,
+    pub(crate) to: f64,
+    pub(crate) direction: OrientType,
+    pub(crate) tolerance: f64,
+    pub(crate) uv_space_okay: bool,
+}
+
+/// Inputs to the native edge-side query, including its original restricted domain.
+pub(crate) struct FaceIntervalEdgeQuery<O> {
+    pub(crate) face: O,
+    pub(crate) edge: O,
+    pub(crate) edge_parameter: f64,
+    pub(crate) curve: O,
+    pub(crate) interval: Extent1d,
+    pub(crate) direction: OrientType,
+    pub(crate) tolerance: f64,
+    pub(crate) uv_space_okay: bool,
+    pub(crate) face_index: Option<u64>,
+}
+
+/// Scoped execution of the face queries in SmCurveClass.cpp:18755--19235.
+/// Geometry borrows end before mutable owner calls; the legacy adapter retains
+/// its exact unresolved-owner failures instead of cloning a B-rep to emulate one.
+pub(crate) trait FaceIntervalExecution<O: ClassObject> {
+    fn classification_curve(&self, object: O) -> Option<&Curve>;
+
+    fn vertex_sector(
+        &mut self,
+        _k: &Kernel,
+        query: &FaceIntervalVertexQuery<O>,
+    ) -> Result<EndInside> {
+        face_find_vertex_sector(
+            query.face,
+            query.vertex,
+            face_interval_curve(self, Some(query.curve))?,
+            face_interval_uv_curve(self, query.uv_curve)?,
+            query.from,
+            query.to,
+            query.direction,
+            query.tolerance,
+            query.uv_space_okay,
+        )
+    }
+    fn edge_side(&mut self, _k: &Kernel, query: &FaceIntervalEdgeQuery<O>) -> Result<EndInside> {
+        face_edge_curve_on_classify(
+            query.face,
+            query.edge,
+            query.edge_parameter,
+            face_interval_curve(self, Some(query.curve))?,
+            &query.interval,
+            query.direction,
+            query.tolerance,
+            query.uv_space_okay,
+            query.face_index,
+        )
+    }
+    fn classify_uv(
+        &mut self,
+        _k: &Kernel,
+        face: O,
+        uv: Point2,
+        tolerance: f64,
+        do_xsects: bool,
+        use_uv: bool,
+        point: &mut PointClassification<O>,
+    ) -> Result<()> {
+        face_point_classify(face, uv, tolerance, do_xsects, use_uv, point)
+    }
+    fn classify_point(
+        &mut self,
+        _k: &Kernel,
+        face: O,
+        point: Point3,
+        tolerance: f64,
+        do_xsects: bool,
+        classification: &mut PointClassification<O>,
+    ) -> Result<()> {
+        face_point_3d_classify(face, point, tolerance, do_xsects, classification)
+    }
+}
+
+struct BorrowedFaceInterval<'a, G> {
+    geometry: &'a G,
+}
+impl<O: ClassObject, G: ClassGeometry<O>> FaceIntervalExecution<O> for BorrowedFaceInterval<'_, G> {
+    fn classification_curve(&self, object: O) -> Option<&Curve> {
+        self.geometry.curve(object)
+    }
+}
+
+fn face_interval_curve<O: ClassObject>(
+    execution: &(impl FaceIntervalExecution<O> + ?Sized),
+    object: Option<O>,
+) -> Result<&Curve> {
+    let object = object.ok_or(SolidError::invalid_input(
+        OP_FACE,
+        "no classification curve",
+    ))?;
+    execution
+        .classification_curve(object)
+        .ok_or(SolidError::invalid_input(
+            OP_FACE,
+            "unresolved curve handle",
+        ))
+}
+
+fn face_interval_uv_curve<O: ClassObject>(
+    execution: &(impl FaceIntervalExecution<O> + ?Sized),
+    object: Option<O>,
+) -> Result<Option<&Curve>> {
+    object
+        .map(|object| {
+            execution
+                .classification_curve(object)
+                .ok_or(SolidError::invalid_input(
+                    OP_FACE,
+                    "unresolved UV curve handle",
+                ))
+        })
+        .transpose()
 }
 
 /// The body of [`CurveClassification::classify_face_interval`] on a copy of the
 /// interval.
 fn classify_face_interval_on<O: ClassObject>(
     k: &Kernel,
-    geometry: &impl ClassGeometry<O>,
+    execution: &mut impl FaceIntervalExecution<O>,
     ctx: &FaceIntervalContext<O>,
     ivl: &mut CurveInterval<O>,
 ) -> Result<()> {
@@ -1349,26 +1504,6 @@ fn classify_face_interval_on<O: ClassObject>(
         return Ok(());
     }
 
-    let curve = || -> Result<&Curve> {
-        let c = ctx.curve.ok_or(SolidError::invalid_input(
-            OP_FACE,
-            "no classification curve",
-        ))?;
-        geometry.curve(c).ok_or(SolidError::invalid_input(
-            OP_FACE,
-            "unresolved curve handle",
-        ))
-    };
-    let uv_curve1 = || -> Result<Option<&Curve>> {
-        match ctx.uv_curve1 {
-            Some(c) => geometry.curve(c).map(Some).ok_or(SolidError::invalid_input(
-                OP_FACE,
-                "unresolved UV curve handle",
-            )),
-            None => Ok(None),
-        }
-    };
-
     let face = ctx.face;
     let mut did_min = false;
     let mut did_mid = false;
@@ -1384,16 +1519,23 @@ fn classify_face_interval_on<O: ClassObject>(
                 .start
                 .object()
                 .ok_or(SolidError::null_pointer(OP_FACE))?;
-            min = face_find_vertex_sector(
-                face,
-                v,
-                curve()?,
-                uv_curve1()?,
-                ivl.interval.min(),
-                ivl.interval.max(),
-                OrientType::Same,
-                ctx.src_zone_tol_3d,
-                ctx.uv_space_okay,
+            let curve = ctx.curve.ok_or(SolidError::invalid_input(
+                OP_FACE,
+                "no classification curve",
+            ))?;
+            min = execution.vertex_sector(
+                k,
+                &FaceIntervalVertexQuery {
+                    face,
+                    vertex: v,
+                    curve,
+                    uv_curve: ctx.uv_curve1,
+                    from: ivl.interval.min(),
+                    to: ivl.interval.max(),
+                    direction: OrientType::Same,
+                    tolerance: ctx.src_zone_tol_3d,
+                    uv_space_okay: ctx.uv_space_okay,
+                },
             )?;
         }
         PointClassType::Edge => {
@@ -1402,16 +1544,23 @@ fn classify_face_interval_on<O: ClassObject>(
                 .start
                 .object()
                 .ok_or(SolidError::null_pointer(OP_FACE))?;
-            min = face_edge_curve_on_classify(
-                face,
-                e,
-                ivl.start.t_param(),
-                curve()?,
-                &ivl.interval,
-                OrientType::Same,
-                ctx.src_zone_tol_3d,
-                ctx.uv_space_okay,
-                None,
+            let curve = ctx.curve.ok_or(SolidError::invalid_input(
+                OP_FACE,
+                "no classification curve",
+            ))?;
+            min = execution.edge_side(
+                k,
+                &FaceIntervalEdgeQuery {
+                    face,
+                    edge: e,
+                    edge_parameter: ivl.start.t_param(),
+                    curve,
+                    interval: ivl.interval,
+                    direction: OrientType::Same,
+                    tolerance: ctx.src_zone_tol_3d,
+                    uv_space_okay: ctx.uv_space_okay,
+                    face_index: None,
+                },
             )?;
         }
         _ => {}
@@ -1422,31 +1571,45 @@ fn classify_face_interval_on<O: ClassObject>(
         PointClassType::Vertex => {
             did_max = true;
             let v = ivl.end.object().ok_or(SolidError::null_pointer(OP_FACE))?;
-            max = face_find_vertex_sector(
-                face,
-                v,
-                curve()?,
-                uv_curve1()?,
-                ivl.interval.max(),
-                ivl.interval.min(),
-                OrientType::Opposite,
-                ctx.src_zone_tol_3d,
-                ctx.uv_space_okay,
+            let curve = ctx.curve.ok_or(SolidError::invalid_input(
+                OP_FACE,
+                "no classification curve",
+            ))?;
+            max = execution.vertex_sector(
+                k,
+                &FaceIntervalVertexQuery {
+                    face,
+                    vertex: v,
+                    curve,
+                    uv_curve: ctx.uv_curve1,
+                    from: ivl.interval.max(),
+                    to: ivl.interval.min(),
+                    direction: OrientType::Opposite,
+                    tolerance: ctx.src_zone_tol_3d,
+                    uv_space_okay: ctx.uv_space_okay,
+                },
             )?;
         }
         PointClassType::Edge => {
             did_max = true;
             let e = ivl.end.object().ok_or(SolidError::null_pointer(OP_FACE))?;
-            max = face_edge_curve_on_classify(
-                face,
-                e,
-                ivl.end.t_param(),
-                curve()?,
-                &ivl.interval,
-                OrientType::Opposite,
-                ctx.src_zone_tol_3d,
-                ctx.uv_space_okay,
-                ctx.face_index,
+            let curve = ctx.curve.ok_or(SolidError::invalid_input(
+                OP_FACE,
+                "no classification curve",
+            ))?;
+            max = execution.edge_side(
+                k,
+                &FaceIntervalEdgeQuery {
+                    face,
+                    edge: e,
+                    edge_parameter: ivl.end.t_param(),
+                    curve,
+                    interval: ivl.interval,
+                    direction: OrientType::Opposite,
+                    tolerance: ctx.src_zone_tol_3d,
+                    uv_space_okay: ctx.uv_space_okay,
+                    face_index: ctx.face_index,
+                },
             )?;
         }
         _ => {}
@@ -1460,7 +1623,7 @@ fn classify_face_interval_on<O: ClassObject>(
         // pick a near interval mid-point curve parameter
         let param = ivl.interval.evaluate(0.4567);
 
-        let uv1 = uv_curve1()?;
+        let uv1 = face_interval_uv_curve(execution, ctx.uv_curve1)?;
         match uv1 {
             Some(uv_curve) if ctx.uv_space_okay => {
                 let pnt = uv_curve.evaluate_point(k, param)?;
@@ -1468,18 +1631,19 @@ fn classify_face_interval_on<O: ClassObject>(
 
                 // Don't put this face's classification directly into m_vMid [B97]
                 let mut temp = PointClassification::new(ctx.src_zone_tol_3d);
-                face_point_classify(face, uv, ctx.src_zone_tol_3d, false, true, &mut temp)?;
+                execution.classify_uv(k, face, uv, ctx.src_zone_tol_3d, false, true, &mut temp)?;
                 if temp.point_class() != PointClassType::Unknown {
                     ivl.mid = temp;
                 }
             }
             _ => {
-                let pnt = curve()?.evaluate_point(k, param)?;
+                let pnt = face_interval_curve(execution, ctx.curve)?.evaluate_point(k, param)?;
 
                 // Don't put this face's classification directly into m_vMid [B97]
                 let mut temp = PointClassification::new(ctx.src_zone_tol_3d);
                 // status ignored (assume the point was not on the surface)
-                ignored(face_point_3d_classify(
+                ignored(execution.classify_point(
+                    k,
                     face,
                     pnt,
                     ctx.src_zone_tol_3d,
@@ -2438,5 +2602,238 @@ mod tests {
         let r = cc.test_for_partial_coincident_edges(&k, &geo, &cc).unwrap();
         assert_eq!(r.max_partial_coin_gap, 0.0);
         assert!(r.new_curve_to_test.is_none());
+    }
+
+    struct OwnedSectorExecution<'a> {
+        brep: &'a mut Brep,
+        face: FaceId,
+        vertex: VertexId,
+        source: Curve,
+        calls: Vec<(f64, f64, OrientType)>,
+    }
+    impl FaceIntervalExecution<H> for OwnedSectorExecution<'_> {
+        fn classification_curve(&self, object: H) -> Option<&Curve> {
+            (object == H(0, K::Curve)).then_some(&self.source)
+        }
+        fn vertex_sector(
+            &mut self,
+            k: &Kernel,
+            query: &FaceIntervalVertexQuery<H>,
+        ) -> Result<EndInside> {
+            assert_eq!(query.face, H(self.face.index() as usize, K::Face));
+            assert_eq!(query.vertex, H(self.vertex.index() as usize, K::Vertex));
+            assert_eq!(query.curve, H(0, K::Curve));
+            assert!(query.uv_curve.is_none());
+            self.calls.push((query.from, query.to, query.direction));
+            let result = crate::topology::face::p4::find_vertex_sector(
+                k,
+                self.brep,
+                self.face,
+                crate::topology::face::p4::FindVertexSectorArgs {
+                    vertex: self.vertex,
+                    curve: &self.source,
+                    uv_curve: None,
+                    param_at_vertex: query.from,
+                    param_ivl_end: query.to,
+                    orientation: query.direction,
+                    zone_tol_3d: query.tolerance,
+                    validate_sector: true,
+                    uv_space_okay: query.uv_space_okay,
+                },
+            )?;
+            Ok(EndInside {
+                inside: result.vertexuse.is_some(),
+                possible_problem: result.possible_problem,
+            })
+        }
+    }
+
+    fn corner_classification(k: &Kernel, vertex: VertexId, at_end: bool) -> CurveClassification<H> {
+        let mut cc = classification(k, &[0., 1.]);
+        let interval = cc.at_mut(0).unwrap();
+        let endpoint = if at_end {
+            &mut interval.end
+        } else {
+            &mut interval.start
+        };
+        endpoint.set_class_object(
+            PointClassType::Vertex,
+            Some(H(vertex.index() as usize, K::Vertex)),
+        );
+        cc
+    }
+
+    #[test]
+    fn owning_face_interval_classifies_square_corner_inward_outward_and_backwards() {
+        let k = Kernel::default();
+        for (target, at_end, inside) in [
+            (Vec3::new(0.5, 0.5, 0.), false, true),
+            (Vec3::new(-0.5, -0.5, 0.), false, false),
+            (Vec3::new(0.5, 0.5, 0.), true, true),
+        ] {
+            let (mut brep, vertex, _, _, face) = connectivity_model();
+            let corner = brep.vertex(vertex).unwrap().point;
+            assert_eq!(corner, Vec3::ZERO);
+            let owner = brep.face(face).unwrap().surface.as_ref().unwrap().owner();
+            let points = brep
+                .vertices()
+                .iter()
+                .map(|(_, vertex)| vertex.point)
+                .collect::<Vec<_>>();
+            let intervals = brep
+                .edges()
+                .iter()
+                .map(|(_, edge)| edge.interval)
+                .collect::<Vec<_>>();
+            let source = if at_end {
+                Line::from_points(target, corner, 3)
+            } else {
+                Line::from_points(corner, target, 3)
+            };
+            let mut cc = corner_classification(&k, vertex, at_end);
+            let face_handle = H(face.index() as usize, K::Face);
+            let mut execution = OwnedSectorExecution {
+                brep: &mut brep,
+                face,
+                vertex,
+                source: source.into(),
+                calls: Vec::new(),
+            };
+            cc.classify_face_interval_using(
+                &k,
+                &mut execution,
+                0,
+                true,
+                face_handle,
+                None,
+                true,
+                None,
+            )
+            .unwrap();
+            // Independent planar oracle: the square occupies [0,1]^2. A ray
+            // leaving (0,0) through (+,+) enters it; (-,-) leaves it. The same
+            // ray tested backwards at its ending corner must give the same answer.
+            let interval = cc.at(0).unwrap();
+            assert_eq!(
+                interval.mid.point_class(),
+                if inside {
+                    PointClassType::Face
+                } else {
+                    PointClassType::Unknown
+                }
+            );
+            if inside {
+                assert_eq!(interval.mid.object(), Some(face_handle));
+            }
+            assert_eq!(
+                execution.calls,
+                vec![if at_end {
+                    (1., 0., OrientType::Opposite)
+                } else {
+                    (0., 1., OrientType::Same)
+                }]
+            );
+            assert_eq!(
+                brep.face(face).unwrap().surface.as_ref().unwrap().owner(),
+                owner
+            );
+            assert_eq!(
+                brep.vertices()
+                    .iter()
+                    .map(|(_, vertex)| vertex.point)
+                    .collect::<Vec<_>>(),
+                points
+            );
+            assert_eq!(
+                brep.edges()
+                    .iter()
+                    .map(|(_, edge)| edge.interval)
+                    .collect::<Vec<_>>(),
+                intervals
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_face_interval_keeps_opaque_vertex_sector_deferral() {
+        let k = Kernel::default();
+        let vertex = VertexId::from_index(0);
+        let mut cc = corner_classification(&k, vertex, false);
+        let before = *cc.at(0).unwrap();
+        let geometry = Geo {
+            curves: vec![Line::from_points(Vec3::ZERO, Vec3::new(0.5, 0.5, 0.), 3).into()],
+        };
+        let result =
+            cc.classify_face_interval(&k, &geometry, 0, true, H(0, K::Face), None, true, None);
+        assert!(matches!(
+            result,
+            Err(SolidError::Unported {
+                upstream: "SmFace::FindVertexSector",
+                unit: "topology.face_p4"
+            })
+        ));
+        assert_eq!(cc.at(0).unwrap(), &before);
+    }
+
+    struct OrderedSectorFailure {
+        source: Curve,
+        calls: Vec<(f64, f64, OrientType)>,
+    }
+    impl FaceIntervalExecution<H> for OrderedSectorFailure {
+        fn classification_curve(&self, _: H) -> Option<&Curve> {
+            Some(&self.source)
+        }
+        fn vertex_sector(
+            &mut self,
+            _: &Kernel,
+            query: &FaceIntervalVertexQuery<H>,
+        ) -> Result<EndInside> {
+            self.calls.push((query.from, query.to, query.direction));
+            if query.direction == OrientType::Opposite {
+                return Err(SolidError::unported(
+                    "public endpoint failure",
+                    "intersect.curve_class_p7",
+                ));
+            }
+            Ok(EndInside {
+                inside: true,
+                possible_problem: false,
+            })
+        }
+    }
+
+    #[test]
+    fn owning_interval_query_order_and_failed_end_do_not_publish_inside_classification() {
+        let k = Kernel::default();
+        let vertex = VertexId::from_index(0);
+        let mut cc = corner_classification(&k, vertex, false);
+        cc.at_mut(0).unwrap().end = cc.at(0).unwrap().start;
+        let before = *cc.at(0).unwrap();
+        let mut execution = OrderedSectorFailure {
+            source: Line::from_points(Vec3::ZERO, Vec3::X, 3).into(),
+            calls: Vec::new(),
+        };
+        let result = cc.classify_face_interval_using(
+            &k,
+            &mut execution,
+            0,
+            true,
+            H(0, K::Face),
+            None,
+            true,
+            None,
+        );
+        assert!(matches!(
+            result,
+            Err(SolidError::Unported {
+                upstream: "public endpoint failure",
+                ..
+            })
+        ));
+        assert_eq!(
+            execution.calls,
+            vec![(0., 1., OrientType::Same), (1., 0., OrientType::Opposite)]
+        );
+        assert_eq!(cc.at(0).unwrap(), &before);
     }
 }

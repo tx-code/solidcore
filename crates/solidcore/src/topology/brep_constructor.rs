@@ -24,6 +24,8 @@
 //! Arena links may be incomplete between calls, just as the C++ constructor;
 //! finish is not structural/geometric qualification. Unassigned convenience
 //! endpoints use an invalid sentinel only until `EndLoop` resolves vertex uses.
+//! The existing-vertex loop entry requires a prior outer edge loop; the point
+//! convenience preserves the original helper's broader intermediate call order.
 //! Optional stitching runs the actual pointer validator before delegating; missing
 //! geometry/notification callees remain explicit. See `docs/BREP_CONSTRUCTION.md`
 //! for the separate full-validation and native-acceptance requirements.
@@ -353,6 +355,109 @@ impl BrepConstructor {
             .mate
             .ok_or_else(|| invalid("missing loop mate"))?;
         let v = self.start_vertex_of_loop(point)?;
+        self.finish_single_vertex_loop(loop_id, lu, mate, v)
+    }
+    /// Create an inner one-vertex loop using an existing vertex of this candidate.
+    /// The two loop sides acquire distinct incidences of that exact `VertexId`;
+    /// its coordinates, tolerance and existing incidences are retained.
+    ///
+    /// This identity-preserving entry requires a completed outer edge loop and no
+    /// active loop or edge. The historical point convenience keeps its original
+    /// call-order behavior, including its unqualified first-loop construction.
+    /// Neither entry establishes geometric or native acceptance qualification.
+    ///
+    /// # Errors
+    ///
+    /// Invalid constructor state, absent arena slots or inconsistent face/outer
+    /// loop pairs are rejected before allocating any loop or vertex use. Remaining
+    /// construction failures retain an unpublished candidate, as with `start_loop`.
+    pub fn single_vertex_loop_from_vertex(&mut self, vertex: VertexId) -> Result<LoopId> {
+        self.check_inner_vertex_loop_state(vertex)?;
+        let loop_id = self.start_loop(OrientType::Same)?;
+        let lu = self
+            .brep
+            .loop_(loop_id)?
+            .loopuse
+            .ok_or_else(|| invalid("missing primary loop"))?;
+        let mate = self
+            .brep
+            .loopuse(lu)?
+            .mate
+            .ok_or_else(|| invalid("missing loop mate"))?;
+        self.finish_single_vertex_loop(loop_id, lu, mate, vertex)
+    }
+    fn check_inner_vertex_loop_state(&self, vertex: VertexId) -> Result<()> {
+        // Canonical brep-format.md::Vertex loops distinguishes constructor
+        // convention from validator enforcement: a vertex loop is inner. The
+        // d8ed45a SmBrepData.cpp::StartAndEndSingleVertexLoop helper itself also
+        // permits an outer vertex loop, which ValidatePointers rejects. Keep that
+        // legacy convenience behavior separate from this explicit new policy.
+        if self.loop_id.is_some() || self.edge.is_some() {
+            return Err(invalid("vertex loop requires no active loop or edge"));
+        }
+        let face = self
+            .face
+            .ok_or_else(|| invalid("vertex loop requires active face"))?;
+        self.brep.vertex(vertex)?;
+        let face_record = self.brep.face(face)?;
+        let up_id = face_record
+            .faceuse
+            .ok_or_else(|| invalid("missing primary face use"))?;
+        let up = self.brep.faceuse(up_id)?;
+        let down_id = up.mate.ok_or_else(|| invalid("missing face mate"))?;
+        let down = self.brep.faceuse(down_id)?;
+        if up.face != Some(face)
+            || down.face != Some(face)
+            || down.mate != Some(up_id)
+            || up_id == down_id
+            || up.loopuses.len() != down.loopuses.len()
+        {
+            return Err(invalid("vertex loop requires paired face uses"));
+        }
+        let first = *up
+            .loopuses
+            .first()
+            .ok_or_else(|| invalid("vertex loop requires existing outer edge loop"))?;
+        let second = *down
+            .loopuses
+            .first()
+            .ok_or_else(|| invalid("vertex loop requires existing outer edge loop"))?;
+        let outer = self.brep.loopuse(first)?;
+        let other = self.brep.loopuse(second)?;
+        let outer_loop = outer
+            .loop_
+            .ok_or_else(|| invalid("outer loop use without logical loop"))?;
+        let logical = self.brep.loop_(outer_loop)?;
+        if outer.faceuse != Some(up_id)
+            || other.faceuse != Some(down_id)
+            || outer.mate != Some(second)
+            || other.mate != Some(first)
+            || other.loop_ != Some(outer_loop)
+            || logical.face != face
+            || logical.loopuse != Some(first)
+            || face_record.loops.first() != Some(&outer_loop)
+        {
+            return Err(invalid("vertex loop requires paired outer loop uses"));
+        }
+        for lu in [outer, other] {
+            let LoopuseStart::Edgeuse(Some(edgeuse)) = lu.start else {
+                return Err(invalid("vertex loop requires existing outer edge loop"));
+            };
+            self.brep.edgeuse(edgeuse)?;
+        }
+        Ok(())
+    }
+    fn finish_single_vertex_loop(
+        &mut self,
+        loop_id: LoopId,
+        lu: LoopuseId,
+        mate: LoopuseId,
+        v: VertexId,
+    ) -> Result<LoopId> {
+        // SmBrepData.cpp:387--431 at maintained d8ed45a: both vertex uses
+        // belong to one vertex and point back to opposite sides of one loop.
+        // Reuse this reciprocal update for both entrypoints. In particular, the
+        // existing-identity path must not allocate or coordinate-weld a vertex.
         let a = self.brep.add_vertexuse_record(Vertexuse {
             owner: VertexuseOwner::Loopuse(Some(lu)),
             ..Vertexuse::default()
@@ -456,5 +561,238 @@ impl BrepConstructor {
             super::brep_validation::ValidationOptions::default(),
             None,
         )
+    }
+}
+
+#[cfg(test)]
+mod existing_vertex_loop_tests {
+    use super::*;
+    use crate::curve::{curve::Curve, line::Line};
+    use crate::geom::extent2d::Extent2d;
+    use crate::math::Vec3;
+    use crate::surface::{plane::Plane, surface::Surface};
+
+    fn planar_outer_quad() -> (Kernel, BrepConstructor, FaceId, LoopId) {
+        let k = Kernel::default();
+        let mut builder = BrepConstructor::new().unwrap();
+        builder.start_shell().unwrap();
+        let face = builder.start_face(OrientType::Same).unwrap();
+        builder
+            .set_face_surface(
+                Surface::from(Plane::from_normal(Point3::ZERO, Vec3::Z)),
+                Extent2d::from_bounds(-2., -2., 2., 2.),
+            )
+            .unwrap();
+        let points = [
+            Vec3::new(-2., -2., 0.),
+            Vec3::new(2., -2., 0.),
+            Vec3::new(2., 2., 0.),
+            Vec3::new(-2., 2., 0.),
+        ];
+        let vertices: Vec<_> = points
+            .iter()
+            .map(|point| builder.start_vertex_of_loop(*point).unwrap())
+            .collect();
+        let outer = builder.start_loop(OrientType::Same).unwrap();
+        for index in 0..4 {
+            let next = (index + 1) % 4;
+            builder
+                .start_edge(
+                    &k,
+                    OrientType::Same,
+                    None,
+                    Some(vertices[index]),
+                    Some(vertices[next]),
+                )
+                .unwrap();
+            builder
+                .set_edge_curve(
+                    &k,
+                    Curve::from(Line::from_points(points[index], points[next], 3)),
+                    false,
+                )
+                .unwrap();
+            builder
+                .set_limits(&k, VertexNode::Parameter(0.), VertexNode::Parameter(1.))
+                .unwrap();
+            builder.end_edge().unwrap();
+        }
+        builder.end_loop(&k).unwrap();
+        (k, builder, face, outer)
+    }
+
+    #[test]
+    fn existing_vertex_loop_preserves_identity_and_paired_incidences() {
+        let (mut k, mut builder, face, outer) = planar_outer_quad();
+        let point = Point3::new(0.25, -0.5, 0.);
+        let source = builder.start_vertex(point).unwrap();
+        let coincident_other = builder.start_vertex_of_loop(point).unwrap();
+        builder.brep_mut().vertex_mut(source).unwrap().tolerance = 7e-8;
+        let source_before = builder.brep().vertex(source).unwrap().clone();
+        let untouched = builder.brep().vertex(coincident_other).unwrap().clone();
+        let before_vertices = builder.brep().vertices().len();
+        let before_vertexuses = builder.brep().vertexuses().len();
+        let before_edgeuses = builder.brep().edgeuses().len();
+        let before_marker = builder.current_edgeuse();
+        let shells = (builder.outer_shell, builder.inner_shell);
+        let regions = (builder.region, builder.outer_region);
+        let loop_id = builder.single_vertex_loop_from_vertex(source).unwrap();
+        assert_ne!(loop_id, outer);
+        assert_eq!(builder.brep().vertices().len(), before_vertices);
+        assert_eq!(builder.brep().vertexuses().len(), before_vertexuses + 2);
+        assert_eq!(builder.brep().edgeuses().len(), before_edgeuses);
+        assert_eq!(builder.brep().edges().len(), 4);
+        assert_eq!(
+            builder.brep().vertex(source).unwrap().point,
+            source_before.point
+        );
+        assert_eq!(
+            builder.brep().vertex(source).unwrap().tolerance,
+            source_before.tolerance
+        );
+        assert_eq!(builder.brep().vertex(coincident_other).unwrap(), &untouched);
+        assert_eq!(builder.vertex, Some(source));
+        assert_eq!(builder.current_edgeuse(), before_marker);
+        assert_eq!((builder.outer_shell, builder.inner_shell), shells);
+        assert_eq!((builder.region, builder.outer_region), regions);
+        assert_eq!(builder.face, Some(face));
+        assert!(builder.loop_id.is_none());
+        assert!(builder.edge.is_none());
+        assert_eq!(builder.loop_surface_orientation, OrientType::Same);
+        let logical = builder.brep().loop_(loop_id).unwrap();
+        assert!(logical.edges.is_empty());
+        let primary = logical.loopuse.unwrap();
+        let mate = builder.brep().loopuse(primary).unwrap().mate.unwrap();
+        assert_ne!(primary, mate);
+        assert_eq!(builder.brep().loopuse(mate).unwrap().mate, Some(primary));
+        let mut new_uses = Vec::new();
+        for loopuse in [primary, mate] {
+            let side = builder.brep().loopuse(loopuse).unwrap();
+            assert_eq!(side.orientation, OrientType::Opposite);
+            assert_eq!(side.loop_, Some(loop_id));
+            let LoopuseStart::Vertexuse(Some(vertexuse)) = side.start else {
+                panic!("one vertex incidence required on each loop side")
+            };
+            let incidence = builder.brep().vertexuse(vertexuse).unwrap();
+            assert_eq!(incidence.vertex, Some(source));
+            assert_eq!(incidence.owner, VertexuseOwner::Loopuse(Some(loopuse)));
+            assert!(builder
+                .brep()
+                .faceuse(side.faceuse.unwrap())
+                .unwrap()
+                .loopuses
+                .contains(&loopuse));
+            new_uses.push(vertexuse);
+        }
+        assert_ne!(new_uses[0], new_uses[1]);
+        let source_uses = &builder.brep().vertex(source).unwrap().vertexuses;
+        assert_eq!(source_uses, &new_uses);
+        assert!(builder
+            .brep()
+            .vertex(coincident_other)
+            .unwrap()
+            .vertexuses
+            .is_empty());
+        // Like the point helper, the identity helper already completes its loop.
+        assert!(builder.end_loop(&k).is_err());
+        builder.end_vertex();
+        builder.end_face().unwrap();
+        builder.end_shell(&mut k, false).unwrap();
+        let finished = builder.finish().unwrap();
+        assert_eq!(finished.face(face).unwrap().loops, vec![outer, loop_id]);
+        assert_eq!(finished.vertices().len(), before_vertices);
+    }
+
+    #[test]
+    fn existing_vertex_loop_rejects_outer_position_without_changing_legacy_point_policy() {
+        let mut builder = BrepConstructor::new().unwrap();
+        let source = builder.start_vertex_of_loop(Point3::ZERO).unwrap();
+        let no_face = format!("{builder:?}");
+        assert!(builder.single_vertex_loop_from_vertex(source).is_err());
+        assert_eq!(format!("{builder:?}"), no_face);
+        builder.start_shell().unwrap();
+        builder.start_face(OrientType::Same).unwrap();
+        let before = format!("{builder:?}");
+        assert!(builder.single_vertex_loop_from_vertex(source).is_err());
+        assert_eq!(format!("{builder:?}"), before);
+        // The existing API intentionally retains its unqualified intermediate
+        // first-loop behavior; the new entry does not redefine that behavior.
+        let historical = builder.single_vertex_loop(Point3::ZERO).unwrap();
+        assert_eq!(builder.brep().vertices().len(), 2);
+        let lu = builder.brep().loop_(historical).unwrap().loopuse.unwrap();
+        assert_eq!(
+            builder.brep().loopuse(lu).unwrap().orientation,
+            OrientType::Same
+        );
+        let before = format!("{builder:?}");
+        assert!(builder.single_vertex_loop_from_vertex(source).is_err());
+        assert_eq!(format!("{builder:?}"), before);
+    }
+
+    #[test]
+    fn existing_vertex_loop_rejects_active_loop_and_preserves_unpublished_edge_state() {
+        let (k, mut builder, _, _) = planar_outer_quad();
+        let source = builder.start_vertex_of_loop(Point3::ZERO).unwrap();
+        builder.start_loop(OrientType::Opposite).unwrap();
+        let active_empty = format!("{builder:?}");
+        assert!(builder.single_vertex_loop_from_vertex(source).is_err());
+        assert_eq!(format!("{builder:?}"), active_empty);
+        builder
+            .start_edge(&k, OrientType::Same, None, Some(source), Some(source))
+            .unwrap();
+        let active_edge = format!("{builder:?}");
+        assert!(builder.single_vertex_loop_from_vertex(source).is_err());
+        assert_eq!(format!("{builder:?}"), active_edge);
+        assert!(builder.finish().is_err());
+    }
+
+    #[test]
+    fn existing_vertex_loop_rejects_missing_vertex_slot_before_allocating() {
+        let (_, mut builder, _, _) = planar_outer_quad();
+        let before = format!("{builder:?}");
+        let missing = VertexId::from_index(u32::MAX);
+        assert!(matches!(
+            builder.single_vertex_loop_from_vertex(missing),
+            Err(SolidError::NotFound { .. })
+        ));
+        assert_eq!(format!("{builder:?}"), before);
+        let source = builder.start_vertex_of_loop(Point3::ZERO).unwrap();
+        assert!(builder.single_vertex_loop_from_vertex(source).is_ok());
+    }
+
+    #[test]
+    fn existing_vertex_loop_rejects_missing_pair_slots_without_partial_allocation() {
+        let (_, mut builder, face, _) = planar_outer_quad();
+        let source = builder.start_vertex_of_loop(Point3::ZERO).unwrap();
+        let up = builder.brep().face(face).unwrap().faceuse.unwrap();
+        let down = builder.brep().faceuse(up).unwrap().mate.unwrap();
+        builder.brep_mut().faceuse_mut(up).unwrap().mate = Some(FaceuseId::from_index(u32::MAX));
+        let missing_faceuse = format!("{builder:?}");
+        assert!(matches!(
+            builder.single_vertex_loop_from_vertex(source),
+            Err(SolidError::NotFound { .. })
+        ));
+        assert_eq!(format!("{builder:?}"), missing_faceuse);
+        builder.brep_mut().faceuse_mut(up).unwrap().mate = Some(down);
+        let outer = builder.brep().faceuse(up).unwrap().loopuses[0];
+        builder.brep_mut().faceuse_mut(up).unwrap().loopuses[0] = LoopuseId::from_index(u32::MAX);
+        let missing_loopuse = format!("{builder:?}");
+        assert!(matches!(
+            builder.single_vertex_loop_from_vertex(source),
+            Err(SolidError::NotFound { .. })
+        ));
+        assert_eq!(format!("{builder:?}"), missing_loopuse);
+        builder.brep_mut().faceuse_mut(up).unwrap().loopuses[0] = outer;
+        let edgeuse = builder.brep().loopuse(outer).unwrap().start;
+        builder.brep_mut().loopuse_mut(outer).unwrap().start =
+            LoopuseStart::Edgeuse(Some(EdgeuseId::from_index(u32::MAX)));
+        let missing_edgeuse = format!("{builder:?}");
+        assert!(matches!(
+            builder.single_vertex_loop_from_vertex(source),
+            Err(SolidError::NotFound { .. })
+        ));
+        assert_eq!(format!("{builder:?}"), missing_edgeuse);
+        builder.brep_mut().loopuse_mut(outer).unwrap().start = edgeuse;
+        assert!(builder.single_vertex_loop_from_vertex(source).is_ok());
     }
 }

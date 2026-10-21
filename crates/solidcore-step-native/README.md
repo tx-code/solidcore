@@ -25,7 +25,23 @@ No repair or stitching runs. Failures return no partial native model.
 
 `Candidate::validate_native` executes the actual pointer validator and level-two
 descendant walk. Both boolean/status and reports must pass. It consumes the
-candidate on failure. Native validity alone never establishes source equivalence.
+candidate on failure. Native validity alone never establishes source equivalence. `validate_native_detailed`
+executes the same gate and retains the complete owning native assertion array on
+failure, including partial reports from an interrupted kernel call. Its stage
+and completion flag distinguish that case from a normally completed rejection.
+No failed candidate is returned. The development CLI emits a bounded first-128
+summary, marks truncation, and preserves the original source-unit receipts and
+legacy error/exit. Diagnostic object keys belong to the discarded candidate and
+are not live model handles.
+
+Native interval endpoint queries execute against the same mutable model that
+owns the face, including vertex sectors, edge sides and point classifications.
+The line-intersection leaf retains the resolved face working tolerance through
+local endpoint solves and near-tangent classification. Detached borrowed queries
+keep their explicit unresolved-owner failures; no copied model or system
+fallback supplies missing evidence. These connections cover the exercised paths,
+not every remaining owner-dependent kernel operation.
+
 
 `Candidate::accept_open_planar` currently qualifies **one open planar face** only.
 The application must supply a named `AcceptanceQuality` with separate positive
@@ -122,6 +138,19 @@ defining native curves. Supported receivers retain their actual plane, cylinder,
 cone, torus or B-spline kind. Derived UV observations and native tolerance/growth
 checks are separate from continuous approximation bounds. No fitting or repair is
 silently substituted. Unsupported required content returns an error with no model.
+
+The initial vertex-bound extension supports a cone face with one complete
+circular boundary and one explicit pole `VERTEX_LOOP`. Necessary source WHERE
+checks establish its types; native construction separately checks the point's
+analytic pole and complete ring support against the selected consistency budget.
+A derived meridian makes the computational chart valid. The original point loop
+remains in the source receipt, and `GeneralReport::vertex_bounds` records its
+same source vertex at the target chart's collapsed singular boundary. Creating
+an additional native inner point loop there would duplicate its incidence across
+loops; silently dropping the source boundary would lose its role. No coordinate
+welding, source-curve trimming, fitting or tolerance relaxation is used. Other
+vertex-bound regions remain explicitly unsupported. Numerical material/trim
+observations continue to grant no continuous general qualification.
 
 Use `--features cli,general-development` for the CLI route, then explicitly select
 `--general-development --quality FILE.json`. Quality JSON contains exactly these

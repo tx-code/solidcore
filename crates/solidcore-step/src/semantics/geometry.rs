@@ -231,6 +231,89 @@ impl<'s> Geometry<'_, 's> {
         }
         self.wireframes()?;
         self.bounded_surface_role()?;
+        self.advanced_face_bounds()?;
+        Ok(())
+    }
+    // Fixed standard-additions.v1.json: AP214 1345--1353; N2635 2167--2171;
+    // modified N916 580--591. These are SOURCE type predicates, not a proof of
+    // a pole, on-surface point, region or native UV. P0 does not run this pass.
+    // Charge each attempted WHERE before visiting its original field/reference
+    // occurrences. D1 binding/type errors have already stopped the request.
+    fn advanced_face_bounds(&mut self) -> Checked<()> {
+        if self.c.schema()?.find("VERTEX_LOOP").is_none() {
+            return Ok(());
+        }
+        for face in self.population("ADVANCED_FACE")? {
+            let bounds = self.field(face, "bounds")?;
+            self.count(bounds.span, Predicate::Entity)?;
+            for (index, occurrence) in bounds.children.iter().enumerate() {
+                self.c.visit(occurrence.span)?;
+                let bound = self.c.target(occurrence)?;
+                let loop_reference = self.field(bound, "bound")?;
+                self.c.visit(loop_reference.span)?;
+                let loop_record = self.c.target(loop_reference)?;
+                if !self.c.is_a(loop_record, "VERTEX_LOOP") {
+                    continue;
+                }
+                let vertex_reference = self.field(loop_record, "loop_vertex")?;
+                self.c.visit(vertex_reference.span)?;
+                let vertex = self.c.target(vertex_reference)?;
+                let mut valid = self.c.is_a(vertex, "VERTEX_POINT");
+                let mut related = vec![loop_reference.span, vertex_reference.span];
+                let mut actual = "loop_vertex is not VERTEX_POINT";
+                if valid {
+                    let point_reference = self.field(vertex, "vertex_geometry")?;
+                    self.c.visit(point_reference.span)?;
+                    related.push(point_reference.span);
+                    valid = self
+                        .c
+                        .is_a(self.c.target(point_reference)?, "CARTESIAN_POINT");
+                    actual = "vertex_geometry is not CARTESIAN_POINT";
+                }
+                if !valid {
+                    // Only bounds[index] belongs to this owner's parameter
+                    // path; subsequent reference hops are separate related spans.
+                    return Err(self.failure(
+                        face,
+                        "bounds",
+                        occurrence,
+                        "ADVANCED_FACE.WR7",
+                        "VERTEX_POINT with CARTESIAN_POINT geometry",
+                        actual,
+                        &[index + 1],
+                        false,
+                        None,
+                        related,
+                    ));
+                }
+            }
+            self.count(bounds.span, Predicate::Entity)?;
+            for (index, occurrence) in bounds.children.iter().enumerate() {
+                self.c.visit(occurrence.span)?;
+                let bound = self.c.target(occurrence)?;
+                let loop_reference = self.field(bound, "bound")?;
+                self.c.visit(loop_reference.span)?;
+                let loop_record = self.c.target(loop_reference)?;
+                let matches = ["EDGE_LOOP", "VERTEX_LOOP"]
+                    .iter()
+                    .filter(|name| self.c.is_a(loop_record, name))
+                    .count();
+                if matches != 1 {
+                    return Err(self.failure(
+                        face,
+                        "bounds",
+                        occurrence,
+                        "ADVANCED_FACE.WR8",
+                        "exactly one of EDGE_LOOP and VERTEX_LOOP",
+                        &matches.to_string(),
+                        &[index + 1],
+                        false,
+                        None,
+                        vec![loop_reference.span],
+                    ));
+                }
+            }
+        }
         Ok(())
     }
     fn bounded_surface_role(&mut self) -> Checked<()> {

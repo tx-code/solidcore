@@ -20,7 +20,8 @@ pub use certify::{AcceptanceQuality, Certificate, Imported};
 #[cfg(feature = "general-development")]
 pub use general::{
     construct_general, GeneralLoopMapping, GeneralObservations, GeneralQuality, GeneralReport,
-    GeneralTrimMeasurements, GeneralTrimUseMeasurement, ParameterMapping, UnitConversion,
+    GeneralTrimMeasurements, GeneralTrimUseMeasurement, GeneralVertexBoundMapping,
+    ParameterMapping, UnitConversion,
 };
 #[cfg(feature = "general-development")]
 pub use general::{
@@ -30,6 +31,7 @@ pub use general::{
 use plan::{ExactPoint, Plan};
 
 use solidcore::curve::{curve::Curve, line::Line};
+use solidcore::geom::assert_array::AssertArray;
 use solidcore::geom::extent2d::Extent2d;
 use solidcore::kernel::Kernel;
 use solidcore::math::{Vec2, Vec3};
@@ -164,6 +166,44 @@ impl SourcePlan {
         }
     }
 }
+/// Actual native stage at which validation stopped, including a budget stop
+/// before that stage's kernel call. Stage identity does not mean it completed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeValidationStage {
+    /// Required-pointer and complete pointer/geometry walk, executed first.
+    Pointer,
+    /// Level-two descendant validation, only after the pointer gate passed.
+    Deep,
+}
+
+/// Owning diagnostic evidence from a consumed, unpublished validation candidate.
+/// No candidate, `BRep` or kernel context accompanies this failure. Native object
+/// keys refer only to the failed model; they cannot be queried as live handles.
+#[derive(Debug)]
+pub struct NativeValidationFailure {
+    /// Exactly the error returned by the compatible `validate_native` interface.
+    pub error: Error,
+    /// Actual stage attempted or awaiting its resource charge.
+    pub stage: NativeValidationStage,
+    /// True only when this stage's native call returned normally and its result
+    /// or nonempty reports rejected the model. Resource/kernel errors are false,
+    /// even if a stopped kernel call produced partial diagnostic reports.
+    pub completed: bool,
+    /// Complete untruncated array, in native insertion order. An empty array
+    /// before execution is distinct from a completed rejecting boolean result.
+    pub reports: AssertArray,
+}
+impl std::fmt::Display for NativeValidationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
+}
+impl std::error::Error for NativeValidationFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// Actual executed native checks, independent of source/continuous acceptance.
 #[derive(Clone, Copy, Debug)]
 pub struct NativeChecks {
@@ -288,8 +328,28 @@ impl Candidate {
     ///
     /// # Errors
     /// Actual validator dependencies/failures, or any nonempty native report.
-    pub fn validate_native(mut self) -> Result<Self> {
-        use solidcore::geom::assert_array::AssertArray;
+    pub fn validate_native(self) -> Result<Self> {
+        self.validate_native_detailed()
+            .map_err(|failure| failure.error)
+    }
+    /// Execute the same pointer and level-two gates as `validate_native`, retaining
+    /// complete native reports on failure. Order, per-stage charges and rejection
+    /// conditions are identical; no gate is skipped and no tolerance is enlarged.
+    ///
+    /// Failure consumes and drops the unpublished model. Its owning report array
+    /// can outlive the request, but its native object keys are diagnostic identities
+    /// from the failed model, not handles to any returned/queryable `BRep`.
+    ///
+    /// # Errors
+    /// Resource/kernel failures retain partial reports with `completed=false`.
+    /// A normal native return rejected by its boolean/reports has `completed=true`.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The diagnostic contract owns the original Error and complete native array without retaining a model"
+    )]
+    pub fn validate_native_detailed(
+        mut self,
+    ) -> std::result::Result<Self, NativeValidationFailure> {
         use solidcore::topology::brep_validation::{
             self as validation, AssertValidOptions, CheckLevel, ValidationOptions,
         };
@@ -301,29 +361,64 @@ impl Candidate {
             plan.invalidate_final_trim_measurements();
         }
         let mut pointers = AssertArray::new();
-        self.charge()?;
-        validation::validate_pointers(
-            &mut self.kernel,
-            &mut self.brep,
-            ValidationOptions::default(),
-            Some(&mut pointers),
-        )?;
+        let pointer_result = self.charge().and_then(|()| {
+            validation::validate_pointers(
+                &mut self.kernel,
+                &mut self.brep,
+                ValidationOptions::default(),
+                Some(&mut pointers),
+            )
+            .map_err(Error::from)
+        });
+        if let Err(error) = pointer_result {
+            return Err(NativeValidationFailure {
+                error,
+                stage: NativeValidationStage::Pointer,
+                completed: false,
+                reports: pointers,
+            });
+        }
         if !pointers.is_empty() {
-            return Err(Error::Postcheck("NativePointerValidation", pointers.len()));
+            let count = pointers.len();
+            return Err(NativeValidationFailure {
+                error: Error::Postcheck("NativePointerValidation", count),
+                stage: NativeValidationStage::Pointer,
+                completed: true,
+                reports: pointers,
+            });
         }
         let mut deep = AssertArray::new();
-        self.charge()?;
-        let valid = validation::assert_valid(
-            &mut self.kernel,
-            &mut self.brep,
-            AssertValidOptions {
-                level: CheckLevel::Two,
-                walk: true,
-            },
-            Some(&mut deep),
-        )?;
+        let deep_result = self.charge().and_then(|()| {
+            validation::assert_valid(
+                &mut self.kernel,
+                &mut self.brep,
+                AssertValidOptions {
+                    level: CheckLevel::Two,
+                    walk: true,
+                },
+                Some(&mut deep),
+            )
+            .map_err(Error::from)
+        });
+        let valid = match deep_result {
+            Ok(valid) => valid,
+            Err(error) => {
+                return Err(NativeValidationFailure {
+                    error,
+                    stage: NativeValidationStage::Deep,
+                    completed: false,
+                    reports: deep,
+                })
+            }
+        };
         if !valid || !deep.is_empty() {
-            return Err(Error::Postcheck("NativeDeepValidation", deep.len()));
+            let count = deep.len();
+            return Err(NativeValidationFailure {
+                error: Error::Postcheck("NativeDeepValidation", count),
+                stage: NativeValidationStage::Deep,
+                completed: true,
+                reports: deep,
+            });
         }
         self.native_checks = Some(NativeChecks {
             pointer_reports: pointers.len(),
@@ -649,4 +744,124 @@ pub fn construct_planar(checked: &p::Outcome, options: Options) -> Result<Candid
         native_checks: None,
         initial_work_tolerance_mm: options.work_tolerance_mm,
     })
+}
+
+#[cfg(test)]
+mod validation_diagnostics_tests {
+    use super::*;
+    use solidcore::geom::assert_array::labels;
+    use solidcore_step::{inspect, Limits};
+
+    fn plane() -> Candidate {
+        let raw = inspect(
+            include_bytes!("../../solidcore-step/tests/fixtures/plane.step").to_vec(),
+            Limits::planar_fixtures(),
+        );
+        let source = s::check(
+            &raw,
+            s::Limits::fixtures(),
+            &s::Options {
+                check_part_and_closure: true,
+                check_geometry_dependencies: true,
+                ..s::Options::default()
+            },
+        );
+        let planar = p::check(&source, p::Quality::planar_fixture(), p::Limits::fixtures());
+        construct_planar(
+            &planar,
+            Options {
+                operations: 100_000,
+                work_tolerance_mm: 1e-6,
+            },
+        )
+        .unwrap()
+    }
+
+    fn missing_faceuse() -> Candidate {
+        let mut model = plane();
+        let face = *model.faces.values().next().unwrap();
+        model.brep.face_mut(face).unwrap().faceuse = None;
+        model
+    }
+
+    #[test]
+    fn real_missing_pointer_keeps_partial_report_after_model_drop_and_old_error() {
+        let Err(failure) = missing_faceuse().validate_native_detailed() else {
+            panic!("missing face use was accepted");
+        };
+        assert_eq!(failure.stage, NativeValidationStage::Pointer);
+        // Required-pointer prefix stops with its ordinary kernel error. It did
+        // NOT complete a walk, despite having emitted a real native report.
+        assert!(!failure.completed);
+        assert!(matches!(failure.error, Error::Kernel(_)));
+        assert_eq!(failure.reports.len(), 1);
+        let report = &failure.reports.reports()[0];
+        assert_eq!(report.test_index, 122);
+        assert_eq!(report.reporting_type, labels::BREP_TYPE);
+        assert_eq!(report.owner_type, labels::FACE_TYPE);
+        assert_eq!(report.owner_type_string, Some("SmFace"));
+        assert!(report.owner.is_some());
+        let Err(original_error) = missing_faceuse().validate_native() else {
+            panic!("compatible validator accepted a missing face use");
+        };
+        assert_eq!(failure.error.to_string(), original_error.to_string());
+        let replay = plane().validate_native_detailed().unwrap();
+        assert!(replay.native_checks().is_some());
+        assert_eq!(
+            replay.source().source().bytes(),
+            include_bytes!("../../solidcore-step/tests/fixtures/plane.step")
+        );
+    }
+
+    #[test]
+    fn per_stage_resource_stops_have_no_reports_and_do_not_claim_completion() {
+        for (remaining, stage) in [
+            (0, NativeValidationStage::Pointer),
+            (1, NativeValidationStage::Deep),
+        ] {
+            let mut model = plane();
+            model.operation_limit = model.operations() + remaining;
+            let Err(failure) = model.validate_native_detailed() else {
+                panic!("validation exceeded its explicit operation budget");
+            };
+            assert!(matches!(failure.error, Error::ResourceLimit));
+            assert_eq!(failure.stage, stage);
+            assert!(!failure.completed);
+            assert!(failure.reports.is_empty());
+        }
+        let mut original = plane();
+        original.operation_limit = original.operations();
+        assert!(matches!(
+            original.validate_native(),
+            Err(Error::ResourceLimit)
+        ));
+        let mut exact = plane();
+        let before = exact.operations();
+        exact.operation_limit = before + 2;
+        let exact = exact.validate_native_detailed().unwrap();
+        assert_eq!(exact.operations(), before + 2);
+        let compatible = plane().validate_native().unwrap();
+        assert_eq!(compatible.operations(), exact.operations());
+        assert_eq!(compatible.native_checks().unwrap().pointer_reports, 0);
+        assert_eq!(compatible.native_checks().unwrap().deep_reports, 0);
+    }
+
+    #[test]
+    fn normally_returned_pointer_reports_remain_a_completed_postcheck_rejection() {
+        let mut model = plane();
+        let face = *model.faces.values().next().unwrap();
+        let primary = model.brep.face(face).unwrap().faceuse.unwrap();
+        // Keep every required link; break the pointer walk's explicit predicate
+        // that the primary face use has SAME orientation (native BRep test14).
+        model.brep.faceuse_mut(primary).unwrap().orientation = OrientType::Opposite;
+        let Err(failure) = model.validate_native_detailed() else {
+            panic!("invalid primary face orientation was accepted");
+        };
+        assert_eq!(failure.stage, NativeValidationStage::Pointer);
+        assert!(failure.completed);
+        assert!(
+            matches!(failure.error, Error::Postcheck("NativePointerValidation", count) if count == failure.reports.len())
+        );
+        assert!(failure.reports.reports().iter().any(|r| r.test_index == 14));
+    }
 }

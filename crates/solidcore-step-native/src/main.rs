@@ -195,14 +195,106 @@ fn general(
     )?)
 }
 
+// CLI development diagnostics are bounded independently from the library's
+// complete owning array. No raw STEP bytes, model or filesystem path is included.
+#[cfg(feature = "general-development")]
+const NATIVE_DIAGNOSTIC_LIMIT: usize = 128;
+
+#[cfg(feature = "general-development")]
+fn native_diagnostic_number(value: f64) -> serde_json::Value {
+    if value == solidcore::math::UNDEF_DOUBLE {
+        serde_json::json!("Undefined")
+    } else if value.is_finite() {
+        serde_json::json!(value)
+    } else if value.is_nan() {
+        serde_json::json!("NaN")
+    } else if value.is_sign_negative() {
+        serde_json::json!("-Infinity")
+    } else {
+        serde_json::json!("Infinity")
+    }
+}
+
+#[cfg(feature = "general-development")]
+fn capture_source_semantics(source: &solidcore_step::semantics::Snapshot) -> serde_json::Value {
+    // Borrow this candidate's sealed owner BEFORE validation consumes it. The
+    // serialized receipt retains its original diagnostics/false syntax flag;
+    // neither resettable progress nor the native failure can upgrade it.
+    serde_json::json!({
+        "source_policy": source.source_policy(),
+        "schema_interpretation": source.applied_interpretation(),
+        "development_unit_policy": source.development_unit_policy(),
+        "development_unit_receipt": source.development_unit_receipt(),
+        "development_unit_diagnostics": source.development_unit_diagnostics(),
+        "source_syntax_verified": source.development_unit_receipt().map(solidcore_step::semantics::DevelopmentUnitReceipt::source_syntax_verified)
+    })
+}
+
+#[cfg(feature = "general-development")]
+fn native_validation_failure_summary(
+    failure: &solidcore_step_native::NativeValidationFailure,
+    source_semantics: &serde_json::Value,
+) -> serde_json::Value {
+    use solidcore_step_native::NativeValidationStage;
+    let diagnostics = failure
+        .reports
+        .reports()
+        .iter()
+        .take(NATIVE_DIAGNOSTIC_LIMIT)
+        .map(|r| {
+            serde_json::json!({
+                "name": r.name, "type": format!("{:?}", r.assert_type),
+                "typeCode": r.assert_type.code(), "test": r.test_index,
+                "reportingType": r.reporting_type, "listIndex": r.list_index,
+                // Hexadecimal strings retain all 64 bits through JSON/JS readers.
+                // These keys describe the discarded model, never live query handles.
+                "reporterKey": r.reporter.map(|k| format!("{:016x}", k.0)),
+                "ownerKey": r.owner.map(|k| format!("{:016x}", k.0)),
+                "ownerType": r.owner_type, "ownerTypeName": r.owner_type_string,
+                "otherKey": r.other.map(|k| format!("{:016x}", k.0)),
+                "otherType": r.other_type, "otherTypeName": r.other_type_string,
+                "message": r.message.as_deref(), "messageForFile": r.message_for_file,
+                "ok": r.ok,
+                "ownerParam": [native_diagnostic_number(r.owner_param.x), native_diagnostic_number(r.owner_param.y)],
+                "otherParam": [native_diagnostic_number(r.other_param.x), native_diagnostic_number(r.other_param.y)],
+                "tol": native_diagnostic_number(r.tol3d),
+                "value": native_diagnostic_number(r.value),
+                "distance3d": native_diagnostic_number(r.dist3d)
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema": "solidcore.step.native-validation-failure.v1",
+        "status": "NativeValidationFailed", "accepted_import": false,
+        "stage": match failure.stage { NativeValidationStage::Pointer => "Pointer", NativeValidationStage::Deep => "Deep" },
+        "completed": failure.completed, "total_reports": failure.reports.len(),
+        "diagnostics_first": diagnostics,
+        "truncated": failure.reports.len() > NATIVE_DIAGNOSTIC_LIMIT,
+        "native_ids": "diagnostic_keys_from_discarded_candidate_not_live_handles",
+        "source_semantics": source_semantics
+    })
+}
+
 #[cfg(feature = "general-development")]
 fn run_general(
     raw: &solidcore_step::Outcome,
     args: &Arguments,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut model = general(raw, args)?
-        .validate_native()?
-        .measure_general_trims()?;
+    let candidate = general(raw, args)?;
+    let source_semantics = capture_source_semantics(candidate.source());
+    let checked = match candidate.validate_native_detailed() {
+        Ok(checked) => checked,
+        Err(failure) => {
+            eprintln!(
+                "{}",
+                native_validation_failure_summary(&failure, &source_semantics)
+            );
+            // Keep the original Error display and process exit after the extra
+            // owning diagnostic evidence; failure never returns a partial model.
+            return Err(failure.error.into());
+        }
+    };
+    let mut model = checked.measure_general_trims()?;
     if let Some(accuracy) = args.material_accuracy {
         model = model.measure_general_material(accuracy)?;
     }
@@ -446,5 +538,88 @@ mod tests {
                 assert!(parse_arguments(prefix.into_iter().chain([flag]).map(Into::into)).is_err());
             }
         }
+    }
+
+    #[cfg(feature = "general-development")]
+    #[test]
+    fn failure_summary_uses_real_native_reports_and_never_returns_a_model() {
+        use solidcore::geom::assert_array::AssertArray;
+        use solidcore::topology::{brep_validation, Brep};
+        use solidcore_step_native::{Error, NativeValidationFailure, NativeValidationStage};
+        // Native required-links validation produces test113 for this real empty
+        // BRep without infinite-region infrastructure; no report is fabricated.
+        let mut reports = AssertArray::new();
+        let error = brep_validation::required_links(&Brep::new(), Some(&mut reports)).unwrap_err();
+        let failure = NativeValidationFailure {
+            error: Error::Kernel(error),
+            stage: NativeValidationStage::Pointer,
+            completed: false,
+            reports,
+        };
+        let original_error = failure.error.to_string();
+        let summary = super::native_validation_failure_summary(&failure, &serde_json::json!({}));
+        assert_eq!(summary["status"], "NativeValidationFailed");
+        assert_eq!(summary["accepted_import"], false);
+        assert_eq!(summary["stage"], "Pointer");
+        assert_eq!(summary["completed"], false);
+        assert_eq!(summary["total_reports"], failure.reports.len());
+        assert_eq!(summary["truncated"], false);
+        assert_eq!(summary["diagnostics_first"][0]["test"], 113);
+        assert!(summary["diagnostics_first"][0]["ownerKey"].is_string());
+        assert!(!summary["diagnostics_first"][0]["name"]
+            .as_str()
+            .unwrap()
+            .is_empty());
+        assert!(summary.get("model").is_none());
+        assert!(summary.get("raw").is_none());
+        assert!(summary.get("path").is_none());
+        assert_eq!(failure.error.to_string(), original_error);
+        assert_eq!(failure.reports.len(), 1);
+        assert!(serde_json::to_vec(&summary).is_ok());
+    }
+
+    #[cfg(feature = "general-development")]
+    #[test]
+    fn failure_source_context_keeps_original_development_receipt_after_owner_drop() {
+        use solidcore_step::{inspect, semantics as s, Limits};
+        let text = include_str!("../../solidcore-step/tests/fixtures/plane.step")
+            .replace("AP203_CONFIGURATION_CONTROLLED_3D_DESIGN_OF_MECHANICAL_PARTS_AND_ASSEMBLIES_MIM_LF {1 0 10303 403 2 1 2}", "AUTOMOTIVE_DESIGN {1 0 10303 214 3 1 1}")
+            .replace("#11=(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.));", "#11=(CONVERSION_BASED_UNIT('public angle',#900) NAMED_UNIT(#902) PLANE_ANGLE_UNIT());")
+            .replace("ENDSEC;\nEND-ISO", "#900=PLANE_ANGLE_MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE(0.0174532925199433),#901);\n#901=(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.));\n#902=DIMENSIONAL_EXPONENTS(0.,0.,0.,0.,0.,0.,0.);\nENDSEC;\nEND-ISO");
+        let raw = inspect(text.as_bytes().to_vec(), Limits::planar_fixtures());
+        let source = s::check(
+            &raw,
+            s::Limits::fixtures(),
+            &s::Options {
+                geometry_scope: s::GeometryScope::GeneralBrep,
+                check_geometry_dependencies: true,
+                check_part_and_closure: true,
+                development_unit_policy: DevelopmentUnitPolicy::Ap214ExplicitPlaneAngleDimensions,
+                ..s::Options::default()
+            },
+        );
+        assert_eq!(source.status, s::Status::CheckedWithDiagnostics);
+        let snapshot = source.snapshot.as_ref().unwrap();
+        let context = super::capture_source_semantics(snapshot);
+        drop(source);
+        drop(raw);
+        assert_eq!(
+            context["development_unit_policy"],
+            "Ap214ExplicitPlaneAngleDimensions"
+        );
+        assert_eq!(context["source_syntax_verified"], false);
+        assert_eq!(
+            context["development_unit_receipt"]["sourceSyntaxVerified"],
+            false
+        );
+        assert_eq!(
+            context["development_unit_receipt"]["formalAPValidity"],
+            "Unestablished"
+        );
+        assert_eq!(
+            context["development_unit_diagnostics"][0]["source"]["key"],
+            "DerivedSlotMarkerRequired"
+        );
+        assert!(context.get("raw").is_none());
     }
 }

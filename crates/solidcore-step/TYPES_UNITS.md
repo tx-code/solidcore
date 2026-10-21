@@ -164,3 +164,19 @@ expected values do not come from C++. Source-parser regression remains separatel
 checked. These checks establish compatibility and the listed synthetic scope,
 not full AP conformance or geometric import qualification. Per-run receipts and
 any private model evidence remain outside Git.
+
+## Separate standard-addition identity
+
+The optional generator argument `--additions catalog/standard-additions.v1.json`
+adds only the audited VERTEX_LOOP transport to the four general profiles. It does
+not modify the C++ snapshot, its source fingerprint, source schema identities,
+old descriptor order or P0. VERTEX_LOOP is appended after all old declarations.
+No schema file or network lookup is needed to build the checked-in Rust arrays.
+
+`catalog_source_sha256()` continues to identify the complete unchanged C++ export.
+`catalog_extensions_sha256()` separately identifies the canonical addition manifest
+(excluding its trailing CR/LF), or returns `None` when generation requested no
+addition. The generated header distinguishes these two provenance sources. The
+manifest is not a claimed updated C++ export or an independent full EXPRESS
+compiler. N916's verified VERTEX_LOOP admission does not admit its borrowed
+foreign descriptors; its existing foreign guards remain in force.

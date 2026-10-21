@@ -42,6 +42,11 @@
 //!   ported.
 //! - **Bounds.** The leaf solve takes at most six guesses (upstream's fixed arrays). No
 //!   recursion.
+//! - **Owning leaf execution.** The caller-resolved live face tolerance and kernel
+//!   reach both local curve intersection and the discontinuous line-end point
+//!   solve and near-tangent intersection classifier. Borrowed execution retains
+//!   its unresolved-owner error; no system
+//!   tolerance or copied topology owner replaces the actual face context.
 
 use super::p1::{is_node_valid, is_point_valid, surface_to_evaluate};
 use super::p2::{original_surface, LsiGlobalSolver, Surface, TsectCurveType};
@@ -143,6 +148,7 @@ struct XsectPointClass {
 /// `sm_ClassifyCurveSurfaceXSectPoint` (`surface::surface::p4`).
 fn classify_curve_surface_xsect_point(
     k: &Kernel,
+    owner_context: Option<(&Kernel, f64)>,
     surface: &Surface,
     domain: &Extent2d,
     curve: &Curve,
@@ -150,7 +156,18 @@ fn classify_curve_surface_xsect_point(
     uv: Point2,
     t: f64,
 ) -> Result<XsectPointClass> {
-    let c = p4::classify_curve_surface_xsect_point(k, surface, domain, curve, interval, uv, t)?;
+    let kernel = owner_context.map_or(k, |(kernel, _)| kernel);
+    let face_tolerance = owner_context.map(|(_, tolerance)| tolerance);
+    let c = p4::classify_curve_surface_xsect_point_for_face(
+        kernel,
+        surface,
+        domain,
+        curve,
+        interval,
+        uv,
+        t,
+        face_tolerance,
+    )?;
     Ok(XsectPointClass {
         guess: c.found_guess.then_some((c.new_uv_guess, c.new_t_guess)),
         point_type: c.point_type,
@@ -160,13 +177,26 @@ fn classify_curve_surface_xsect_point(
 /// `SmSurface::LocalPointSolve` (`rbFoundAnswer`, `rSolution`).
 fn surface_local_point_solve<O: Copy>(
     k: &Kernel,
+    owner_context: Option<(&Kernel, f64)>,
     surface: &Surface,
     domain: &Extent2d,
     operation: SolverOperation,
     point: Point3,
     uv_guess: Point2,
 ) -> Result<(bool, Solution<O>)> {
-    let r = surface.local_point_solve::<O>(k, domain, operation, point, uv_guess)?;
+    // This is the same LocalPointSolve dispatch used by the borrowed entry.
+    // The owning LSI already resolved this exact face's tolerance; retain it
+    // through the line-end discontinuity branch as through its curve solve.
+    let kernel = owner_context.map_or(k, |(kernel, _)| kernel);
+    let face_tolerance = owner_context.map(|(_, tolerance)| tolerance);
+    let r = surface.local_point_solve_for_face::<O>(
+        kernel,
+        domain,
+        operation,
+        point,
+        uv_guess,
+        face_tolerance,
+    )?;
     Ok((r.found, r.solution))
 }
 
@@ -689,6 +719,7 @@ impl<'t, 's, O: SolutionObject + 't> LsiGlobalSolver<'t, 's, O> {
             if index < 1 {
                 let class = classify_curve_surface_xsect_point(
                     k,
+                    owner_context,
                     leaf.eval,
                     &leaf.domain,
                     &leaf.line,
@@ -730,6 +761,7 @@ impl<'t, 's, O: SolutionObject + 't> LsiGlobalSolver<'t, 's, O> {
                     let surface = cache.surface();
                     let (found, mut solution) = surface_local_point_solve::<O>(
                         self.kernel,
+                        owner_context,
                         surface,
                         &natural,
                         SolverOperation::Minimize,
@@ -985,7 +1017,7 @@ fn is_coincident_point<O>(
     let uv = Point2::new(p(&solution.start, 1)?, p(&solution.start, 2)?);
     let t = p(&solution.start, 0)?;
     let class = ignored(classify_curve_surface_xsect_point(
-        k, surface, uv_domain, curve, interval, uv, t,
+        k, None, surface, uv_domain, curve, interval, uv, t,
     ))?;
     Ok(class.is_some_and(|c| c.point_type == TsectCurveType::Coincident))
 }
@@ -1610,6 +1642,68 @@ mod tests {
         s.end.parameters[1] = t1;
         s.end.parameters[2] = 0.5;
         s
+    }
+
+    #[test]
+    fn discontinuous_line_end_point_solve_retains_the_actual_face_context() {
+        use crate::nurbs::b_spline_surface_n_lib::p2::OrientType;
+        use crate::topology::brep_constructor::BrepConstructor;
+
+        // A real model-owned exact degree-one surface, not a detached surface
+        // with a fabricated owner. Plane truth on [0,1]^2 gives the unique closest
+        // point (0.25,0.6,0) and gap 1.25 independently of the LSI/point solver.
+        for face_tolerance in [7e-8, 2e-5] {
+            let mut kernel = Kernel::default();
+            kernel.tolerances.zone_tol_3d = 3e-3;
+            let mut builder = BrepConstructor::new().unwrap();
+            builder.start_shell().unwrap();
+            let face = builder.start_face(OrientType::Same).unwrap();
+            let definition = plane();
+            let domain = definition.natural_uv_domain();
+            builder.set_face_surface(definition, domain).unwrap();
+            builder.brep_mut().face_mut(face).unwrap().tolerance = face_tolerance;
+            let actual = builder.brep().face(face).unwrap();
+            let surface = actual.surface.as_ref().unwrap();
+            let owner = surface.owner();
+            assert!(owner.is_some());
+            assert_ne!(kernel.tolerances.zone_tol_3d, actual.tolerance);
+            let point = Point3::new(0.25, 0.6, 1.25);
+            let (found, solution) = surface_local_point_solve::<H>(
+                &kernel,
+                Some((&kernel, actual.tolerance)),
+                surface,
+                &domain,
+                SolverOperation::Minimize,
+                point,
+                Point2::new(0.5, 0.5),
+            )
+            .unwrap();
+            assert!(found);
+            assert!((solution.start.parameters[0] - 0.25).abs() < 1e-10);
+            assert!((solution.start.parameters[1] - 0.6).abs() < 1e-10);
+            assert!((solution.start.solution_value - 1.25).abs() < 1e-10);
+            // The borrowed API cannot resolve an owned surface's tolerance.
+            // This negative control must not silently use the system's 3e-3.
+            assert!(matches!(
+                surface_local_point_solve::<H>(
+                    &kernel,
+                    None,
+                    surface,
+                    &domain,
+                    SolverOperation::Minimize,
+                    point,
+                    Point2::new(0.5, 0.5),
+                ),
+                Err(SolidError::Unported {
+                    upstream: "SmFace::GetTolerance",
+                    unit: "topology.face_p2",
+                })
+            ));
+            assert_eq!(surface.owner(), owner);
+            assert_eq!(builder.brep().face(face).unwrap().tolerance, face_tolerance);
+            assert_eq!(builder.brep().face(face).unwrap().uv_domain, domain);
+            assert_eq!(kernel.tolerances.zone_tol_3d, 3e-3);
+        }
     }
 
     #[test]

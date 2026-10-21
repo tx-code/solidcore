@@ -1,0 +1,93 @@
+{
+  "format": "solidcore.step.catalog.standard-additions.v1",
+  "id": "vertex-loop-v1",
+  "scope": "Audited transport and two necessary source predicates only; not complete EXPRESS or native import qualification. C++ baseline export remains unchanged.",
+  "profiles": [
+    "Ap203e2GeneralSource",
+    "Ap214e3Source",
+    "Ap214MbxSource",
+    "Ap203N916Source"
+  ],
+  "entity": {
+    "name": "VERTEX_LOOP",
+    "parent": "LOOP",
+    "simple": true,
+    "field": {
+      "name": "loop_vertex",
+      "type": "VERTEX",
+      "kind": "Reference",
+      "optional": false
+    }
+  },
+  "artifacts": {
+    "AP214E3_2010": {
+      "file": "AP214E3_2010.exp",
+      "sha256": "71ab140fe7f774321beee6a31e6fee2afc3973fd60350ae2018c74c211fb4295",
+      "source_url": "https://raw.githubusercontent.com/stepcode/stepcode/24783b448511b8f6bce2829286a3f00015430236/data/ap214e3/AP214E3_2010.exp",
+      "clauses": {
+        "LOOP": [
+          6601,
+          6604
+        ],
+        "VERTEX_LOOP": [
+          11662,
+          11665
+        ],
+        "ADVANCED_FACE.WR7": [
+          1345,
+          1350
+        ],
+        "ADVANCED_FACE.WR8": [
+          1351,
+          1353
+        ]
+      }
+    },
+    "N2635": {
+      "file": "part403ts_wg3n2635mim_lf.exp",
+      "sha256": "c68dd02200e2f4213e311553a4f6295effd168209de1fdc4e8003ce4c9ddd088",
+      "source_url": "https://raw.githubusercontent.com/stepcode/stepcode/24783b448511b8f6bce2829286a3f00015430236/data/ap203e2/ap203e2_mim_lf.exp",
+      "clauses": {
+        "LOOP": [
+          6950,
+          6953
+        ],
+        "VERTEX_LOOP": [
+          12246,
+          12249
+        ],
+        "ADVANCED_FACE.WR7": [
+          2167,
+          2169
+        ],
+        "ADVANCED_FACE.WR8": [
+          2170,
+          2171
+        ]
+      }
+    },
+    "N916Modified": {
+      "file": "ap203.exp",
+      "sha256": "020b4d25dbd0b6ee7d15099b978e3448f6699a72cb862d381e416e32187562f1",
+      "source_url": "https://raw.githubusercontent.com/stepcode/stepcode/87e1f9948c60837c2a1664cd86e00e3962a02ff5/data/ap203/ap203.exp",
+      "clauses": {
+        "LOOP": [
+          1677,
+          1680
+        ],
+        "VERTEX_LOOP": [
+          2845,
+          2848
+        ],
+        "ADVANCED_FACE.WR7": [
+          580,
+          587
+        ],
+        "ADVANCED_FACE.WR8": [
+          588,
+          591
+        ]
+      }
+    }
+  }
+}

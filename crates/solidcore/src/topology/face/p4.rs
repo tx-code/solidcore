@@ -47,10 +47,8 @@
 //! - **`FindVertexSector`'s interval** starts as the curve's natural interval and takes
 //!   the orientation's ends through `SetMinMax`, whose failure on a reversed pair is
 //!   ignored as upstream (the natural interval stays).
-//! - **`FindVertexSector` of a 2D curve** lifts it onto the face's surface as a
-//!   [`CrvOnSurf`], which needs a B-spline surface here (upstream's `SetAll` takes any
-//!   `SmSurface`); a `Plane` face is [`SolidError::InvalidInput`]. The shim always passes
-//!   the edge's 3D curve, so this branch is not compared.
+//! - **`FindVertexSector` of a 2D curve** lifts it onto the actual concrete face
+//!   surface as a [`CrvOnSurf`], preserving the original definition and owner.
 //! - **`FindVertexSector`** returns [`VertexSector`]. The out-of-scope `sSurfDomain` of
 //!   the 3D branch is reproduced: it is the natural UV domain only on the pass that first
 //!   fetches the poles, and an empty extent on later passes, as upstream (a block-local
@@ -111,7 +109,7 @@ use crate::query::face::p2::{
     curve_on_classify, point_classify, CurveOnClassifyObjects, PointClassifyOptions,
 };
 use crate::surface::surface::p5::{SS_NONE, SS_UMAX, SS_UMIN, SS_VMAX, SS_VMIN};
-use crate::surface::surface::{Surface, SurfaceKind};
+use crate::surface::surface::Surface;
 use crate::surface::trim_srf_cache::TrimSrfCache;
 use crate::surface::volume::Volume;
 use crate::topology::edge;
@@ -814,8 +812,9 @@ fn seam_distance(
 fn face_surface(b: &Brep, f: FaceId) -> Result<Surface> {
     b.face(f)?
         .surface
-        .clone()
-        .ok_or_else(|| null("FindVertexSector: face without surface"))
+        .as_ref()
+        .ok_or_else(|| null("FindVertexSector: face without surface"))?
+        .clone_for_evaluation()
 }
 
 /// `FindVertexSector`: for a curve on the face that crosses face vertex
@@ -829,7 +828,7 @@ fn face_surface(b: &Brep, f: FaceId) -> Result<Surface> {
 /// # Errors
 ///
 /// [`SolidError::NotFound`] for a dangling id; [`SolidError::InvalidInput`] for a 2D
-/// curve on a face without surface (or a surface that is not a B-spline surface), a
+/// curve on a face without surface, a
 /// vertex use without edge use, an edge use without edge or CW edge use, a closed
 /// surface without seam curve, and a curve tangent upstream reads uninitialised; the
 /// errors of the evaluations upstream checks (`SER`); [`SolidError::Unported`]
@@ -859,12 +858,13 @@ pub fn find_vertex_sector(
     // work in 3d: when cr3DCurve's domain_dim == 2, use it as an SmCrvOnSurf object
     let lifted;
     let curve: &Curve = if curve_3d.dim() == 2 {
-        let SurfaceKind::BSpline(s) = face_surface(b, f)?.kind().clone() else {
-            return Err(null(
-                "FindVertexSector: a curve on a surface needs a B-spline surface",
-            ));
-        };
-        lifted = Curve::from(CrvOnSurf::new(k, curve_3d.clone(), s, None, 0)?);
+        lifted = Curve::from(CrvOnSurf::new(
+            k,
+            curve_3d.clone(),
+            face_surface(b, f)?,
+            None,
+            0,
+        )?);
         &lifted
     } else {
         curve_3d

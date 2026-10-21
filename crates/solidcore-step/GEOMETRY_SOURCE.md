@@ -86,3 +86,30 @@ Run receipts, captured inputs, binaries and any private model-derived material
 stay local. No C++ reader/kernel is called by the Rust product. General source
 interop/interpretation options, remaining planar/global rules, native exact BRep
 construction, kernel/API gaps, bindings and tools are still migration work.
+
+## Explicit VERTEX_LOOP source addition
+
+`catalog/standard-additions.v1.json` is a separately identified, offline standard
+addition to the unchanged C++ transport export. It appends `VERTEX_LOOP` only to
+the four general source catalogs, preserving every existing declaration ID and
+P0 metadata. The three fixed artifacts, their SHA256 identities and exact clause
+lines are recorded in that manifest. The stronger VERTEX_POINT/CARTESIAN_POINT
+condition belongs to ADVANCED_FACE.WR7; the transmitted `loop_vertex` field stays
+a required VERTEX reference. It is a LOOP subtype, without a GRI ancestor.
+
+The general geometry-dependency pass now checks ADVANCED_FACE.WR7 and WR8 on
+actual source bounds. WR7 checks every vertex bound's point types; WR8 requires
+exactly one EDGE_LOOP/VERTEX_LOOP type membership for each bound. Each attempted
+WHERE adds one entity-predicate count and charges its bounds/reference traversal
+through the existing visit budget. General D3 counts and budget thresholds thus
+increase; P0 does not run this pass. Earlier binding/type failures retain their
+original D1 keys, owners and paths and take priority. Reference-hop evidence is
+kept in related source spans, never appended to another owner's parameter path.
+
+These two clauses do not establish poles, physical coincidence, native regions,
+UVs, material geometry, or complete AP conformance. Source-only general types
+may be checked without native support. In the current closed type subset, invalid
+reference families and unsupported loop subtypes can fail before these WHEREs;
+those failures must not be relabeled as a WR7/WR8 result. The public cone-pole
+control retains its two declared faces, original apex vertex, units, source
+semi-angle and flags; no native import capability is granted by this addition.

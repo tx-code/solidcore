@@ -708,6 +708,22 @@ fn dump_curve(o: &mut Vec<f64>, c: &BSplineCurve) {
     }
 }
 
+// The SDK observer reads the SmBSplineCurve base representation through its
+// polymorphic pointer. This is reporting only: retain the actual kind in all
+// production curve operations, and do not synthesize a missing NURB here.
+fn dump_iso_curve(o: &mut Vec<f64>, c: &SmCurve) -> Result<(), HarnessError> {
+    let base = match c.kind() {
+        CurveKind::BSpline(c) => c,
+        CurveKind::Line(c) => c.base(),
+        CurveKind::Ellipse(c) => c.base(),
+        CurveKind::Hyperbola(c) => c.base(),
+        CurveKind::Parabola(c) => c.base(),
+        _ => return Err(harness("iso curve lacks native B-spline base")),
+    };
+    dump_curve(o, base);
+    Ok(())
+}
+
 fn dump_curve_list(o: &mut Vec<f64>, l: Option<&Vec<SmCurve>>) -> Result<(), HarnessError> {
     let Some(l) = l else {
         o.push(0.0);
@@ -870,7 +886,7 @@ fn rust_op(i: &Inputs) -> Result<Run, HarnessError> {
             match bp.create_boundary_curve_for_index(&k, &surface, *index) {
                 Ok(c) => {
                     o.push(0.0);
-                    dump_curve(&mut o, &c);
+                    dump_iso_curve(&mut o, &c)?;
                 }
                 Err(e) if e.is_unported() => return Ok(Err(e)),
                 Err(e) => o.push(status(&e)),
@@ -1160,7 +1176,7 @@ fn rust_op(i: &Inputs) -> Result<Run, HarnessError> {
                         o.push(0.0);
                         o.push(flag(r.cached));
                         for c in &r.curves {
-                            dump_curve(&mut o, c);
+                            dump_iso_curve(&mut o, c)?;
                         }
                     }
                     Err(e) if e.is_unported() => return Ok(Err(e)),

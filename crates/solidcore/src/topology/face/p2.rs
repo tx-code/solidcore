@@ -2394,15 +2394,13 @@ pub fn find_best_uv_curve(
         let Some(uv_curve) = slot else { continue };
 
         // project UVTrimCurve into 3D space
-        let SurfaceKind::BSpline(bs) = surface.kind() else {
-            // DISPATCH GAP: SmCrvOnSurf over a non-B-spline SmSurface (curve.crv_on_surf,
-            // partial; no UNPORTED marker, as in intersect::curve_class::p1)
-            return Err(SolidError::unported(
-                "SmSurface (non-B-spline) in SmCrvOnSurf",
-                "curve.crv_on_surf",
-            ));
-        };
-        let crv_on_surf = CrvOnSurf::new(k, uv_curve.clone(), bs.clone(), None, 0)?;
+        let crv_on_surf = CrvOnSurf::new(
+            k,
+            uv_curve.clone(),
+            surface.clone_for_evaluation()?,
+            None,
+            0,
+        )?;
 
         // get UVTrimCurve->3DMidPoint and orientation adjusted Tangent
         let interval = crv_on_surf.natural_interval();

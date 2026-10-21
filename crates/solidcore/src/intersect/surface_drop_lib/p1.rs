@@ -1418,7 +1418,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_and_trim_reaches_polymorphic_iso_cache_dependency() {
+    fn drop_and_trim_reaches_classification_after_real_plane_iso_curves() {
         let s = plane();
         let c = Curve::from(crate::curve::line::Line::from_points(
             Vec3::new(0.0, 0.5, 0.0),
@@ -1439,8 +1439,8 @@ mod tests {
             matches!(
                 r,
                 Err(SolidError::Unported {
-                    upstream: "SmPlane::CreateIsoParametricCurve",
-                    unit: "surface.surface_cache_p1"
+                    upstream: "SmCurveClassification::ReSet",
+                    unit: "intersect.curve_class_p2"
                 })
             ),
             "{r:?}"

@@ -324,8 +324,8 @@ impl SurfaceIntersector<'_> {
                 // Intersect Curves
                 let ivl1 = bsc1.natural_interval();
                 let ivl2 = bsc2.natural_interval();
-                let crv1 = Curve::from(bsc1.clone());
-                let crv2 = Curve::from(bsc2);
+                let crv1 = bsc1.clone();
+                let crv2 = bsc2;
                 let opts = CurveIntersectOptions {
                     skip_global_coincidence_check: false,
                     handles: [
@@ -427,7 +427,7 @@ impl SurfaceIntersector<'_> {
                             };
 
                             // output the curve
-                            out.curves_3d.push(Curve::from(bsc));
+                            out.curves_3d.push(bsc);
                             out.curve_types.push(ty);
                             out.deviations
                                 .push(max2(sol.start.solution_value, sol.end.solution_value));
@@ -1716,7 +1716,7 @@ mod tests {
     }
 
     #[test]
-    fn plane_boundary_test_needs_plane_iso_curves() {
+    fn crossing_planes_have_no_disjoint_or_grazing_boundary_shortcut() {
         let (a, b) = two_planes();
         let d = Extent2d::from_bounds(0.0, 0.0, 1.0, 1.0);
         let si = SurfaceIntersector::new(&a, &d, &b, &d, false).unwrap();
@@ -1726,6 +1726,7 @@ mod tests {
         let mut out = TsectCurves::default();
         let bbox = Extent3d::from_bounds(0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
         let r = si.do_boundary_plane_test(&k, &mut p1, &mut p2, 1e-3, &bbox, &mut out);
-        assert!(matches!(r, Err(e) if e.is_unported()));
+        assert!(matches!(r, Ok(BoundaryPlaneTestResult::Unknown)), "{r:?}");
+        assert!(out.curves_3d.is_empty());
     }
 }

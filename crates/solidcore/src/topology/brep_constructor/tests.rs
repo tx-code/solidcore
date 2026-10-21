@@ -270,14 +270,14 @@ fn radial_dependency_error_removes_the_temporary_edge_before_propagating() {
             Some(vertices[0]),
         )
         .unwrap_err();
-    // Real DoTrace now runs; its cache still cannot retain polymorphic Plane
-    // iso curves (SmLine) in the current BSplineCurve-only storage.
+    // Real DoTrace and analytic iso curves now run. A deeper owned point solve
+    // still requires its original face-tolerance resolver; cleanup must hold.
     assert!(
         matches!(
             error,
             SolidError::Unported {
-                upstream: "SmPlane::CreateIsoParametricCurve",
-                unit: "surface.surface_cache_p1"
+                upstream: "SmFace::GetTolerance",
+                unit: "topology.face_p2"
             }
         ),
         "{error:?}"

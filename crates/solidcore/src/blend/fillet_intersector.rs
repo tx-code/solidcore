@@ -109,7 +109,7 @@ use crate::math::{max2, max4, min2, EFF_ZERO, EFF_ZERO_SQ};
 use crate::nurbs::b_spline_curve::{BSplineCurve, BSplineCurveForm, CanonicalData, KnotType};
 use crate::nurbs::b_spline_surface::BSplineSurface;
 use crate::surface::surface::p2::{drop_vectors, TsectCurveType};
-use crate::surface::surface::{Surface, SurfaceKind};
+use crate::surface::surface::Surface;
 
 const OP_VALUES: &str = "blend::fillet_intersector::FilletIntersector::compute_point_values";
 const OP_DELTA: &str = "blend::fillet_intersector::FilletIntersector::compute_point_values_delta";
@@ -583,20 +583,15 @@ fn crv_on_surf(
     surface: &Surface,
     domain: &Extent2d,
 ) -> Result<CrvOnSurf> {
-    let bs = match surface.kind() {
-        SurfaceKind::BSpline(s) => s.clone(),
-        SurfaceKind::SurfOfRevolution(s) => s.base().clone(),
-        _ => {
-            // DISPATCH GAP: SmCrvOnSurf over a non-B-spline SmSurface whose Evaluate
-            // overrides the B-spline one (curve.crv_on_surf, partial; no UNPORTED
-            // marker, as in intersect::surface_drop_curve)
-            return Err(SolidError::unported(
-                "SmSurface (non-B-spline) in SmCrvOnSurf",
-                "curve.crv_on_surf",
-            ));
-        }
-    };
-    CrvOnSurf::new(k, Curve::from(uv_curve), bs, Some(*domain), 0)
+    // A mapped curve evaluates the concrete receiver (including analytic
+    // overrides) in its original UV parameter convention, not a BSD stand-in.
+    CrvOnSurf::new(
+        k,
+        Curve::from(uv_curve),
+        surface.clone_for_evaluation()?,
+        Some(*domain),
+        0,
+    )
 }
 
 /// `sMap.Evaluate(t, 1, TRUE, aPV)`: the position and first derivative.

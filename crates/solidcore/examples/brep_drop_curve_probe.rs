@@ -23,6 +23,26 @@ use solidcore::surface::{
 use solidcore::topology::ObjectHandle;
 
 fn fixture(shape: &str, scale: f64, offset: f64) -> Result<Surface> {
+    if shape == "revolution" || shape == "revolution_swap" {
+        let origin = Vec3::new(offset, offset, offset);
+        let generator = solidcore::curve::line::Line::from_points(
+            origin + Vec3::new(scale, 0., 0.),
+            origin + Vec3::new(scale, 0., scale),
+            3,
+        );
+        return Ok(
+            solidcore::surface::surf_of_revolution::SurfOfRevolution::new(
+                &Kernel::default(),
+                generator.into(),
+                origin,
+                Vec3::X,
+                Vec3::Y,
+                Extent2d::from_bounds(0., 0., 360., 1.),
+                shape == "revolution_swap",
+            )?
+            .into(),
+        );
+    }
     if shape == "plane" {
         return Ok(Plane::new(
             Vec3::new(offset, offset, offset),
@@ -118,7 +138,7 @@ fn run() -> std::result::Result<Value, Box<dyn std::error::Error>> {
     let keep = args.get(3).ok_or("keep")? != "0";
     let scale = args.get(4).map_or(Ok(1.), |s| s.parse::<f64>())?;
     let offset = args.get(5).map_or(Ok(0.), |s| s.parse::<f64>())?;
-    let surface = fixture(shape, scale, offset)?;
+    let mut surface = fixture(shape, scale, offset)?;
     let points = match path.as_str() {
         "iso" => vec![[0.2, 0.2, 0.], [0.8, 0.2, 0.]],
         "seam" => vec![[1., 0., 0.2], [1., 0., 0.8]],
@@ -157,12 +177,45 @@ fn run() -> std::result::Result<Value, Box<dyn std::error::Error>> {
     } else {
         Extent1d::from_min_max(2., 5.)
     };
+    // C++ GetNaturalUVDomain invokes the receiver's lazy MakeNurb. Rust's
+    // borrowed domain accessor is read-only; perform that same owned effect
+    // explicitly on the original revolution before asking for its domain.
+    if matches!(surface.kind(), SurfaceKind::SurfOfRevolution(_)) {
+        solidcore::surface::validity::materialize_bspline(&Kernel::default(), &mut surface)?;
+    }
     let domain = match mode.as_str() {
         "subset" => Extent2d::from_bounds(0.05, 0.05, 0.95, 0.95),
         "outside" => Extent2d::from_bounds(-0.1, 0., 1., 1.),
         "fallback" => Extent2d::new(),
         _ => surface.natural_uv_domain(),
     };
+    if args.get(6).is_some_and(|s| s == "cache") {
+        let k = Kernel::default();
+        let mut cache =
+            solidcore::surface::surface::p2::surface_cache::<ObjectHandle>(&k, &surface, None)?;
+        let mut calls = Vec::new();
+        for tolerance in [0.001, 0.01, 0.0001, 0.01] {
+            let result = cache.iso_boundary_curves(&k, &domain, tolerance)?;
+            let mut curves = Vec::new();
+            for curve in result.curves {
+                let interval = curve.natural_interval();
+                let mut samples = Vec::new();
+                for i in 0..5 {
+                    let values =
+                        curve.evaluate(interval.evaluate(f64::from(i) / 4.), 1, true, true)?;
+                    let p = values.first().ok_or("missing iso position")?;
+                    let d = values.get(1).ok_or("missing iso tangent")?;
+                    samples.push([p.x, p.y, p.z, d.x, d.y, d.z]);
+                }
+                curves.push(
+                    json!({"type":curve.type_code(),"line":matches!(curve.kind(),CurveKind::Line(_)),"interval":[interval.min(),interval.max()],
+                    "length":curve.approximate_length(&interval,8,false)?.0,"samples":samples}),
+                );
+            }
+            calls.push(json!({"status":1000,"cached":result.cached,"curves":curves}));
+        }
+        return Ok(json!({"calls":calls}));
+    }
     let flag = || match surface.kind() {
         SurfaceKind::Plane(p) => p.is_out_of_bounds_enabled(),
         SurfaceKind::BSpline(s) => s.is_out_of_bounds_enabled(),

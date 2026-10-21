@@ -968,7 +968,7 @@ impl<'s> SurfaceDropCurve<'s> {
 
         // Add TargetSurface natural boundary curves to sIsoCurves array
         let iso = cache.iso_boundary_curves(k, &uv_domain, cci_tol / 3.0)?;
-        let mut iso_curves: Vec<Curve> = iso.curves.iter().cloned().map(Curve::from).collect();
+        let mut iso_curves: Vec<Curve> = iso.curves.into_iter().collect();
 
         // add every Surface U internal continuity boundary to sIsoCurves array
         let u_conts: Vec<ContinuityType> = cache.u_continuities().to_vec();
@@ -1074,19 +1074,10 @@ impl<'s> SurfaceDropCurve<'s> {
                     Err(_) => continue,
                 };
 
-                let SurfaceKind::BSpline(bs) = surface.kind() else {
-                    // DISPATCH GAP: SmCrvOnSurf over a non-B-spline SmSurface
-                    // (curve.crv_on_surf, partial; no UNPORTED marker, as in
-                    // intersect::curve_class::p1)
-                    return Err(SolidError::unported(
-                        "SmSurface (non-B-spline) in SmCrvOnSurf",
-                        "curve.crv_on_surf",
-                    ));
-                };
                 let srf_crv = Curve::from(CrvOnSurf::new(
                     k,
                     Curve::from(uv_line),
-                    bs.clone(),
+                    surface.clone_for_evaluation()?,
                     Some(uv_domain),
                     0,
                 )?);

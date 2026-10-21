@@ -1861,16 +1861,13 @@ pub fn cull_or_refine_cci_in_3d<S: SolutionObject>(
     solutions: &mut SolutionArray<S>,
 ) -> Result<()> {
     // project UVCurve into 3d space
-    let SurfaceKind::BSpline(bs) = surface.kind() else {
-        // DISPATCH GAP: SmCrvOnSurf over a non-B-spline SmSurface (curve.crv_on_surf,
-        // partial; no UNPORTED marker: the ported CrvOnSurf holds an SmBSplineSurface,
-        // not any Surface, as recorded in curve/crv_on_surf.rs and plan/findings.md)
-        return Err(SolidError::unported(
-            "SmSurface (non-B-spline) in SmCrvOnSurf",
-            "curve.crv_on_surf",
-        ));
-    };
-    let curve_1 = Curve::from(CrvOnSurf::new(k, uv_curve_1.clone(), bs.clone(), None, 0)?);
+    let curve_1 = Curve::from(CrvOnSurf::new(
+        k,
+        uv_curve_1.clone(),
+        surface.clone_for_evaluation()?,
+        None,
+        0,
+    )?);
 
     // for every solution
     let mut i = 0;

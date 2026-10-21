@@ -306,6 +306,25 @@ impl<'s> SurfaceSilhouette<'s> {
         boundary: &BSplineCurve,
         interval: &Extent1d,
     ) -> Result<SolutionArray<BoundaryCurve>> {
+        self.find_solutions_on_boundary_curve_polymorphic(
+            k,
+            &Curve::from(boundary.clone()),
+            interval,
+        )
+    }
+
+    /// The same boundary solve retaining the actual analytic curve kind. Cache
+    /// boundaries can be Lines or Ellipses; their virtual property analyses must
+    /// not be replaced by the stored B-spline base's implementation.
+    ///
+    /// # Errors
+    /// Those of the curve's property analysis.
+    pub fn find_solutions_on_boundary_curve_polymorphic(
+        &self,
+        k: &Kernel,
+        boundary: &Curve,
+        interval: &Extent1d,
+    ) -> Result<SolutionArray<BoundaryCurve>> {
         let curve_prop = if self.perspective {
             CurvePropertyType::SilhouettePoint
         } else {
@@ -318,7 +337,7 @@ impl<'s> SurfaceSilhouette<'s> {
             want_comb: false,
             handle: None,
         };
-        let curve = Curve::from(boundary.clone());
+        let curve = boundary;
         // the solutions name the curve (its cache tree's owner)
         opts.handle = Some(BoundaryCurve {
             natural_interval: Some(curve.natural_interval()),
@@ -1008,13 +1027,13 @@ impl<'s> SurfaceTrace<'s> for SurfaceSilhouette<'s> {
     fn find_solutions_on_boundary_curve(
         &self,
         k: &Kernel,
-        boundary: &BSplineCurve,
+        boundary: &Curve,
         interval: &Extent1d,
         side: usize,
         param: SurfParamType,
     ) -> Result<SolutionArray<BoundaryCurve>> {
         let _ = (side, param);
-        SurfaceSilhouette::find_solutions_on_boundary_curve(self, k, boundary, interval)
+        SurfaceSilhouette::find_solutions_on_boundary_curve_polymorphic(self, k, boundary, interval)
     }
 
     fn does_point_lie_on_curve(&self, k: &Kernel, uv: &mut Point2, refine: bool) -> Result<bool> {

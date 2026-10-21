@@ -2115,19 +2115,10 @@ pub fn make_vertex_split_uv_trim_curve(
     if p3d.distance(split_pnt) > edge::tolerance(b, edge_to_split)? / 100.0 {
         let mut reuse_trim_curve = false;
         if for_tesselation {
-            let SurfaceKind::BSpline(bs) = surface.kind() else {
-                // the port of SmCrvOnSurf takes a B-spline surface only: that partial
-                // unit's own unported part
-                // UNPORTED(curve.crv_on_surf): SmCrvOnSurf::SmCrvOnSurf over a non-B-spline SmSurface
-                return Err(SolidError::unported(
-                    "SmSurface (non-B-spline) in SmCrvOnSurf",
-                    "curve.crv_on_surf",
-                ));
-            };
             let uv_3d_curve = Curve::from(CrvOnSurf::new(
                 k,
                 new_uv_curve.clone(),
-                bs.clone(),
+                surface.clone_for_evaluation()?,
                 None,
                 0,
             )?);

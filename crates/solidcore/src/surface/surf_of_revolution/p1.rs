@@ -416,14 +416,14 @@ impl SurfOfRevolution {
     /// whose outputs it then reads).
     pub fn new(
         k: &Kernel,
-        gen_curve: Curve,
+        mut gen_curve: Curve,
         origin: Point3,
         x_axis: Vec3,
         y_axis: Vec3,
         anal_uv_domain: Extent2d,
         swap_uv: bool,
     ) -> Result<Self> {
-        let base_gen = gen_base(&gen_curve)?;
+        gen_base(&gen_curve)?;
         let mut surf = Self {
             base: BSplineSurface::new(),
             gen_curve: None,
@@ -449,7 +449,11 @@ impl SurfOfRevolution {
         // when curve is not planar
         // (when curve is not planar, mark that; else see if it is on the X/Z plane)
         if gen_curve.is_planar(k, tol_3d)?.is_planar {
-            let on = base_gen.is_on_plane(origin, y_axis, tol_3d, None)?;
+            // Native IsOnPlane is virtual and lazily creates the generator's
+            // actual NURB. A naked empty Line BSD base cannot provide this query.
+            // Do not replace the generator's analytic kind with that base.
+            crate::curve::validity::materialize_bspline(k, &mut gen_curve)?;
+            let on = gen_curve.is_on_plane(k, origin, y_axis, tol_3d, None)?;
             if !on.on_plane {
                 surf.planar_generator = false;
             }

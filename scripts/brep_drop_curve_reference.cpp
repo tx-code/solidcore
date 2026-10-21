@@ -6,6 +6,9 @@
 #include "SmContext.h"
 #include "SmPlane.h"
 #include "SmSurface.h"
+#include "SmSurfaceCache.h"
+#include "SmSurfOfRevolution.h"
+#include "SmLine.h"
 #include <nurbs.h>
 #include <array>
 #include <cmath>
@@ -16,6 +19,28 @@
 #include <string>
 #include <vector>
 
+// Expose only the protected constructor; all geometry methods are the SDK's.
+struct ProbeRevolution final : SmSurfOfRevolution {
+    ProbeRevolution(SmBSplineCurve* curve,const SmPoint3d& origin,bool swap)
+      : SmSurfOfRevolution(curve,origin,SmVector3d(1,0,0),SmVector3d(0,1,0),SmExtent2d(0,0,360,1),swap) {}
+};
+
+static void inspect_iso_cache(SmSurface* surface,const SmExtent2d& domain) {
+    auto cache=smsurf_GetSurfaceCache(surface);if(!cache)throw std::runtime_error("no surface cache");
+    std::cout<<"{\"calls\":[";int call=0;
+    for(double tolerance:{.001,.01,.0001,.01}){
+        SmBoolean cached=FALSE;SmTArray<SmBSplineCurve*> curves;
+        auto status=cache->GetIsoBoundaryCurves(domain,tolerance,cached,curves);
+        if(call++)std::cout<<',';std::cout<<"{\"status\":"<<status<<",\"cached\":"<<(cached?"true":"false")<<",\"curves\":[";
+        for(ULONG i=0;i<curves.GetSize();++i){auto curve=curves[i];if(i)std::cout<<',';auto interval=curve->GetNaturalInterval();
+            std::cout<<"{\"type\":"<<curve->GetType()<<",\"line\":"<<(curve->IsKindOf(SmLine_TYPE)?"true":"false")<<",\"interval\":["<<interval.GetMin()<<','<<interval.GetMax()<<"],\"length\":"<<curve->ApproximateLength(interval,8)<<",\"samples\":[";
+            for(int j=0;j<5;++j){SmVector3d values[2];if(curve->Evaluate(interval.Evaluate(double(j)/4.),1,TRUE,values,TRUE)!=SM_SUCCESS)throw std::runtime_error("iso evaluation");
+                if(j)std::cout<<',';std::cout<<'['<<values[0].x<<','<<values[0].y<<','<<values[0].z<<','<<values[1].x<<','<<values[1].y<<','<<values[1].z<<']';}
+            std::cout<<"]}";
+        }std::cout<<"]}";if(!cached)for(ULONG i=0;i<curves.GetSize();++i)delete curves[i];
+    }std::cout<<"]}\n";
+}
+
 int main(int argc, char** argv) { try {
     if (argc < 5) return 2;
     std::string shape=argv[1],path=argv[2],mode=argv[3]; bool keep=std::stoi(argv[4])!=0;
@@ -23,7 +48,10 @@ int main(int argc, char** argv) { try {
     SmContext context; std::cout<<std::setprecision(17);
     std::unique_ptr<SmSurface> surface;
     if(shape=="plane") surface.reset(new(&context) SmPlane(SmPoint3d(offset,offset,offset),SmVector3d(1,0,0),SmVector3d(0,1,0),SmVector2d(scale,scale),SmExtent2d(0,0,1,1),&context));
-    else {
+    else if(shape=="revolution"||shape=="revolution_swap") {
+        auto generator=new(&context) SmLine(SmPoint3d(offset+scale,offset,offset),SmPoint3d(offset+scale,offset,offset+scale),3,&context);
+        surface.reset(new(&context) ProbeRevolution(generator,SmPoint3d(offset,offset,offset),shape=="revolution_swap"));
+    } else {
         bool cylinder=shape=="cylinder"||shape=="cone";
         size_t nu=cylinder?9:2,nv=2; std::vector<std::vector<gw_CPOINT>> rows(nu,std::vector<gw_CPOINT>(nv));std::vector<gw_CPOINT*> pointers;
         const double w=std::sqrt(2.)/2.;
@@ -57,9 +85,10 @@ int main(int argc, char** argv) { try {
     SmBSplineCurve curve(3,ULONG(points.size()-1),ULONG(knots.size()-1),ULONG(points.size()-1),cp.data(),knots.data());
     curve.SetContext(&context);
     SmExtent1d interval(2,5);if(mode=="trim")interval.SetMinMax(2.5,4.5);
-    SmExtent2d domain(0,0,1,1);if(mode=="subset")domain.SetMinMax(SmPoint2d(.05,.05),SmPoint2d(.95,.95));
+    SmExtent2d domain=surface->GetNaturalUVDomain();if(mode=="subset")domain.SetMinMax(SmPoint2d(.05,.05),SmPoint2d(.95,.95));
     if(mode=="outside")domain.SetMinMax(SmPoint2d(-.1,0),SmPoint2d(1,1));
     if(mode=="fallback")domain=SmExtent2d();
+    if(argc>7 && std::string(argv[7])=="cache") { inspect_iso_cache(surface.get(),domain);return 0; }
     SmTArray<SmBSplineCurve*> result;SmDropCurveFail fail;
     auto bsp=static_cast<SmBSplineSurface*>(surface.get());bool before=bsp->GetOutOfBoundsEnabled()!=FALSE;
     double distance=0,deviation=0;double tolerance=1e-5*scale;

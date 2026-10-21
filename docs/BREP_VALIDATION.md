@@ -624,9 +624,8 @@ checks establish original parameters and the two cylinder seam sides. These are
 synthetic operation comparisons, not imported-model counts, continuous bounds,
 complete native BRep validity, or promotion of the base FFI unit's green gate.
 
-`DoTrace` still encounters the cache's explicit Plane-isocurve storage dependency
-(`SmLine` virtual behavior cannot be kept in its current `BSplineCurve`-only
-array). Deeper owned tolerance resolution is also incomplete. Existing cleanup
+`DoTrace` now receives actual analytic iso curves from the cache. Deeper owned
+tolerance resolution is still incomplete. Existing cleanup
 regressions check the actual next dependency while retaining model flag/owner
 restoration, instead of continuing to expect the removed entrypoint stubs.
 The traced B-spline cases also reach the pre-existing classification-reset
@@ -639,4 +638,41 @@ a default context. These are outstanding migration work, not successful cases.
 cargo build --locked -p solidcore --example brep_drop_curve_probe --example brep_validation_probe
 python scripts/build_brep_constructor_reference.py --source <cpp-fork> --sdk <existing-sdk> --toolchain-env <local-env> --output bin/drop-curve-reference --probe drop_curve
 python scripts/brep_drop_curve_compare.py --cpp bin/drop-curve-reference/brep-drop_curve-reference.exe --rust bin/debug/examples/brep_drop_curve_probe.exe --receipt bin/brep-drop-curve.local.json
+```
+
+## Analytic iso-curve cache dispatch
+
+`IsoBoundaryCurves.curves`, the stored cache array, and patch-boundary extraction
+now retain `Curve` values. Plane produces actual Lines. Revolution sweep curves
+retain the native Circle/Ellipse type; generator-direction extraction remains a
+B-spline, even when its generator was an analytic Line. Boundary boxes, lengths,
+silhouette properties and intersections dispatch through those actual kinds.
+The caller's approximation tolerance reaches the general surface extractor;
+the size-tolerance helper retains its separate native literal-zero argument.
+
+Natural-domain cache eligibility retains the original tolerance rule: a finer
+request returns uncached curves without replacing the old cached objects, while
+updating the recorded tolerance. Read-only return values remain copies of the
+cache; shared-pointer mutation/lazy-cache alias equivalence is not qualified.
+
+The revolution constructor performs its native virtual generator plane test and
+materializes the owned generator at that query, rather than querying an empty
+Line B-spline base. Owning representation preparation precedes the observer's
+borrowed natural-domain query, matching native `GetNaturalUVDomain`'s lazy effect.
+Existing NURBs/definitions and raw parameter domains are retained.
+
+Mapped-curve callers now supply the concrete surface snapshot to `CrvOnSurf`.
+They no longer impose a B-spline-only restriction on its already polymorphic
+implementation. Unresolved solver/geometry-handle contexts still return their
+actual dependency errors; this does not establish general import acceptance.
+
+The SDK observer compares actual type IDs, analytic Line identity, original
+intervals, virtual lengths, points/tangents and repeated cache eligibility over
+Plane, polynomial/rational BSD, poles, revolution and swapped revolution, with
+subdomains and small/large/translated inputs. Relative comparisons retain no
+absolute floor. Analytic shape checks supplement parity. These are geometry
+operations, never a count of successfully imported STEP models.
+
+```text
+python scripts/brep_iso_cache_compare.py --cpp <drop-curve-observer> --rust bin/debug/examples/brep_drop_curve_probe.exe --receipt bin/brep-iso-cache.local.json
 ```

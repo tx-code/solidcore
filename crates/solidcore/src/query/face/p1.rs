@@ -642,18 +642,10 @@ fn sector_classify_curve_on(
 fn lift_to_face(k: &Kernel, b: &Brep, f: FaceId, curve: &Curve) -> Result<Curve> {
     let surface = fp2::surface(b, f)?
         .ok_or_else(|| SolidError::invalid_input(OP_EDGE_CURVE, "face without surface"))?;
-    let SurfaceKind::BSpline(base) = surface.kind() else {
-        // DISPATCH GAP: Rust's SmCrvOnSurf holds a B-spline surface only (curve.crv_on_surf,
-        // partial; no UNPORTED marker)
-        return Err(SolidError::unported(
-            "SmSurface (non-B-spline) in SmCrvOnSurf",
-            "curve.crv_on_surf",
-        ));
-    };
     Ok(Curve::new(CurveKind::CrvOnSurf(Box::new(CrvOnSurf::new(
         k,
         curve.clone(),
-        base.clone(),
+        surface.clone_for_evaluation()?,
         None,
         0,
     )?))))

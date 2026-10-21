@@ -89,7 +89,7 @@ use crate::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use crate::nurbs::crv_fit::p1::ParamMethod;
 use crate::surface::surface::p2::{CreateUvTrimCurvePathType, DropCurveFail, DropCurveFailArgs};
 use crate::surface::surface::p4::NoObject;
-use crate::surface::surface::{Surface, SurfaceKind};
+use crate::surface::surface::Surface;
 use crate::topology::edgeuse::p1::{
     are_seam_curves, brep_handle, calc_dist_and_dev, delete_uv_trim_curve, drop_curve_fail, edge,
     faceuse, faceuse_face, max_edge_face_gap, orientation, primary_edgeuse, set_uv_trim_curve,
@@ -342,15 +342,13 @@ fn handle(kind: ObjectKind, index: u32) -> ObjectHandle {
 /// The length of the UV curve mapped through the surface (`SmCrvOnSurf::ApproximateLength`
 /// over the curve's natural interval with 5 samples).
 fn crv_on_surf_length(k: &Kernel, surface: &Surface, uv_curve: &Curve) -> Result<f64> {
-    let SurfaceKind::BSpline(bs) = surface.kind() else {
-        // DISPATCH GAP: SmCrvOnSurf over a non-B-spline SmSurface (curve.crv_on_surf,
-        // partial; no UNPORTED marker: the ported CrvOnSurf holds an SmBSplineSurface)
-        return Err(SolidError::unported(
-            "SmSurface (non-B-spline) in SmCrvOnSurf",
-            "curve.crv_on_surf",
-        ));
-    };
-    let cos = CrvOnSurf::new(k, uv_curve.clone(), bs.clone(), None, 0)?;
+    let cos = CrvOnSurf::new(
+        k,
+        uv_curve.clone(),
+        surface.clone_for_evaluation()?,
+        None,
+        0,
+    )?;
     let ivl = uv_curve.natural_interval();
     Ok(Curve::from(cos).approximate_length(&ivl, 5, false)?.0)
 }

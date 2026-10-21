@@ -35,10 +35,12 @@
 //!   only commented-out code reads them; its `dMinEdgeLength` is dropped for the same
 //!   reason (the lengths are still computed).
 //! - Root pre-edit notifications use the actual owning `BRep` runtime and context;
-//!   cached bounds use the shared query implementation. Remaining `DeleteFace`, `SqueezeEdge` (`topology.brep_p3`), `GlueVertices`,
-//!   `FindAndSetInfiniteRegion` (`topology.brep_p5`), `GlueEdgesGeneral`
-//!   (`topology.brep_p7`), `MakeVertexSplitEdge` (`topology.brep_p9`, through
-//!   [`test_and_split_edge`]) return [`SolidError::Unported`] where still unported.
+//!   cached bounds use the shared query implementation. Remaining local stubs
+//!   include `DeleteFace` (`topology.brep_p3`) and `FindAndSetInfiniteRegion`
+//!   (`topology.brep_p5`, ported there but not wired here: it needs the `Kernel`
+//!   and a typed void-type argument). `SqueezeEdge`, `GlueVertices`,
+//!   `GlueEdgesGeneral` and `MakeVertexSplitEdge` (through [`test_and_split_edge`])
+//!   defer only where their own units still do.
 
 use super::p1::{
     brep_notify_pre_edit, glue_edges_general, glue_vertices, set_point, sort_by_param,

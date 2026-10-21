@@ -1740,7 +1740,11 @@ fn check_surface_nesting(surface: &Surface, depth: usize, op: &'static str) -> R
                 check_surface_nesting(base, depth + 1, op)?;
             }
         }
-        SurfaceKind::BSpline(_) | SurfaceKind::Plane(_) | SurfaceKind::SurfOfRevolution(_) => {}
+        SurfaceKind::Cone(_)
+        | SurfaceKind::Torus(_)
+        | SurfaceKind::BSpline(_)
+        | SurfaceKind::Plane(_)
+        | SurfaceKind::SurfOfRevolution(_) => {}
     }
     Ok(())
 }

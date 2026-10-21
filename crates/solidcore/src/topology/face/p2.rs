@@ -717,7 +717,9 @@ fn is_singularity(
 ) -> Result<(bool, SurfParamType)> {
     match surface.kind() {
         SurfaceKind::Plane(p) => Ok(p.is_singularity()),
-        SurfaceKind::BSpline(_)
+        SurfaceKind::Cone(_)
+        | SurfaceKind::Torus(_)
+        | SurfaceKind::BSpline(_)
         | SurfaceKind::CurveBounded(_)
         | SurfaceKind::SurfOfRevolution(_)
         | SurfaceKind::Step(_)

@@ -512,6 +512,38 @@ pub struct BrepObjects<'a> {
 }
 
 impl crate::intersect::topology_solver::p1::TopologyObjects<CacheObject> for BrepObjects<'_> {
+    fn object_zone_tolerance(&self, kernel: &Kernel, object: CacheObject) -> Result<f64> {
+        use crate::geom::tol::{zone_tol_3d, SmallTopoType};
+        // SmTol.cpp:761--795, SM_USE_OLDTOL. Resolve the actual typed topology,
+        // or follow a defining curve/surface's owner using this world's keys.
+        // Only geometry without a topology owner uses the current system value;
+        // a foreign/malformed owner is never replaced by this B-rep's tolerance.
+        match object {
+            CacheObject::Brep => Ok(self.brep.tolerance()),
+            CacheObject::Vertex(vertex) => Ok(self.brep.vertex(vertex)?.tolerance),
+            CacheObject::Edge(edge) => Ok(self.brep.edge(edge)?.tolerance),
+            CacheObject::Face(face) => Ok(self.brep.face(face)?.tolerance),
+            CacheObject::Curve(_) => match self.curve_edge(object)? {
+                Some(CacheObject::Edge(edge)) => Ok(self.brep.edge(edge)?.tolerance),
+                None => Ok(zone_tol_3d(kernel, SmallTopoType::NormalSize)),
+                _ => Err(SolidError::invalid_input(OP, "curve owner is not an edge")),
+            },
+            CacheObject::Surface(_) => match self.surface_face(object)? {
+                Some(CacheObject::Face(face)) => Ok(self.brep.face(face)?.tolerance),
+                None => Ok(zone_tol_3d(kernel, SmallTopoType::NormalSize)),
+                _ => Err(SolidError::invalid_input(OP, "surface owner is not a face")),
+            },
+            _ => {
+                // UNPORTED(geom.tol): this exact B-rep resolver cannot identify
+                // arbitrary external or polygon handles as its topology.
+                Err(SolidError::unported(
+                    "SmTol::GetZoneTol3d(const SmObject*)",
+                    "geom.tol",
+                ))
+            }
+        }
+    }
+
     fn brep_cache(&self, object: CacheObject) -> Result<&BrepCache> {
         if object != CacheObject::Brep {
             return Err(SolidError::invalid_input(OP, "expected B-rep handle"));
@@ -714,6 +746,11 @@ mod tests {
         );
         curve.set_owner(Some(generated), None);
         b.edge_mut(e).unwrap().curve = Some(curve);
+        b.set_tolerance(0.5);
+        b.vertex_mut(a).unwrap().tolerance = 0.03125;
+        b.edge_mut(e).unwrap().tolerance = 0.125;
+        let mut kernel = Kernel::default();
+        kernel.tolerances.zone_tol_3d = 0.0625;
         let cache = BrepCache::new(BREP_TYPE).unwrap();
         let brep_id = BrepId::from_index(7);
         let mut objects = BrepObjects {
@@ -731,11 +768,38 @@ mod tests {
             objects.shape_member(CacheObject::Edge(e)),
             object::ShapeMember::Edge((brep_id, e))
         );
+        assert_eq!(
+            objects
+                .object_zone_tolerance(&kernel, CacheObject::Brep)
+                .unwrap(),
+            0.5
+        );
+        assert_eq!(
+            objects
+                .object_zone_tolerance(&kernel, CacheObject::Vertex(a))
+                .unwrap(),
+            0.03125
+        );
+        assert_eq!(
+            objects
+                .object_zone_tolerance(&kernel, CacheObject::Edge(e))
+                .unwrap(),
+            0.125
+        );
+        assert_eq!(
+            objects
+                .object_zone_tolerance(&kernel, CacheObject::Curve(e))
+                .unwrap(),
+            0.125
+        );
         objects.keys = &arena_identity;
         assert!(matches!(
             objects.curve_edge(CacheObject::Curve(e)),
             Err(SolidError::InvalidInput { .. })
         ));
+        assert!(objects
+            .object_zone_tolerance(&kernel, CacheObject::Curve(e))
+            .is_err());
     }
 
     #[test]

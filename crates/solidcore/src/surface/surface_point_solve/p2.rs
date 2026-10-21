@@ -1192,6 +1192,8 @@ fn set_first_object<O: SolutionObject>(sol: &mut Solution<O>, surface_obj: Optio
 pub(super) fn with_out_of_bounds_enabled(surface: &Surface) -> Result<Option<Surface>> {
     let enabled = match surface.kind() {
         SurfaceKind::BSpline(b) => b.is_out_of_bounds_enabled(),
+        SurfaceKind::Cone(s) => s.base().is_out_of_bounds_enabled(),
+        SurfaceKind::Torus(s) => s.base().base().is_out_of_bounds_enabled(),
         SurfaceKind::Plane(p) => p.base().is_out_of_bounds_enabled(),
         SurfaceKind::SurfOfRevolution(s) => s.base().is_out_of_bounds_enabled(),
         SurfaceKind::CurveBounded(_)
@@ -1207,6 +1209,8 @@ pub(super) fn with_out_of_bounds_enabled(surface: &Surface) -> Result<Option<Sur
     let mut copy = surface.clone_for_evaluation()?;
     match copy.kind_mut() {
         SurfaceKind::BSpline(b) => *b.out_of_bounds_enabled_mut() = true,
+        SurfaceKind::Cone(s) => *s.base_mut().out_of_bounds_enabled_mut() = true,
+        SurfaceKind::Torus(s) => *s.bspline_base_mut().out_of_bounds_enabled_mut() = true,
         SurfaceKind::Plane(p) => *p.out_of_bounds_enabled_mut() = true,
         SurfaceKind::SurfOfRevolution(s) => *s.base_mut().out_of_bounds_enabled_mut() = true,
         SurfaceKind::CurveBounded(_)

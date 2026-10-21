@@ -850,6 +850,12 @@ impl Sphere {
         let mut need_nurb_intersection = true;
         let mut out = SurfaceIntersection::default();
         match other.kind() {
+            SurfaceKind::Cone(cone) => {
+                let (more, found) =
+                    self.intersect_with_cone(k, uv_domain, cone, other_uv_domain, approx_tol_3d)?;
+                need_nurb_intersection = more;
+                out = found;
+            }
             SurfaceKind::Plane(p) => {
                 let (more, found) =
                     self.intersect_with_plane(k, uv_domain, p, other_uv_domain, approx_tol_3d)?;
@@ -865,7 +871,8 @@ impl Sphere {
                 need_nurb_intersection = more;
                 out = found;
             }
-            SurfaceKind::BSpline(_)
+            SurfaceKind::Torus(_)
+            | SurfaceKind::BSpline(_)
             | SurfaceKind::CurveBounded(_)
             | SurfaceKind::Step(_)
             | SurfaceKind::SrfInVolume(_)

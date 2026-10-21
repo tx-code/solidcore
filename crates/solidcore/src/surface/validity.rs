@@ -33,6 +33,7 @@ fn invalid() -> SolidError {
 /// Materialize the actual owned B-spline family object, preserving its concrete
 /// analytic/revolution definition. No query copy can replace this native effect.
 pub fn materialize_bspline(k: &Kernel, surface: &mut Surface) -> Result<()> {
+    surface.bind_evaluation_context(k);
     // GetOrCreate is NOT MakeNurb unconditionally: a caller/reader may retain a
     // different existing NURB. Rebuilding it would silently hide a mismatch.
     if bspline_base(surface)?.gw_nurb().is_some() {
@@ -40,6 +41,8 @@ pub fn materialize_bspline(k: &Kernel, surface: &mut Surface) -> Result<()> {
     }
     match surface.kind_mut() {
         SurfaceKind::BSpline(s) => s.make_nurb(),
+        SurfaceKind::Cone(s) => s.make_nurb(k),
+        SurfaceKind::Torus(s) => s.make_nurb(k),
         SurfaceKind::Plane(s) => s.make_nurb(),
         SurfaceKind::SurfOfRevolution(s) => s.make_nurb(k),
         _ => Err(SolidError::unported(
@@ -53,6 +56,8 @@ pub fn materialize_bspline(k: &Kernel, surface: &mut Surface) -> Result<()> {
 pub fn bspline_base(surface: &Surface) -> Result<&BSplineSurface> {
     match surface.kind() {
         SurfaceKind::BSpline(s) => Ok(s),
+        SurfaceKind::Cone(s) => Ok(s.base()),
+        SurfaceKind::Torus(s) => Ok(s.base().base()),
         SurfaceKind::Plane(s) => Ok(s.base()),
         SurfaceKind::SurfOfRevolution(s) => Ok(s.base()),
         _ => Err(invalid()),

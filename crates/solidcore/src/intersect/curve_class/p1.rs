@@ -1172,8 +1172,8 @@ fn surface_zone_tol_3d(k: &Kernel, surface: &Surface) -> Result<f64> {
 
 /// A copy of `surface` evaluating out of bounds when it is an `SmBSplineSurface` kind
 /// (`SmTemporaryChangeValue<SmBoolean>(GetOutOfBoundsEnabled(), TRUE)`).
-fn out_of_bounds(surface: &Surface) -> Cow<'_, Surface> {
-    match surface.kind() {
+fn out_of_bounds(surface: &Surface) -> Result<Cow<'_, Surface>> {
+    Ok(match surface.kind() {
         SurfaceKind::BSpline(s) => {
             let mut s = s.clone();
             *s.out_of_bounds_enabled_mut() = true;
@@ -1190,11 +1190,21 @@ fn out_of_bounds(surface: &Surface) -> Cow<'_, Surface> {
             *s.base_mut().out_of_bounds_enabled_mut() = true;
             Cow::Owned(Surface::from(s))
         }
+        SurfaceKind::Cone(_) | SurfaceKind::Torus(_) => {
+            let mut copy = surface.clone_for_evaluation()?;
+            if let SurfaceKind::Cone(s) = copy.kind_mut() {
+                *s.base_mut().out_of_bounds_enabled_mut() = true;
+            }
+            if let SurfaceKind::Torus(s) = copy.kind_mut() {
+                *s.bspline_base_mut().out_of_bounds_enabled_mut() = true;
+            }
+            Cow::Owned(copy)
+        }
         SurfaceKind::CurveBounded(_)
         | SurfaceKind::Step(_)
         | SurfaceKind::OffsetSurface(_)
         | SurfaceKind::SrfInVolume(_) => Cow::Borrowed(surface),
-    }
+    })
 }
 
 /// `SmSurface::Evaluate(uv, 1, 1, TRUE, TRUE, TRUE, vals)` (status ignored upstream):
@@ -1318,8 +1328,8 @@ pub fn set_xsect_curve_through_point(
 
     // temporarily allow out of bound evaluations for surface[0], surface[1]
     let (orig0, orig1) = (*s0, *s1);
-    let s0 = out_of_bounds(orig0);
-    let s1 = out_of_bounds(orig1);
+    let s0 = out_of_bounds(orig0)?;
+    let s1 = out_of_bounds(orig1)?;
 
     // evaluate each surface at the given intersection parameter points
     let (ok0, mut surf_val0) = surface_evaluate_11(&s0, uv0)?;

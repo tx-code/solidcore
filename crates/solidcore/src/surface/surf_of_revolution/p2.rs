@@ -597,6 +597,17 @@ impl SurfOfRevolution {
         let mut need_nurb_intersection = true;
         let mut out = SurfaceIntersection::default();
         match other.kind() {
+            SurfaceKind::Cone(cone) => {
+                let (more, found) = self.intersect_with_cone(
+                    k,
+                    uv_domain,
+                    cone.as_ref(),
+                    other_uv_domain,
+                    approx_tol_3d,
+                )?;
+                need_nurb_intersection = more;
+                out = found;
+            }
             SurfaceKind::Plane(p) => {
                 let (more, found) =
                     self.intersect_with_plane(k, p, other_uv_domain, approx_tol_3d)?;
@@ -615,7 +626,8 @@ impl SurfOfRevolution {
                 out = found;
             }
             // (IntersectWithSphere / IntersectWithCone once those kinds exist)
-            SurfaceKind::BSpline(_)
+            SurfaceKind::Torus(_)
+            | SurfaceKind::BSpline(_)
             | SurfaceKind::CurveBounded(_)
             | SurfaceKind::Step(_)
             | SurfaceKind::OffsetSurface(_)
@@ -681,7 +693,9 @@ impl SurfOfRevolution {
                 plane_base = p.base_for_query();
                 &plane_base
             }
-            SurfaceKind::SurfOfRevolution(_)
+            SurfaceKind::Cone(_)
+            | SurfaceKind::Torus(_)
+            | SurfaceKind::SurfOfRevolution(_)
             | SurfaceKind::CurveBounded(_)
             | SurfaceKind::Step(_)
             | SurfaceKind::OffsetSurface(_)

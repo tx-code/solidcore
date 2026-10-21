@@ -933,6 +933,24 @@ impl<O: SolutionObject> Solution<O> {
     /// fixed arrays;
     /// [`SolidError::Unported`] for a non-null object (zone tolerances).
     pub fn object_tolerance(&self, index: usize) -> Result<f64> {
+        self.object_tolerance_with(index, |_| {
+            // UNPORTED(geom.tol): standalone solution handles have no owner
+            // resolver. Native owning queries supply one explicitly below.
+            Err(SolidError::unported(
+                "SmTol::GetZoneTol3d(const SmObject*)",
+                "geom.tol",
+            ))
+        })
+    }
+
+    /// `GetObjectTolerance` with the actual owner lookup of this solution's
+    /// handles. Invalid indices and NULL keep the source's zero result and do
+    /// not invoke the resolver (SmSolutionArray.cpp:837--852, `d8ed45a`).
+    pub fn object_tolerance_with(
+        &self,
+        index: usize,
+        resolve: impl FnOnce(O) -> Result<f64>,
+    ) -> Result<f64> {
         const OP: &str = "geom::solution_array::Solution::object_tolerance";
         self.check(OP)?;
 
@@ -943,16 +961,7 @@ impl<O: SolutionObject> Solution<O> {
 
         // pass the call along
         match self.object(index, OP)? {
-            Some(_) => {
-                // UNPORTED(geom.tol): SmTol::GetZoneTol3d(const SmObject*) on an opaque handle. Every
-                // arm it dispatches to is ported (topology::{vertex, edge, face::p2, edgeuse::p1}::tolerance,
-                // Brep::tolerance) but each takes `&Brep` and none is in scope here; wire once this code
-                // receives the owning B-rep
-                Err(SolidError::Unported {
-                    upstream: "SmTol::GetZoneTol3d(const SmObject*)",
-                    unit: "geom.tol",
-                })
-            }
+            Some(object) => resolve(object),
             None => Ok(0.0),
         }
     }

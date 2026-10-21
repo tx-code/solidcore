@@ -1435,6 +1435,10 @@ impl FilletCorner {
                 // derived from it: SmPlane, SmSurfOfRevolution)
                 match s.kind_mut() {
                     SurfaceKind::BSpline(b) => *b.out_of_bounds_enabled_mut() = true,
+                    SurfaceKind::Cone(s) => *s.base_mut().out_of_bounds_enabled_mut() = true,
+                    SurfaceKind::Torus(s) => {
+                        *s.bspline_base_mut().out_of_bounds_enabled_mut() = true;
+                    }
                     SurfaceKind::Plane(p) => *p.out_of_bounds_enabled_mut() = true,
                     SurfaceKind::SurfOfRevolution(r) => {
                         *r.base_mut().out_of_bounds_enabled_mut() = true;

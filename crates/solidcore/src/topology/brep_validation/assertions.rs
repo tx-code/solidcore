@@ -98,7 +98,12 @@ pub fn assert_valid(
         valid &= root_pred(&mut report, 7, !faces.is_empty())?;
     }
 
-    let found = if let Some(found) = ignored(find_infinite_region(k, b, &regions))? {
+    // SmBrep.cpp::AssertValid (maintained d8ed45a:34995--34997) calls the actual
+    // default FindInfiniteRegion, then compares its result with the stored one.
+    // The stored role is the assertion target, never the query's evidence.
+    let found = if let Some(found) = ignored(
+        crate::topology::brep::p9::find_infinite_region_default(k, b),
+    )? {
         found
     } else {
         valid = false;
@@ -256,17 +261,6 @@ fn coincidence_selected(level: CheckLevel<'_>) -> bool {
     }
 }
 
-fn find_infinite_region(_k: &Kernel, _b: &Brep, regions: &[RegionId]) -> Result<Option<RegionId>> {
-    // Exact first branch of SmBrep.cpp::FindInfiniteRegion, before bbox/rays.
-    if regions.len() == 1 {
-        return Ok(regions.first().copied());
-    }
-    // UNPORTED(topology.brep_p9): multi-region FindInfiniteRegion ray selection.
-    Err(SolidError::unported(
-        "SmBrep::FindInfiniteRegion",
-        "topology.brep_p9",
-    ))
-}
 fn inner_shell_of(_k: &mut Kernel, _b: &Brep, _inner: ShellId, _outer: ShellId) -> Result<bool> {
     // UNPORTED(topology.shell): actual ray-based SmShell::IsInnerShellOf.
     Err(SolidError::unported(
@@ -335,6 +329,31 @@ mod tests {
     use super::*;
     fn fixture() -> Brep {
         super::super::tests::fixture().0
+    }
+
+    #[test]
+    fn failed_actual_infinite_region_query_keeps_the_root_report_and_false_result() {
+        let mut b = Brep::new_with_infinite_region().unwrap();
+        b.add_region_record(crate::topology::Region {
+            in_brep: true,
+            ..crate::topology::Region::default()
+        })
+        .unwrap();
+        let mut reports = AssertArray::new();
+        assert!(!assert_valid(
+            &mut Kernel::default(),
+            &mut b,
+            AssertValidOptions {
+                level: CheckLevel::Given(&[8]),
+                walk: false,
+            },
+            Some(&mut reports),
+        )
+        .unwrap());
+        assert!(reports
+            .reports()
+            .iter()
+            .any(|r| r.list_index == 0 && r.test_index == 8));
     }
 
     #[test]

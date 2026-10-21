@@ -38,13 +38,13 @@
 
 use super::p1::TopologyObjects;
 use super::p1::{self, best_answer_so_far, CurveRef};
-use super::p1::{LocalSolver, LocalSolverKind, TopologySolver};
+use super::p1::{LocalSolver, LocalSolverKind, PointLocalExecutor, TopologySolver};
 use crate::curve::curve::Curve;
 use crate::error::{Result, SolidError};
 use crate::geom::extent1d::Extent1d;
 use crate::geom::extent2d::Extent2d;
 use crate::geom::global_solver::Branch;
-use crate::geom::global_solver::{GlobalSolve, SolutionRequested, SolverOperation};
+use crate::geom::global_solver::{GlobalSolve, GlobalSolver, SolutionRequested, SolverOperation};
 use crate::geom::object::{Shape, ShapeMember};
 use crate::geom::solution_array::SolutionObject;
 use crate::geom::solution_array::{Solution, SolutionArray, SolutionType, SortKey};
@@ -64,13 +64,22 @@ const OP_LOCAL: &str = "intersect::topology_solver::p2::TopologySolver::local_so
 const OP_VF: &str = "intersect::topology_solver::p2::LocalSolver::solve_vertex_face";
 const OP_CV: &str = "intersect::topology_solver::p2::LocalSolver::solve_curve_vertex";
 
-impl<'t, O: SolutionObject + 't> TopologySolver<'t, '_, O> {
+impl<'t, 'a, O: SolutionObject + 't> TopologySolver<'t, 'a, O> {
     /// Solves the object pairs of the two branch nodes in their native list order
     /// (`LocalSolve`), asking for further subdivision when either has child one.
     ///
     /// # Errors
     /// Invalid branches or object lists, missing local solver, and local-solve errors.
     pub fn local_solve_branch(&mut self, branch: &Branch) -> Result<bool> {
+        self.local_solve_branch_with(branch, |solver, local, first, second| {
+            local.solve_it(solver, first, second)
+        })
+    }
+
+    fn local_solve_branch_with<F>(&mut self, branch: &Branch, mut execute: F) -> Result<bool>
+    where
+        F: FnMut(&mut Self, &mut LocalSolver<'a, O>, Option<O>, Option<O>) -> Result<()>,
+    {
         let tree1 = self.base.tree(0)?;
         let tree2 = self.base.tree(1)?;
         let node1 = self.base.branch_node(branch, 0)?;
@@ -109,12 +118,61 @@ impl<'t, O: SolutionObject + 't> TopologySolver<'t, '_, O> {
                     .local_solver
                     .take()
                     .ok_or(SolidError::null_pointer(OP_LOCAL))?;
-                let result = local.solve_it(self, object1.object, object2.object);
+                let result = execute(self, &mut local, object1.object, object2.object);
                 self.local_solver = Some(local);
                 result?;
             }
         }
         Ok(node1.child1.is_some() || node2.child1.is_some())
+    }
+
+    fn solve_point_tree(
+        &mut self,
+        query: &'t Tree<O>,
+        target: &'t Tree<O>,
+        local: &mut LocalSolver<'a, O>,
+        executor: &mut Option<&mut dyn PointLocalExecutor<O>>,
+    ) -> Result<()> {
+        let Some(executor) = executor.as_deref_mut() else {
+            return self.solve_trees(query, target, local);
+        };
+        self.local_solver = Some(core::mem::take(local));
+        let branch = self.initialize_tree_solve(query, target);
+        // The wrapper changes only leaf execution. GlobalSolve retains its
+        // original branch order/culling and the same accumulated global state.
+        let result = PointExecution {
+            solver: self,
+            executor,
+        }
+        .solve_branch(&branch);
+        if let Some(back) = self.local_solver.take() {
+            *local = back;
+        }
+        result
+    }
+}
+
+struct PointExecution<'s, 't, 'a, O: SolutionObject> {
+    solver: &'s mut TopologySolver<'t, 'a, O>,
+    executor: &'s mut dyn PointLocalExecutor<O>,
+}
+
+impl<'t, O: SolutionObject + 't> GlobalSolve<'t, O> for PointExecution<'_, 't, '_, O> {
+    fn solver(&self) -> &GlobalSolver<'t, O> {
+        &self.solver.base
+    }
+    fn solver_mut(&mut self) -> &mut GlobalSolver<'t, O> {
+        &mut self.solver.base
+    }
+    fn are_ready_for_local_solve(&self, _: &Branch) -> Result<bool> {
+        Ok(true)
+    }
+    fn local_solve(&mut self, branch: &Branch) -> Result<bool> {
+        let executor = &mut *self.executor;
+        self.solver
+            .local_solve_branch_with(branch, |solver, local, first, second| {
+                executor.solve_pair(solver.kernel, &mut solver.base, local, first, second)
+            })
     }
 }
 
@@ -756,6 +814,30 @@ impl<'t, O: SolutionObject + 't> TopologySolver<'t, '_, O> {
         point: Point3,
         options: TopologySolveOptions<'_>,
     ) -> Result<SolutionArray<O>> {
+        Self::brep_point_solve_using(kernel, objects, brep, point, options, None)
+    }
+
+    /// Same traversal and source algorithm with an actual mutable owner for
+    /// native B-rep point-ray leaves. The cache resolver borrows no model data.
+    pub(crate) fn brep_point_solve_with_executor(
+        kernel: &Kernel,
+        objects: &dyn TopologyObjects<O>,
+        executor: &mut dyn PointLocalExecutor<O>,
+        brep: Option<O>,
+        point: Point3,
+        options: TopologySolveOptions<'_>,
+    ) -> Result<SolutionArray<O>> {
+        Self::brep_point_solve_using(kernel, objects, brep, point, options, Some(executor))
+    }
+
+    fn brep_point_solve_using(
+        kernel: &Kernel,
+        objects: &dyn TopologyObjects<O>,
+        brep: Option<O>,
+        point: Point3,
+        options: TopologySolveOptions<'_>,
+        mut executor: Option<&mut dyn PointLocalExecutor<O>>,
+    ) -> Result<SolutionArray<O>> {
         const OP: &str = "intersect::topology_solver::p2::TopologySolver::brep_point_solve";
         if !valid_point_operation(options.operation) {
             return Err(SolidError::invalid_input(OP, "unsupported operation"));
@@ -767,20 +849,20 @@ impl<'t, O: SolutionObject + 't> TopologySolver<'t, '_, O> {
         if options.operation != SolverOperation::Normalize {
             let mut vertices = LocalSolver::new(LocalSolverKind::PointVertex, false, None);
             vertices.set_point(point);
-            ts.solve_trees(&query, trees.vertices, &mut vertices)?;
+            ts.solve_point_tree(&query, trees.vertices, &mut vertices, &mut executor)?;
             if early_point_answer(&ts, options) {
                 return Ok(ts.base.solutions);
             }
             let mut edges = LocalSolver::new(LocalSolverKind::PointEdge, false, None);
             edges.set_point(point);
-            ts.solve_trees(&query, trees.curves, &mut edges)?;
+            ts.solve_point_tree(&query, trees.curves, &mut edges, &mut executor)?;
             if early_point_answer(&ts, options) {
                 return Ok(ts.base.solutions);
             }
         }
         let mut faces = LocalSolver::new(LocalSolverKind::PointFace, false, None);
         faces.set_point(point);
-        ts.solve_trees(&query, trees.surfaces, &mut faces)?;
+        ts.solve_point_tree(&query, trees.surfaces, &mut faces, &mut executor)?;
         Ok(ts.base.solutions)
     }
 

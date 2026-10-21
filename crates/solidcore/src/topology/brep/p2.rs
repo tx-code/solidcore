@@ -64,6 +64,7 @@
 //!   `CreateExtendedSurface`, where upstream never returns
 //!   (`plan/upstream-issues.md` HANG-18).
 
+mod ray_owner;
 pub mod runtime;
 pub use runtime::notify as notify_owned;
 pub use runtime::{object_ref, root_ref, NotificationState};
@@ -91,7 +92,6 @@ use crate::intersect::curve_class::ClassificationInit;
 use crate::intersect::point_class::{
     ClassGeometry, ClassObject, PointClassType, PointClassification,
 };
-use crate::intersect::topology_solver::p1::TopologySolver;
 use crate::intersect::topology_solver::p2::TopologySolveOptions;
 use crate::kernel::Kernel;
 use crate::math::{Point2, Point3, Vec3, BIG_DOUBLE, EFF_ZERO, EFF_ZERO_SQRT, PI};
@@ -104,7 +104,7 @@ use crate::query::face::p2::{curve_on_classify, CurveOnClassifyObjects};
 use crate::surface::surface::{Surface, SurfaceKind};
 use crate::surface::trim_srf_cache::TrimSrfCache;
 use crate::topology::brep::p1;
-use crate::topology::brep_cache::{self, BrepCache, BrepObjects, CacheObject, CacheSource};
+use crate::topology::brep_cache::{self, BrepCache, CacheObject, CacheSource};
 use crate::topology::edge::{self, AttributeFilter, NotifyEnv, SetCurveOptions};
 use crate::topology::edgeuse::p1::{self as eu1, UvTrimCurveArg};
 use crate::topology::edgeuse::p2 as eu2;
@@ -1348,7 +1348,7 @@ fn cache_entity(object: CacheObject) -> Result<EntityRef> {
 
 /// `RayFire`: fires a ray from `start` along `direction` through the B-rep (solver
 /// operation `SM_SO_RAYFIRE` on the B-rep with its `cache`; `brep_id`, `keys` and
-/// `owner_of` as in [`BrepObjects`]) and classifies
+/// `owner_of` as in [`crate::topology::brep_cache::BrepObjects`]) and classifies
 /// the start point: the infinite region (or the first region when there is none) when
 /// nothing is hit, else the region [`local_curve_sector`] finds stepping back from the
 /// closest, lowest dimensional hit along the ray. `answer_limit` bounds the distance
@@ -1384,17 +1384,13 @@ pub fn ray_fire(
     // cast ray through Brep
     let best_sq = answer_limit.map_or(BIG_DOUBLE, |l| l * l);
     let vectors = [ray];
-    let objects = BrepObjects {
-        brep: b,
+    let solutions = ray_owner::point_solve(
+        k,
+        b,
         brep_id,
         cache,
         keys,
         owner_of,
-    };
-    let solutions = TopologySolver::brep_point_solve(
-        k,
-        &objects,
-        Some(CacheObject::Brep),
         start,
         TopologySolveOptions {
             operation: SolverOperation::Rayfire,

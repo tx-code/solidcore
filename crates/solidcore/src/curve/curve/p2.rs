@@ -3114,6 +3114,34 @@ impl<'t, O: SolutionObject + 't> CpGlobalSolver<'t, O> {
 }
 
 impl<'t, O: SolutionObject + 't> GlobalSolve<'t, O> for CpGlobalSolver<'t, O> {
+    fn identical_solutions(
+        &self,
+        a: &Solution<O>,
+        b: &Solution<O>,
+    ) -> Result<(
+        crate::geom::global_solver::SolutionPairType,
+        Option<crate::geom::global_solver::PreferredSolution>,
+    )> {
+        // SmCurve.cpp::SmCPGlobalSolver::LocalSolve names the curve obtained
+        // from tree[1]'s cache in every answer. SmSolutionArray.cpp::
+        // GetParameterInterval then reads THAT curve's natural domain. The
+        // Rust output handle may be absent or opaque; neither changes the
+        // geometry already borrowed by this solver. Keep the original
+        // IdenticalSolutions formula and its 1/10000 natural-domain rule.
+        GlobalSolver::identical_solutions_with_intervals(a, b, |solution, index| {
+            if index == 0 && solution.num_objects == 1 {
+                if let Some(curve) = self.curve {
+                    if solution.objects.first().copied().flatten()
+                        == self.base.tree(1)?.owner_object()?
+                    {
+                        return Ok(Some(curve.natural_interval()));
+                    }
+                }
+            }
+            solution.parameter_interval(index)
+        })
+    }
+
     fn solver(&self) -> &GlobalSolver<'t, O> {
         &self.base
     }

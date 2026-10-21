@@ -45,9 +45,11 @@
 //! - **Derived classes.** `SmCone` derives from `SmSurfOfRevolution`; the base object
 //!   is the [`Cone::rev`] field. `SmCylinder` adds no data: it is a [`Cone`] with
 //!   [`Cone::is_cylinder_class`] set (its type, `IsCylinder` and
-//!   `GetMaxAnalyticDomain` differ). The cone joins
-//!   [`crate::surface::surface::SurfaceKind`] with the units porting the remaining
-//!   `SmSurfOfRevolution` overrides (`surface.surf_of_revolution_p2`, `_p3`).
+//!   `GetMaxAnalyticDomain` differ). [`crate::surface::surface::SurfaceKind::Cone`]
+//!   retains this actual object, with its inherited storage and concrete virtuals.
+//!   Its context-free evaluator needs an explicitly bound resolved Kernel zone
+//!   when polar inversion reaches the ellipse's seam choice; rebind the wrapper
+//!   after changing that context tolerance. Context-taking calls use it live.
 //! - **Virtual calls into the cone.** The inherited `MakeNurb` rebuilds the polar
 //!   converter through the virtual `CreateIsoParametricCurve`; [`Cone::make_nurb`]
 //!   runs it with the cone's override. The unbounded constructor's generator line has
@@ -878,6 +880,22 @@ impl Cone {
 
     /// The `SmSurfOfRevolution` base object.
     #[must_use]
+    pub(crate) fn clone_exact(&self) -> Self {
+        Self {
+            rev: self.rev.clone_exact(),
+            base_radius: self.base_radius,
+            semi_angle_deg: self.semi_angle_deg,
+            inside_out: self.inside_out,
+            cylinder: self.cylinder,
+        }
+    }
+
+    /// Borrow the actual inherited B-spline storage, preserving the cone object.
+    pub const fn base(&self) -> &crate::nurbs::b_spline_surface::BSplineSurface {
+        &self.rev.base
+    }
+
+    /// The actual inherited surface of revolution.
     pub const fn rev(&self) -> &SurfOfRevolution {
         &self.rev
     }
@@ -1343,6 +1361,21 @@ impl Cone {
     ///
     /// `SM_ERR_NULL_POINTER` without polar curve; those of the polar conversion.
     pub fn convert_uv_from_nurbs_to_step(&self, k: &Kernel, nurbs_uv: Point2) -> Result<Point2> {
+        self.convert_uv_from_nurbs_to_step_with_zone(
+            Some(crate::geom::tol::context_zone_tol_3d(
+                k,
+                None,
+                crate::geom::tol::SmallTopoType::NormalSize,
+            )),
+            nurbs_uv,
+        )
+    }
+
+    pub(crate) fn convert_uv_from_nurbs_to_step_with_zone(
+        &self,
+        context_zone: Option<f64>,
+        nurbs_uv: Point2,
+    ) -> Result<Point2> {
         // swap NurbPoint when needed
         let step_ivl = self.rev.anal_uv_domain.v_interval();
         let nurb_domain = self.rev.base.natural_uv_domain();
@@ -1361,10 +1394,10 @@ impl Cone {
             .polar_curve
             .as_ref()
             .ok_or(SolidError::null_pointer(OP_TO_STEP))?;
-        let (x, _exact) = self
-            .rev
-            .polar
-            .convert_to_polar_parameter(k, circle, nurb_uv.x)?;
+        let (x, _exact) =
+            self.rev
+                .polar
+                .convert_to_polar_parameter_with_zone(context_zone, circle, nurb_uv.x)?;
 
         // convert linear coordinate
         let y = if self.rev.is_bounded()? {
@@ -1383,6 +1416,40 @@ impl Cone {
         Ok(Point2::new(x, y))
     }
 
+    pub(crate) fn evaluate_point_with_zone(&self, zone: Option<f64>, uv: Point2) -> Result<Point3> {
+        self.evaluate_step_point(self.convert_uv_from_nurbs_to_step_with_zone(zone, uv)?)
+    }
+
+    /// Context-free maximum domain for the actual linear cone generator. A
+    /// changed nonline generator requires the original context-taking query.
+    pub(crate) fn max_analytic_domain_for_dispatch(&self) -> Result<Extent2d> {
+        if self.cylinder {
+            let domain = gen_max_analytic_domain(self.gen()?)?;
+            return Ok(Extent2d::from_bounds(0., domain.min(), 360., domain.max()));
+        }
+        let (mut domain, _) = self.step_linear_param_extent();
+        let big = gen_max_analytic_domain(self.gen()?)?;
+        if is_zero(self.semi_angle_deg) {
+            domain = big;
+        } else {
+            let height = -self.base_radius / (self.semi_angle_deg * PI / 180.).tan();
+            let point = self.rev.position.origin() + height * self.rev.position.z_axis();
+            let CurveKind::Line(line) = self.gen()?.kind() else {
+                return Err(SolidError::unported(
+                    "SmCone::GetMaxAnalyticDomain context for changed generator",
+                    "surface.cone_p1",
+                ));
+            };
+            let apex = line.step_inversion(point).0;
+            if apex <= domain.min() + EFF_ZERO {
+                let _ = domain.set_min_max(apex, big.max());
+            } else if apex >= domain.max() - EFF_ZERO {
+                let _ = domain.set_min_max(big.min(), apex);
+            }
+        }
+        Ok(Extent2d::from_bounds(0., domain.min(), 360., domain.max()))
+    }
+
     // ---- evaluation -----------------------------------------------------------------
 
     /// The point and derivatives at the NURB parameters `uv` (`Evaluate`): the
@@ -1396,6 +1463,27 @@ impl Cone {
     pub fn evaluate(
         &self,
         k: &Kernel,
+        uv: Point2,
+        hu: usize,
+        hv: usize,
+        flags: EvaluateFlags,
+    ) -> Result<Vec<Vec3>> {
+        self.evaluate_with_zone(
+            Some(crate::geom::tol::context_zone_tol_3d(
+                k,
+                None,
+                crate::geom::tol::SmallTopoType::NormalSize,
+            )),
+            uv,
+            hu,
+            hv,
+            flags,
+        )
+    }
+
+    pub(crate) fn evaluate_with_zone(
+        &self,
+        context_zone: Option<f64>,
         uv: Point2,
         hu: usize,
         hv: usize,
@@ -1424,7 +1512,9 @@ impl Cone {
         };
 
         // use the step position for tighter tolerances (statuses only select it)
-        if let Some(step_uv) = ignored(self.convert_uv_from_nurbs_to_step(k, uv))? {
+        if let Some(step_uv) =
+            ignored(self.convert_uv_from_nurbs_to_step_with_zone(context_zone, uv))?
+        {
             if let Some(p) = ignored(self.evaluate_step_point(step_uv))? {
                 if let Some(slot) = d.first_mut() {
                     *slot = p;

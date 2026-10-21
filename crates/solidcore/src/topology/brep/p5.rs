@@ -2164,6 +2164,18 @@ fn transformed_surface_base(
     use crate::surface::surface::SurfaceKind;
     Ok(match surface.kind_mut() {
         SurfaceKind::BSpline(base) => Some(base.clone()),
+        SurfaceKind::Cone(s) => {
+            if s.base().gw_nurb().is_none() {
+                crate::error::ignore_status(s.make_nurb(k))?;
+            }
+            Some(s.base().clone())
+        }
+        SurfaceKind::Torus(s) => {
+            if s.base().base().gw_nurb().is_none() {
+                crate::error::ignore_status(s.make_nurb(k))?;
+            }
+            Some(s.base().base().clone())
+        }
         SurfaceKind::Plane(plane) => {
             if plane.base().gw_nurb().is_none() {
                 crate::error::ignore_status(plane.make_nurb())?;

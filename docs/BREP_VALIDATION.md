@@ -699,3 +699,26 @@ search instead, so complete failure-path equivalence remains unestablished.
 ```text
 python scripts/brep_root_validation_compare.py --cpp <validation-observer> --rust bin/debug/examples/brep_validation_probe.exe --receipt bin/brep-root-validation.local.json
 ```
+
+## Owning ray and coincidence execution
+
+The native STEP bridge now supplies actual typed BRep owners to the existing
+infinite-region ray search and first edge/face coincidence search. Its private
+execution adapters share the original algorithms with the existing borrowed
+entrypoints. Point/curve duplicate comparison uses the defining curve's natural
+domain, and sorted solutions use their actual vertex/edge/face/geometry working
+tolerances. Foreign handles still refuse; system tolerance is used only in the
+native branches that explicitly request it.
+
+Face-owned surface boxes expand normal/pseudo bounds by the actual face tolerance,
+leaving polar bounds unchanged. Both coincidence and face-query callers use the
+same final-expansion helper. Each projection/classification releases its geometry
+borrow before running the required mutable owner/cache operation. The owning ray
+path restores its spatial cache after success or failure; it does not infer the
+answer from a stored infinite-region flag.
+
+The public analytic material box completes pointer and LEVEL2 descendant checks
+through this path. Its geometry/topology construction and native validity do not
+establish general STEP acceptance. General B-spline cache-owner routes, periodic
+face classification, concrete primitive assertions, remaining query dispatches
+and the other documented failure-path limitations still require implementation.

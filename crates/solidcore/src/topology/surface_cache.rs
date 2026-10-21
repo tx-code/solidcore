@@ -105,6 +105,166 @@ pub fn drop_face_point(
     )
 }
 
+/// The native simple surface/curve coincidence walk with the actual owning
+/// face and edge. Query callbacks end each geometry borrow before the global
+/// surface phase may materialize the model's trim/cache data.
+pub(crate) fn simple_face_edge_coincidence(
+    k: &Kernel,
+    b: &mut Brep,
+    face: FaceId,
+    edge: crate::topology::EdgeId,
+    domain: &crate::geom::extent2d::Extent2d,
+    interval: &crate::geom::extent1d::Extent1d,
+    tolerance: f64,
+    partial: bool,
+    objects: [Option<EntityRef>; 2],
+) -> Result<Option<crate::geom::solution_array::Solution<EntityRef>>> {
+    let mut query = FaceEdgeCoincidence {
+        brep: b,
+        face,
+        edge,
+    };
+    // Preserve the caller's required defining geometry before entering the walk.
+    query.curve()?;
+    query.surface()?;
+    Surface::simple_coincidence_checker_with_query(
+        k, &mut query, domain, interval, tolerance, partial, objects,
+    )
+}
+
+struct FaceEdgeCoincidence<'a> {
+    brep: &'a mut Brep,
+    face: FaceId,
+    edge: crate::topology::EdgeId,
+}
+
+impl FaceEdgeCoincidence<'_> {
+    fn surface(&self) -> Result<&Surface> {
+        self.brep
+            .face(self.face)?
+            .surface
+            .as_ref()
+            .ok_or_else(|| SolidError::null_pointer(OP))
+    }
+    fn curve(&self) -> Result<&crate::curve::curve::Curve> {
+        self.brep
+            .edge(self.edge)?
+            .curve
+            .as_ref()
+            .ok_or_else(|| SolidError::null_pointer(OP))
+    }
+}
+
+impl crate::surface::surface::p6::SimpleCoincidenceQuery<EntityRef> for FaceEdgeCoincidence<'_> {
+    fn surface_box(
+        &mut self,
+        k: &Kernel,
+        domain: &crate::geom::extent2d::Extent2d,
+    ) -> Result<Option<crate::geom::extent3d::Extent3d>> {
+        let surface = self.surface()?;
+        let boxes = if let Some(owner) = surface.face()? {
+            surface.calculate_bounding_box_for_face(
+                k,
+                domain,
+                [true, false, false],
+                true,
+                owning_face_tolerance(self.brep, owner)?,
+            )?
+        } else {
+            surface.calculate_bounding_box(k, domain, [true, false, false], true)?
+        };
+        Ok(boxes.normal_box)
+    }
+    fn curve_box(
+        &mut self,
+        k: &Kernel,
+        interval: &crate::geom::extent1d::Extent1d,
+    ) -> Result<Option<crate::geom::extent3d::Extent3d>> {
+        Ok(self
+            .curve()?
+            .calculate_bounding_box(
+                k,
+                interval,
+                crate::nurbs::b_spline_curve::BoundingBoxRequest {
+                    normal: true,
+                    pseudo: false,
+                    polar: false,
+                },
+                true,
+            )?
+            .normal)
+    }
+    fn evaluate_curve(&self, parameter: f64, from_left: bool) -> Result<Vec<crate::math::Vec3>> {
+        self.curve()?.evaluate(parameter, 1, from_left, true)
+    }
+    fn curve_degree(&self) -> Result<usize> {
+        self.curve()?.degree()
+    }
+    fn curve_interval(&self) -> Result<crate::geom::extent1d::Extent1d> {
+        Ok(self.curve()?.natural_interval())
+    }
+    fn normal(&self, uv: Point2) -> Result<crate::math::Vec3> {
+        self.surface()?.evaluate_normal(
+            uv,
+            crate::nurbs::knots::Side::Right,
+            crate::nurbs::knots::Side::Right,
+        )
+    }
+    fn global_point(
+        &mut self,
+        k: &Kernel,
+        domain: &crate::geom::extent2d::Extent2d,
+        point: crate::math::Point3,
+        tolerance: f64,
+    ) -> Result<Vec<crate::geom::solution_array::SolutionEnd>> {
+        let surface = self.surface()?.clone_for_evaluation()?;
+        let mut solutions = crate::geom::solution_array::SolutionArray::<EntityRef>::new();
+        // SmSurface::SimpleCoincidenceChecker asks MINIMIZE/SINGLE here. The
+        // existing global pipeline chooses fast projection and actual cache role
+        // lazily; this adapter supplies its real topology, never an eager cache.
+        surface.global_point_solve_into_with_surface_cache(
+            k,
+            None,
+            domain,
+            crate::geom::global_solver::SolverOperation::Minimize,
+            point,
+            tolerance,
+            None,
+            crate::geom::global_solver::SolutionRequested::Single,
+            &mut solutions,
+            None,
+            &mut BrepSurfaceContext {
+                brep: self.brep,
+                face: self.face,
+            },
+        )?;
+        Ok(solutions
+            .as_slice()
+            .iter()
+            .map(|solution| solution.start)
+            .collect())
+    }
+    fn local_point(
+        &mut self,
+        k: &Kernel,
+        domain: &crate::geom::extent2d::Extent2d,
+        point: crate::math::Point3,
+        guess: Point2,
+    ) -> Result<(bool, crate::geom::solution_array::Solution<EntityRef>)> {
+        let surface = self.surface()?;
+        let tolerance = working_surface_tolerance(k, self.brep, surface)?;
+        let result = surface.local_point_solve_for_face(
+            k,
+            domain,
+            crate::geom::global_solver::SolverOperation::Minimize,
+            point,
+            guess,
+            Some(tolerance),
+        )?;
+        Ok((result.found, result.solution))
+    }
+}
+
 fn wrong_handle() -> SolidError {
     SolidError::invalid_input(OP, "cache topology handle has the wrong type")
 }
@@ -456,6 +616,89 @@ mod tests {
         builder.end_face().unwrap();
         builder.end_shell(&mut k, false).unwrap();
         (k, builder.finish().unwrap(), face)
+    }
+
+    #[test]
+    fn owned_simple_coincidence_matches_the_borrowed_algorithm_without_losing_owners() {
+        let (k, mut b, face) = triangle();
+        let edge = b.edge_list()[0];
+        let domain = b.face(face).unwrap().uv_domain;
+        let interval = b.edge(edge).unwrap().interval;
+        b.face_mut(face).unwrap().tolerance = 0.002;
+        let surface_owner = b.face(face).unwrap().surface.as_ref().unwrap().owner();
+        let curve_owner = b.edge(edge).unwrap().curve.as_ref().unwrap().owner();
+        let result = simple_face_edge_coincidence(
+            &k,
+            &mut b,
+            face,
+            edge,
+            &domain,
+            &interval,
+            1.0e-5,
+            false,
+            [Some(EntityRef::Edge(edge)), Some(EntityRef::Face(face))],
+        )
+        .unwrap()
+        .unwrap();
+        let plane = Surface::from(Plane::new(
+            Point3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            Vec2::new(1., 1.),
+            &domain,
+        ));
+        let line = Curve::from(Line::from_points(Point3::ZERO, Vec3::X, 3));
+        let borrowed = plane
+            .simple_coincidence_checker::<EntityRef>(
+                &k,
+                &domain,
+                &line,
+                &interval,
+                1.0e-5,
+                false,
+                [None, None],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.solution_type, borrowed.solution_type);
+        assert_eq!(result.start, borrowed.start);
+        assert_eq!(result.end, borrowed.end);
+        assert_eq!(result.objects[0], Some(EntityRef::Edge(edge)));
+        assert_eq!(result.objects[1], Some(EntityRef::Face(face)));
+        assert_eq!(
+            b.face(face).unwrap().surface.as_ref().unwrap().owner(),
+            surface_owner
+        );
+        assert_eq!(
+            b.edge(edge).unwrap().curve.as_ref().unwrap().owner(),
+            curve_owner
+        );
+    }
+
+    #[test]
+    fn owned_surface_boxes_expand_normal_and_pseudo_by_the_actual_face_tolerance() {
+        let (k, mut b, face) = triangle();
+        b.face_mut(face).unwrap().tolerance = 0.125;
+        let record = b.face(face).unwrap();
+        let surface = record.surface.as_ref().unwrap();
+        let base = surface
+            .calculate_bounding_box(&k, &record.uv_domain, [true, true, false], false)
+            .unwrap();
+        let expanded = surface
+            .calculate_bounding_box_for_face(
+                &k,
+                &record.uv_domain,
+                [true, true, false],
+                true,
+                owning_face_tolerance(&b, surface.face().unwrap().unwrap()).unwrap(),
+            )
+            .unwrap();
+        let mut normal = base.normal_box.unwrap();
+        normal.expand_absolute(0.125);
+        let mut pseudo = base.pseudo_box.unwrap();
+        pseudo.expand_absolute(0.125);
+        assert_eq!(expanded.normal_box, Some(normal));
+        assert_eq!(expanded.pseudo_box, Some(pseudo));
     }
 
     #[test]

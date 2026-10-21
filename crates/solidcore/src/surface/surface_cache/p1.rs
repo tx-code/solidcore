@@ -186,6 +186,8 @@ pub(super) fn invalid(operation: &'static str, reason: &'static str) -> SolidErr
 pub(super) const fn bspline_of(surface: &Surface) -> Option<&BSplineSurface> {
     match surface.kind() {
         SurfaceKind::BSpline(b) => Some(b),
+        SurfaceKind::Cone(s) => Some(s.base()),
+        SurfaceKind::Torus(s) => Some(s.base().base()),
         SurfaceKind::Plane(p) => Some(p.base()),
         SurfaceKind::SurfOfRevolution(s) => Some(s.base()),
         SurfaceKind::CurveBounded(_)
@@ -234,6 +236,12 @@ fn create_iso_parametric_curve(
             .create_iso_parametric_curve(param, iso, domain.as_ref(), false)?
             .curve
             .into()),
+        SurfaceKind::Cone(s) => Ok(s
+            .create_iso_parametric_curve(k, param, iso, domain.as_ref(), false)?
+            .curve),
+        SurfaceKind::Torus(s) => Ok(s
+            .create_iso_parametric_curve(k, param, iso, domain.as_ref())?
+            .curve),
         SurfaceKind::SurfOfRevolution(s) => Ok(s
             .create_iso_parametric_curve(k, param, iso, domain.as_ref())?
             .curve),
@@ -270,6 +278,8 @@ pub(super) fn calculate_bounding_box(
 ) -> Result<BoundingBoxes> {
     match surface.kind() {
         SurfaceKind::BSpline(b) => b.calculate_bounding_box(domain, req),
+        SurfaceKind::Cone(s) => s.base().calculate_bounding_box(domain, req),
+        SurfaceKind::Torus(s) => s.base().base().calculate_bounding_box(domain, req),
         // inherited from SmBSplineSurface: none of its virtual calls is overridden
         SurfaceKind::SurfOfRevolution(s) => s.base().calculate_bounding_box(domain, req),
         SurfaceKind::Plane(p) => crate::surface::surface::p1::plane_bounding_box(p, domain, req),
@@ -313,7 +323,9 @@ pub(super) fn calculate_bounding_box(
 fn is_singularity(k: &Kernel, surface: &Surface, uv: Point2) -> Result<bool> {
     match surface.kind() {
         SurfaceKind::Plane(p) => Ok(p.is_singularity().0),
-        SurfaceKind::BSpline(_)
+        SurfaceKind::Cone(_)
+        | SurfaceKind::Torus(_)
+        | SurfaceKind::BSpline(_)
         | SurfaceKind::CurveBounded(_)
         | SurfaceKind::SurfOfRevolution(_)
         | SurfaceKind::Step(_)

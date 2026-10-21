@@ -761,9 +761,11 @@ impl Surface {
     /// [`OffsetSurface::evaluate_normal`](crate::surface::offset_surface::OffsetSurface::evaluate_normal).
     pub fn evaluate_normal(&self, uv: Point2, u_side: Side, v_side: Side) -> Result<Vec3> {
         match self.kind() {
-            SurfaceKind::BSpline(_) | SurfaceKind::SurfOfRevolution(_) | SurfaceKind::Step(_) => {
-                base_evaluate_normal(self, uv, u_side, v_side)
-            }
+            SurfaceKind::Cone(_)
+            | SurfaceKind::Torus(_)
+            | SurfaceKind::BSpline(_)
+            | SurfaceKind::SurfOfRevolution(_)
+            | SurfaceKind::Step(_) => base_evaluate_normal(self, uv, u_side, v_side),
             SurfaceKind::CurveBounded(s) => s.evaluate_normal(uv, u_side, v_side),
             SurfaceKind::SrfInVolume(s) => s.evaluate_normal(uv, u_side, v_side),
             SurfaceKind::Plane(p) => Ok(p.evaluate_normal()),
@@ -790,7 +792,9 @@ impl Surface {
                 let (closed, continuity) = p.is_closed();
                 Ok((closed, want_continuity.then_some(continuity)))
             }
-            SurfaceKind::BSpline(_)
+            SurfaceKind::Cone(_)
+            | SurfaceKind::Torus(_)
+            | SurfaceKind::BSpline(_)
             | SurfaceKind::CurveBounded(_)
             | SurfaceKind::SurfOfRevolution(_)
             | SurfaceKind::Step(_)
@@ -813,6 +817,12 @@ impl Surface {
     /// upstream).
     pub fn is_planar(&self, k: &Kernel, tol_3d: f64) -> Result<Planar> {
         match self.kind() {
+            SurfaceKind::Cone(s) => {
+                Ok(planar_of(s.base(), &self.natural_uv_domain())?.is_planar(tol_3d))
+            }
+            SurfaceKind::Torus(s) => {
+                Ok(planar_of(s.base().base(), &self.natural_uv_domain())?.is_planar(tol_3d))
+            }
             SurfaceKind::Plane(p) => {
                 let (point, normal, deviation) = p.is_planar();
                 Ok(Planar {

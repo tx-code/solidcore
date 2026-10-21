@@ -37,6 +37,9 @@
 //!   upstream's `NER` on the missing cache. The cache tree's owner object is the
 //!   curve's handle, and [`CpGlobalSolver`] carries the curve
 //!   ([`CpGlobalSolver::curve`]) that upstream reads back from the tree's cache.
+//!   Duplicate comparison reads that same curve's natural interval, including
+//!   through the owner-tolerance execution adapter; optional output handles do
+//!   not replace the actual geometry or narrow its domain to the query interval.
 //! - **Persistent solution.** `SmCPGlobalSolver::LocalSolve` reuses one
 //!   `SmSolution` across its guesses: [`Curve::local_point_solve`] returns a fresh
 //!   solution, merged into the persistent one exactly as upstream writes it (type,
@@ -80,7 +83,7 @@ use crate::geom::extent1d::Extent1d;
 use crate::geom::geom_utility::p1::segment_point_angle_deg_to_perp;
 use crate::geom::geom_utility::p2::ContinuityType;
 use crate::geom::global_solver::{
-    Branch, GlobalSolve, SolutionRequested, SolveRequest, SolverOperation,
+    Branch, GlobalSolve, GlobalSolver, SolutionRequested, SolveRequest, SolverOperation,
 };
 use crate::geom::solution_array::{Solution, SolutionArray, SolutionObject, SolutionType, SortKey};
 use crate::geom::tol::{are_same, is_zero, is_zero_to_tol};
@@ -858,13 +861,18 @@ fn merge_point_solution<O: Copy>(
 
 impl<'t, O: SolutionObject + 't> CpGlobalSolver<'t, O> {
     /// `AddSortedSolution` by value (with parameter) or by first parameter.
-    fn add_solution(&mut self, solution: &Solution<O>, by_value: bool) -> Result<()> {
+    fn add_solution(
+        &mut self,
+        solution: &Solution<O>,
+        by_value: bool,
+        resolve_tolerance: &mut dyn FnMut(O) -> Result<f64>,
+    ) -> Result<()> {
         let key = if by_value {
             SortKey::ByValueWithParameter
         } else {
             SortKey::ByFirstParameter
         };
-        self.add_sorted_solution(solution, key, true)
+        self.add_sorted_solution_with(solution, key, true, resolve_tolerance)
     }
 
     /// Option vector `i` (`m_cpOptVectors[i]`, read without a `NULL` check).
@@ -893,6 +901,20 @@ impl<'t, O: SolutionObject + 't> CpGlobalSolver<'t, O> {
     /// branch node, curve or option vector or a node that is not a curve leaf; those
     /// of `Unitize`, the signed angle, `AddSortedSolution` and `LocalPropertyAnalysis`.
     pub fn local_solve_branch(&mut self, branch: &Branch) -> Result<bool> {
+        self.local_solve_branch_with_tolerance(branch, &mut |_| {
+            // UNPORTED(geom.tol): standalone curve handles have no owner lookup.
+            Err(SolidError::unported(
+                "SmTol::GetZoneTol3d(const SmObject*)",
+                "geom.tol",
+            ))
+        })
+    }
+
+    fn local_solve_branch_with_tolerance(
+        &mut self,
+        branch: &Branch,
+        resolve_tolerance: &mut dyn FnMut(O) -> Result<f64>,
+    ) -> Result<bool> {
         // init outputs
         let needs_more_subdivision = false;
 
@@ -1052,7 +1074,7 @@ impl<'t, O: SolutionObject + 't> CpGlobalSolver<'t, O> {
                 solution.objects[0] = curve_obj;
 
                 // add solution to sSolution array in proper order
-                self.add_solution(&solution, by_value_degenerate)?;
+                self.add_solution(&solution, by_value_degenerate, resolve_tolerance)?;
             }
 
             return Ok(needs_more_subdivision);
@@ -1384,7 +1406,7 @@ impl<'t, O: SolutionObject + 't> CpGlobalSolver<'t, O> {
             solution.objects[0] = curve_obj;
 
             // add solution to sorted sSolution array
-            self.add_solution(&solution, by_value_main)?;
+            self.add_solution(&solution, by_value_main, resolve_tolerance)?;
         }
 
         let by_value_coin = matches!(
@@ -1412,7 +1434,7 @@ impl<'t, O: SolutionObject + 't> CpGlobalSolver<'t, O> {
                 coin.objects[0] = curve_obj;
             }
             for coin in &coin_solutions {
-                self.add_solution(coin, by_value_coin)?;
+                self.add_solution(coin, by_value_coin, resolve_tolerance)?;
             }
         } else {
             // Coincident segment found
@@ -1442,7 +1464,7 @@ impl<'t, O: SolutionObject + 't> CpGlobalSolver<'t, O> {
                 ivl_solution.solution_type = SolutionType::RangeOfValues;
                 ivl_solution.num_objects = 1;
                 ivl_solution.objects[0] = curve_obj;
-                self.add_solution(&ivl_solution, by_value_coin)?;
+                self.add_solution(&ivl_solution, by_value_coin, resolve_tolerance)?;
             }
         }
 
@@ -1451,6 +1473,42 @@ impl<'t, O: SolutionObject + 't> CpGlobalSolver<'t, O> {
 }
 
 // ---- GlobalPointSolve -----------------------------------------------------------------
+
+// The nested CP solver uses the same traversal, local body and sorting body.
+// This query-local adapter supplies only the caller's actual object tolerances;
+// it stores no global owner metadata and does not alter CpGlobalSolver's public
+// layout or standalone behavior.
+struct CpToleranceExecution<'s, 't, O: SolutionObject> {
+    solver: &'s mut CpGlobalSolver<'t, O>,
+    resolve_tolerance: &'s mut dyn FnMut(O) -> Result<f64>,
+}
+
+impl<'t, O: SolutionObject + 't> GlobalSolve<'t, O> for CpToleranceExecution<'_, 't, O> {
+    fn identical_solutions(
+        &self,
+        a: &Solution<O>,
+        b: &Solution<O>,
+    ) -> Result<(
+        crate::geom::global_solver::SolutionPairType,
+        Option<crate::geom::global_solver::PreferredSolution>,
+    )> {
+        self.solver.identical_solutions(a, b)
+    }
+
+    fn solver(&self) -> &GlobalSolver<'t, O> {
+        &self.solver.base
+    }
+    fn solver_mut(&mut self) -> &mut GlobalSolver<'t, O> {
+        &mut self.solver.base
+    }
+    fn branch_may_contain_answers(&mut self, branch: &Branch) -> Result<bool> {
+        self.solver.may_contain_answers(branch)
+    }
+    fn local_solve(&mut self, branch: &Branch) -> Result<bool> {
+        self.solver
+            .local_solve_branch_with_tolerance(branch, self.resolve_tolerance)
+    }
+}
 
 /// The optional inputs of [`Curve::global_point_solve`].
 #[derive(Debug, Clone, Copy)]
@@ -1537,6 +1595,33 @@ impl Curve {
         )
     }
 
+    /// Native owner execution of the same curve point solve. The resolver names
+    /// the original defining curve in the caller's object namespace, including
+    /// inside the CP solver's `Rayfire` `AddSortedSolution` calls.
+    pub(crate) fn global_point_solve_with_tolerance<O: SolutionObject>(
+        &self,
+        k: &Kernel,
+        interval: &Extent1d,
+        op: SolverOperation,
+        test_point: Point3,
+        dist_tol: f64,
+        requested: SolutionRequested,
+        opts: &GlobalPointSolveOptions<'_, O>,
+        resolve_tolerance: &mut dyn FnMut(O) -> Result<f64>,
+    ) -> Result<SolutionArray<O>> {
+        self.global_point_solve_cached_with_tolerance(
+            k,
+            interval,
+            op,
+            test_point,
+            dist_tol,
+            requested,
+            opts,
+            &mut None,
+            resolve_tolerance,
+        )
+    }
+
     /// [`Curve::global_point_solve`] keeping the curve's cache in `cache` across calls,
     /// as upstream keeps it on the curve (`GetOrCreateObjectCache`): the cache is built
     /// where the solve first needs it (with the same errors) and reused by later calls
@@ -1558,6 +1643,37 @@ impl Curve {
         requested: SolutionRequested,
         opts: &GlobalPointSolveOptions<'_, O>,
         cache: &mut Option<CurveCache<O>>,
+    ) -> Result<SolutionArray<O>> {
+        self.global_point_solve_cached_with_tolerance(
+            k,
+            interval,
+            op,
+            test_point,
+            dist_tol,
+            requested,
+            opts,
+            cache,
+            &mut |_| {
+                // UNPORTED(geom.tol): preserve standalone opaque-handle failure.
+                Err(SolidError::unported(
+                    "SmTol::GetZoneTol3d(const SmObject*)",
+                    "geom.tol",
+                ))
+            },
+        )
+    }
+
+    fn global_point_solve_cached_with_tolerance<O: SolutionObject>(
+        &self,
+        k: &Kernel,
+        interval: &Extent1d,
+        op: SolverOperation,
+        test_point: Point3,
+        dist_tol: f64,
+        requested: SolutionRequested,
+        opts: &GlobalPointSolveOptions<'_, O>,
+        cache: &mut Option<CurveCache<O>>,
+        resolve_tolerance: &mut dyn FnMut(O) -> Result<f64>,
     ) -> Result<SolutionArray<O>> {
         let target = opts.target_distance;
 
@@ -1694,7 +1810,13 @@ impl Curve {
             best_answer_so_far_sq,
             opt_vectors: opts.opt_vectors.unwrap_or(&[]),
         };
-        ignored(gs.solve_it(&request, &mut solutions))?;
+        ignored(
+            CpToleranceExecution {
+                solver: &mut gs,
+                resolve_tolerance,
+            }
+            .solve_it(&request, &mut solutions),
+        )?;
 
         Ok(solutions)
     }
@@ -2039,6 +2161,149 @@ impl Curve {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geom::global_solver::SolutionPairType;
+    use crate::geom::solution_array::ObjectKind;
+    use crate::nurbs::b_spline_curve::{BSplineCurveForm, CanonicalData, KnotType};
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct OpaqueCurve(u8);
+
+    impl SolutionObject for OpaqueCurve {
+        fn kind(&self) -> ObjectKind {
+            ObjectKind::Curve
+        }
+    }
+
+    fn symmetric_point_domain_curve() -> Curve {
+        BSplineCurve::create_canonical(&CanonicalData {
+            dim: 3,
+            degree: 2,
+            control_points: &[
+                Vec3::new(-1.0, 1.0, 0.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+            ],
+            form: BSplineCurveForm::Unspecified,
+            knot_multiplicities: &[3, 3],
+            knots: &[2.0, 6.0],
+            knot_type: KnotType::Unspecified,
+            weights: None,
+            trim: None,
+        })
+        .unwrap()
+        .into()
+    }
+
+    fn assert_point_domain_maxima(
+        solutions: &SolutionArray<OpaqueCurve>,
+        handle: Option<OpaqueCurve>,
+    ) {
+        // On this synthetic symmetric parabola, both ends of the QUERY
+        // interval maximize distance. Comparing their equal-valued solutions
+        // must reach the owning curve's interval without resolving the handle.
+        let mut parameters = solutions
+            .as_slice()
+            .iter()
+            .map(|solution| {
+                assert_eq!(solution.objects[0], handle);
+                solution.start.parameters[0]
+            })
+            .collect::<Vec<_>>();
+        parameters.sort_by(f64::total_cmp);
+        assert_eq!(parameters, [3.0, 5.0]);
+    }
+
+    #[test]
+    fn global_point_solve_resolves_actual_domain_for_absent_and_opaque_handles() {
+        let curve = symmetric_point_domain_curve();
+        let kernel = Kernel::default();
+        for handle in [None, Some(OpaqueCurve(0))] {
+            let solutions = curve
+                .global_point_solve(
+                    &kernel,
+                    &Extent1d::from_min_max(3.0, 5.0),
+                    SolverOperation::Maximize,
+                    Vec3::ZERO,
+                    1e-6,
+                    SolutionRequested::All,
+                    &GlobalPointSolveOptions {
+                        handle,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_point_domain_maxima(&solutions, handle);
+        }
+    }
+
+    #[test]
+    fn owner_point_solve_uses_the_same_actual_domain_comparison() {
+        let curve = symmetric_point_domain_curve();
+        let kernel = Kernel::default();
+        let handle = Some(OpaqueCurve(0));
+        let solutions = curve
+            .global_point_solve_with_tolerance(
+                &kernel,
+                &Extent1d::from_min_max(3.0, 5.0),
+                SolverOperation::Maximize,
+                Vec3::ZERO,
+                1e-6,
+                SolutionRequested::All,
+                &GlobalPointSolveOptions {
+                    handle,
+                    ..Default::default()
+                },
+                &mut |_| panic!("Maximize must not ask for the Rayfire owner tolerance"),
+            )
+            .unwrap();
+        assert_point_domain_maxima(&solutions, handle);
+    }
+
+    #[test]
+    fn cp_execution_compares_natural_domain_and_keeps_foreign_handles_unresolved() {
+        let curve = symmetric_point_domain_curve();
+        let kernel = Kernel::default();
+        let point_tree = Tree::from_point(Vec3::ZERO, 0.0, false);
+        let cache = make_curve_cache(&kernel, &curve, Some(OpaqueCurve(0))).unwrap();
+        let mut solver = CpGlobalSolver::new(
+            &point_tree,
+            cache.tree().unwrap(),
+            Extent1d::from_min_max(3.0, 5.0),
+        )
+        .with_curve(&curve);
+        let mut a = Solution::new();
+        a.num_objects = 1;
+        a.num_variables = 1;
+        a.solution_type = SolutionType::SingleValue;
+        a.objects[0] = Some(OpaqueCurve(0));
+        a.start.parameters[0] = 4.0;
+        let mut b = a;
+        b.start.parameters[0] += 0.0003;
+        // Between 1/10000 of the query length and the natural length:
+        // a query-domain or zero-domain substitute would keep these distinct.
+        assert_eq!(
+            solver.identical_solutions(&a, &b).unwrap().0,
+            SolutionPairType::Identical
+        );
+        let mut resolve_tolerance = |_| Ok(0.0);
+        let execution = CpToleranceExecution {
+            solver: &mut solver,
+            resolve_tolerance: &mut resolve_tolerance,
+        };
+        assert_eq!(
+            execution.identical_solutions(&a, &b).unwrap().0,
+            SolutionPairType::Identical
+        );
+        a.objects[0] = Some(OpaqueCurve(1));
+        b.objects[0] = Some(OpaqueCurve(1));
+        assert!(matches!(
+            execution.identical_solutions(&a, &b),
+            Err(SolidError::Unported {
+                upstream: "SmCurve::GetNaturalInterval",
+                ..
+            })
+        ));
+    }
 
     fn cubic() -> Curve {
         Curve::from(HermiteCurve::new(
@@ -2111,8 +2376,8 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct Obj;
     impl SolutionObject for Obj {
-        fn kind(&self) -> crate::geom::solution_array::ObjectKind {
-            crate::geom::solution_array::ObjectKind::Other
+        fn kind(&self) -> ObjectKind {
+            ObjectKind::Other
         }
     }
 

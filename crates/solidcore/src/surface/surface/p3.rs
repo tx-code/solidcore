@@ -130,6 +130,8 @@ fn surface_approx_tol_3d(
 pub(crate) fn out_of_bounds_enabled(surface: &Surface) -> Option<bool> {
     match surface.kind() {
         SurfaceKind::BSpline(s) => Some(s.is_out_of_bounds_enabled()),
+        SurfaceKind::Cone(s) => Some(s.base().is_out_of_bounds_enabled()),
+        SurfaceKind::Torus(s) => Some(s.base().base().is_out_of_bounds_enabled()),
         SurfaceKind::Plane(s) => Some(s.is_out_of_bounds_enabled()),
         SurfaceKind::SurfOfRevolution(s) => Some(s.is_out_of_bounds_enabled()),
         SurfaceKind::OffsetSurface(_)
@@ -146,6 +148,8 @@ pub(crate) fn out_of_bounds_enabled(surface: &Surface) -> Option<bool> {
 pub(crate) fn set_out_of_bounds_enabled(surface: &mut Surface, enabled: bool) {
     match surface.kind_mut() {
         SurfaceKind::BSpline(s) => *s.out_of_bounds_enabled_mut() = enabled,
+        SurfaceKind::Cone(s) => *s.base_mut().out_of_bounds_enabled_mut() = enabled,
+        SurfaceKind::Torus(s) => *s.bspline_base_mut().out_of_bounds_enabled_mut() = enabled,
         SurfaceKind::Plane(s) => s.set_out_of_bounds_enabled(enabled),
         SurfaceKind::SurfOfRevolution(s) => *s.base_mut().out_of_bounds_enabled_mut() = enabled,
         SurfaceKind::OffsetSurface(_)

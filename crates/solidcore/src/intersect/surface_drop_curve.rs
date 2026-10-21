@@ -179,7 +179,9 @@ impl SolutionObject for NoObject {
 fn is_singularity(k: &Kernel, surface: &Surface, uv: Point2) -> Result<(bool, SurfParamType)> {
     match surface.kind() {
         SurfaceKind::Plane(p) => Ok(p.is_singularity()),
-        SurfaceKind::BSpline(_)
+        SurfaceKind::Cone(_)
+        | SurfaceKind::Torus(_)
+        | SurfaceKind::BSpline(_)
         | SurfaceKind::CurveBounded(_)
         | SurfaceKind::SurfOfRevolution(_)
         | SurfaceKind::Step(_)
@@ -253,7 +255,9 @@ fn is_on_seam(k: &Kernel, surface: &Surface, uv: Point2) -> Result<Option<Vec<Po
         } else {
             None
         }),
-        SurfaceKind::BSpline(_)
+        SurfaceKind::Cone(_)
+        | SurfaceKind::Torus(_)
+        | SurfaceKind::BSpline(_)
         | SurfaceKind::CurveBounded(_)
         | SurfaceKind::SurfOfRevolution(_)
         | SurfaceKind::Step(_)
@@ -284,6 +288,10 @@ fn create_iso_parametric_curve(
             p.create_iso_parametric_curve(param, value, None, false)?
                 .curve,
         )),
+        SurfaceKind::Cone(s) => Ok(s
+            .create_iso_parametric_curve(k, param, value, None, false)?
+            .curve),
+        SurfaceKind::Torus(s) => Ok(s.create_iso_parametric_curve(k, param, value, None)?.curve),
         SurfaceKind::SurfOfRevolution(s) => {
             Ok(s.create_iso_parametric_curve(k, param, value, None)?.curve)
         }

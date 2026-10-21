@@ -50,6 +50,8 @@ const MAX_SPLITS: usize = 1_000_000;
 fn bss(surface: &Surface) -> Result<Cow<'_, BSplineSurface>> {
     match surface.kind() {
         SurfaceKind::BSpline(s) => Ok(Cow::Borrowed(s)),
+        SurfaceKind::Cone(s) => Ok(Cow::Borrowed(s.base())),
+        SurfaceKind::Torus(s) => Ok(Cow::Borrowed(s.base().base())),
         SurfaceKind::Plane(p) => Ok(p.base_for_query()),
         SurfaceKind::SurfOfRevolution(s) => Ok(Cow::Borrowed(s.base())),
         SurfaceKind::CurveBounded(_)
@@ -82,6 +84,27 @@ fn typed_iso_curve(
             .curve;
         let base = line.base_with_nurb()?.into_owned();
         return Ok((base, Curve::from(line)));
+    }
+    let primitive_iso = match surface.kind() {
+        SurfaceKind::Cone(s) => {
+            Some(s.create_iso_parametric_curve(k, direction, value, None, false)?)
+        }
+        SurfaceKind::Torus(s) => Some(s.create_iso_parametric_curve(k, direction, value, None)?),
+        _ => None,
+    };
+    if let Some(iso) = primitive_iso {
+        let base = match iso.curve.kind() {
+            crate::curve::curve::CurveKind::BSpline(c) => c.clone_exact(),
+            crate::curve::curve::CurveKind::Ellipse(c) => c.base().clone_exact(),
+            crate::curve::curve::CurveKind::Line(c) => c.base_with_nurb()?.into_owned(),
+            _ => {
+                return Err(SolidError::invalid_input(
+                    OP,
+                    "unexpected primitive iso curve kind",
+                ))
+            }
+        };
+        return Ok((base, iso.curve));
     }
     if let SurfaceKind::SurfOfRevolution(s) = surface.kind() {
         let iso = s.create_iso_parametric_curve(k, direction, value, None)?;

@@ -1583,6 +1583,26 @@ pub trait GlobalSolve<'t, O: SolutionObject + 't> {
         sort_key: SortKey,
         combine_contiguous_ranges: bool,
     ) -> Result<()> {
+        self.add_sorted_solution_with(solution, sort_key, combine_contiguous_ranges, &mut |_| {
+            // UNPORTED(geom.tol): opaque standalone handles retain their
+            // original failure; native owner adapters provide real lookup.
+            Err(SolidError::unported(
+                "SmTol::GetZoneTol3d(const SmObject*)",
+                "geom.tol",
+            ))
+        })
+    }
+
+    /// The same `AddSortedSolution` body with this query's actual object-owner
+    /// tolerance resolver. Rayfire still sums first/last object tolerances and
+    /// uses max(query tolerance, sum), as SmGlobalSolver.cpp:1823--1827 requires.
+    fn add_sorted_solution_with(
+        &mut self,
+        solution: &Solution<O>,
+        sort_key: SortKey,
+        combine_contiguous_ranges: bool,
+        resolve_tolerance: &mut dyn FnMut(O) -> Result<f64>,
+    ) -> Result<()> {
         // skip BigSolutions
         if solution.start.solution_value == BIG_DOUBLE {
             return Ok(());
@@ -1882,8 +1902,11 @@ pub trait GlobalSolve<'t, O: SolutionObject + 't> {
             // To match old behavior, we check the distance between
             // intersection points on the ray.
             if op == SolverOperation::Rayfire {
-                let first_tol = first.object_tolerance(0)?;
-                let last_tol = s.solutions.get_at(last_index)?.object_tolerance(0)?;
+                let first_tol = first.object_tolerance_with(0, &mut *resolve_tolerance)?;
+                let last_tol = s
+                    .solutions
+                    .get_at(last_index)?
+                    .object_tolerance_with(0, &mut *resolve_tolerance)?;
                 this_tol = max2(tol, first_tol + last_tol);
             }
 
@@ -2129,5 +2152,66 @@ mod tests {
             .identical_solutions(&single(0.0, 1.0), &single(0.0, 1.1))
             .unwrap();
         assert_eq!(pair, SolutionPairType::DiffParameters);
+    }
+
+    #[test]
+    fn ray_sorting_uses_first_and_last_owner_tolerances_at_the_sum_boundary() {
+        #[derive(Clone, Copy, PartialEq)]
+        struct Owner(u8);
+        impl SolutionObject for Owner {
+            fn kind(&self) -> ObjectKind {
+                ObjectKind::Other
+            }
+        }
+        let solution = |owner, value| {
+            let mut solution = Solution::new();
+            solution.solution_type = SolutionType::SingleValue;
+            solution.num_objects = 1;
+            solution.objects[0] = Some(Owner(owner));
+            solution.start.solution_value = value;
+            solution
+        };
+        let mut solver = GlobalSolver::new();
+        solver.operation = SolverOperation::Rayfire;
+        solver.tolerance_3d = 1.0e-6;
+        solver.best_answer_so_far_sq = BIG_DOUBLE;
+        let mut resolved = Vec::new();
+        let mut tolerance = |owner: Owner| {
+            resolved.push(owner.0);
+            Ok(if owner.0 == 1 { 0.375 } else { 0.125 })
+        };
+        solver
+            .add_sorted_solution_with(
+                &solution(1, 1.5),
+                SortKey::BySolutionValue,
+                true,
+                &mut tolerance,
+            )
+            .unwrap();
+        solver
+            .add_sorted_solution_with(
+                &solution(0, 1.0),
+                SortKey::BySolutionValue,
+                true,
+                &mut tolerance,
+            )
+            .unwrap();
+        // 1.5 - 1.0 equals 0.125 + 0.375 exactly: source uses strict >.
+        assert_eq!(solver.solutions.len(), 2);
+        solver
+            .add_sorted_solution_with(
+                &solution(2, 1.0 - 1.0 / 1_048_576.0),
+                SortKey::BySolutionValue,
+                true,
+                &mut tolerance,
+            )
+            .unwrap();
+        assert_eq!(solver.solutions.len(), 2);
+        assert!(solver
+            .solutions
+            .as_slice()
+            .iter()
+            .all(|s| s.objects[0] != Some(Owner(1))));
+        assert_eq!(resolved, vec![1, 1, 0, 1, 2, 1]);
     }
 }

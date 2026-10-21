@@ -597,6 +597,24 @@ impl TessSrfCache {
             // revolution's missing NURB first)
             let bss: Option<BSplineSurface> = match self.base().surface().kind() {
                 SurfaceKind::BSpline(b) => Some(b.clone()),
+                SurfaceKind::Cone(s) => {
+                    if s.base().gw_nurb().is_none() {
+                        return Err(SolidError::unported(
+                            "SmCone owning NURB materialization before tessellation",
+                            "surface.cone_p1",
+                        ));
+                    }
+                    Some(s.base().clone())
+                }
+                SurfaceKind::Torus(s) => {
+                    if s.base().base().gw_nurb().is_none() {
+                        return Err(SolidError::unported(
+                            "SmTorus owning NURB materialization before tessellation",
+                            "surface.torus",
+                        ));
+                    }
+                    Some(s.base().base().clone())
+                }
                 SurfaceKind::Plane(p) => Some(match ignore(p.base_with_nurb())? {
                     Some(b) => b.into_owned(),
                     None => p.base().clone(),

@@ -30,8 +30,9 @@
 //! Deviations:
 //! - **Derived class.** `SmTorus` derives from `SmSurfOfRevolution`; the base object is
 //!   the [`Torus::base`] field ([`SurfOfRevolution`]). Like the surface of revolution,
-//!   the torus is not yet a [`crate::surface::surface::SurfaceKind`]. Upstream's
-//!   virtual `CreateIsoParametricCurve`, called by the base class's NURB and
+//!   [`crate::surface::surface::SurfaceKind::Torus`] retains the concrete object,
+//!   including its STEP mapping and inherited NURBS evaluator. Upstream's virtual
+//!   `CreateIsoParametricCurve`, called by the base class's NURB and
 //!   polar-converter rebuilds, reaches the torus override through
 //!   [`Torus::make_nurb`] and the private `rebuild_polar_converter`.
 //! - **Copies.** As upstream's copy constructor, which leaves `m_bInsideOut` at its
@@ -339,6 +340,22 @@ impl Torus {
 
     /// The `SmSurfOfRevolution` base object.
     #[must_use]
+    pub(crate) fn clone_exact(&self) -> Self {
+        Self {
+            base: self.base.clone_exact(),
+            major_radius: self.major_radius,
+            minor_radius: self.minor_radius,
+            inside_out: self.inside_out,
+        }
+    }
+
+    pub(crate) fn bspline_base_mut(
+        &mut self,
+    ) -> &mut crate::nurbs::b_spline_surface::BSplineSurface {
+        self.base.base_mut()
+    }
+
+    /// The actual inherited surface of revolution.
     pub const fn base(&self) -> &SurfOfRevolution {
         &self.base
     }

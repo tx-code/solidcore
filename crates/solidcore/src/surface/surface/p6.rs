@@ -101,6 +101,98 @@ const OP_SS: &str = "surface::surface::p6::SsGlobalSolver::solutions_identical";
 const OP_CS_INTERSECT: &str = "surface::surface::p6::cs_intersect_local_solve";
 const OP_SC: &str = "surface::surface::p6::sc_local_solve";
 
+/// Geometry queries of the native simple coincidence walk. Borrowed geometry
+/// and a live owning B-rep are separate adapters; every query returns owned
+/// values before an owning adapter materializes UV/cache data.
+pub(crate) trait SimpleCoincidenceQuery<O: SolutionObject> {
+    fn surface_box(&mut self, k: &Kernel, domain: &Extent2d) -> Result<Option<Extent3d>>;
+    fn curve_box(&mut self, k: &Kernel, interval: &Extent1d) -> Result<Option<Extent3d>>;
+    fn evaluate_curve(&self, parameter: f64, from_left: bool) -> Result<Vec<Vec3>>;
+    fn curve_degree(&self) -> Result<usize>;
+    fn curve_interval(&self) -> Result<Extent1d>;
+    fn normal(&self, uv: Point2) -> Result<Vec3>;
+    fn global_point(
+        &mut self,
+        k: &Kernel,
+        domain: &Extent2d,
+        point: Point3,
+        tolerance: f64,
+    ) -> Result<Vec<SolutionEnd>>;
+    fn local_point(
+        &mut self,
+        k: &Kernel,
+        domain: &Extent2d,
+        point: Point3,
+        guess: Point2,
+    ) -> Result<(bool, Solution<O>)>;
+}
+
+struct BorrowedCoincidence<'a> {
+    surface: &'a Surface,
+    curve: &'a Curve,
+}
+
+impl<O: SolutionObject> SimpleCoincidenceQuery<O> for BorrowedCoincidence<'_> {
+    fn surface_box(&mut self, k: &Kernel, domain: &Extent2d) -> Result<Option<Extent3d>> {
+        Ok(self
+            .surface
+            .calculate_bounding_box(k, domain, [true, false, false], true)?
+            .normal_box)
+    }
+    fn curve_box(&mut self, k: &Kernel, interval: &Extent1d) -> Result<Option<Extent3d>> {
+        Ok(self
+            .curve
+            .calculate_bounding_box(
+                k,
+                interval,
+                CurveBoxRequest {
+                    normal: true,
+                    pseudo: false,
+                    polar: false,
+                },
+                true,
+            )?
+            .normal)
+    }
+    fn evaluate_curve(&self, parameter: f64, from_left: bool) -> Result<Vec<Vec3>> {
+        self.curve.evaluate(parameter, 1, from_left, true)
+    }
+    fn curve_degree(&self) -> Result<usize> {
+        self.curve.degree()
+    }
+    fn curve_interval(&self) -> Result<Extent1d> {
+        Ok(self.curve.natural_interval())
+    }
+    fn normal(&self, uv: Point2) -> Result<Vec3> {
+        self.surface.evaluate_normal(uv, Side::Right, Side::Right)
+    }
+    fn global_point(
+        &mut self,
+        k: &Kernel,
+        domain: &Extent2d,
+        point: Point3,
+        tolerance: f64,
+    ) -> Result<Vec<SolutionEnd>> {
+        global_point_solve_single(k, self.surface, domain, point, tolerance)
+    }
+    fn local_point(
+        &mut self,
+        k: &Kernel,
+        domain: &Extent2d,
+        point: Point3,
+        guess: Point2,
+    ) -> Result<(bool, Solution<O>)> {
+        local_point_solve(
+            k,
+            self.surface,
+            domain,
+            SolverOperation::Minimize,
+            point,
+            guess,
+        )
+    }
+}
+
 /// `SM_CONTINUITY_ANGLE` (`SM_ANG_TOL_DEG`, degrees): the default angle tolerance of
 /// `SmCurve::CalculateContinuities`.
 const CONTINUITY_ANGLE: f64 = 0.5;
@@ -627,18 +719,38 @@ impl Surface {
         partial_coincidence_ok: bool,
         objects: [Option<O>; 2],
     ) -> Result<Option<Solution<O>>> {
+        Self::simple_coincidence_checker_with_query(
+            k,
+            &mut BorrowedCoincidence {
+                surface: self,
+                curve,
+            },
+            uv_domain,
+            interval,
+            tol_3d,
+            partial_coincidence_ok,
+            objects,
+        )
+    }
+
+    /// The one native sample/acceptance algorithm with scoped geometry queries.
+    /// The public borrowed path and B-rep owning path share every operator,
+    /// sample order, normal refusal and ignored-status location below.
+    pub(crate) fn simple_coincidence_checker_with_query<O: SolutionObject>(
+        k: &Kernel,
+        query: &mut dyn SimpleCoincidenceQuery<O>,
+        uv_domain: &Extent2d,
+        interval: &Extent1d,
+        tol_3d: f64,
+        partial_coincidence_ok: bool,
+        objects: [Option<O>; 2],
+    ) -> Result<Option<Solution<O>>> {
         // First try boxing (statuses ignored).
-        let this_box =
-            ignored(self.calculate_bounding_box(k, uv_domain, [true, false, false], true))?
-                .and_then(|b| b.normal_box)
-                .unwrap_or_default();
-        let req = CurveBoxRequest {
-            normal: true,
-            pseudo: false,
-            polar: false,
-        };
-        let curv_box = ignored(curve.calculate_bounding_box(k, interval, req, true))?
-            .and_then(|b| b.normal)
+        let this_box = ignored(query.surface_box(k, uv_domain))?
+            .flatten()
+            .unwrap_or_default();
+        let curv_box = ignored(query.curve_box(k, interval))?
+            .flatten()
             .unwrap_or_default();
         if this_box.are_disjoint(&curv_box, tol_3d) {
             return Ok(None);
@@ -654,10 +766,10 @@ impl Surface {
         // First drop the Curve MidPoint to Surface. Use a Global point solve, because
         // we have no guess uv.
         let mid_param = interval.evaluate(0.5);
-        let mid_pt = curve.evaluate(mid_param, 1, true, true)?;
+        let mid_pt = query.evaluate_curve(mid_param, true)?;
         let mid_pt0 = vec_at(&mid_pt, 0)?;
         let mut mid_pt1 = vec_at(&mid_pt, 1)?;
-        let solutions = global_point_solve_single(k, self, uv_domain, mid_pt0, tol_3d)?;
+        let solutions = query.global_point(k, uv_domain, mid_pt0, tol_3d)?;
 
         // If GlobalSolve, using Minimize, couldn't find any solutions, we're not likely
         // to have much success in finding coincidence.
@@ -666,7 +778,7 @@ impl Surface {
         };
 
         // curve natural interval
-        let crv_ivl = curve.natural_interval();
+        let crv_ivl = query.curve_interval()?;
 
         // save Surf DropPoint
         let mid_uv = Point2::new(first.param(0)?, first.param(1)?);
@@ -679,7 +791,7 @@ impl Surface {
             if mag > EFF_ZERO {
                 mid_pt1 /= mag;
             }
-            norm = normal_ignored(self, mid_uv, norm)?;
+            norm = ignored(query.normal(mid_uv))?.unwrap_or(norm);
             let dot = mid_pt1.dot(norm);
 
             found = dot.abs() < 0.017; // about 1 degree
@@ -704,7 +816,7 @@ impl Surface {
         let mut en_dist = first.solution_value;
 
         // use the degree of the curve to select the number of test points
-        let count = curve.degree()? + 5;
+        let count = query.curve_degree()? + 5;
 
         let mut have_start_uv = false;
         let mut have_end_uv = false;
@@ -721,17 +833,11 @@ impl Surface {
 
             // 1. Drop current StartPoint to Surface and check for coincidence
             let st_t = interval.evaluate(st_frac);
-            let st_pnt = curve.evaluate(st_t, 1, true, true)?;
+            let st_pnt = query.evaluate_curve(st_t, true)?;
             let st_pnt0 = vec_at(&st_pnt, 0)?;
             let mut st_pnt1 = vec_at(&st_pnt, 1)?;
-            let (mut found_start, sol) = local_point_solve::<O>(
-                k,
-                self,
-                uv_domain,
-                SolverOperation::Minimize,
-                st_pnt0,
-                uv_guess_start,
-            )?;
+            let (mut found_start, sol) =
+                query.local_point(k, uv_domain, st_pnt0, uv_guess_start)?;
 
             // Check close enough.
             if found_start {
@@ -745,7 +851,7 @@ impl Surface {
                     st_pnt1 /= mag;
                 }
                 let uv = Point2::new(sol.start.param(0)?, sol.start.param(1)?);
-                norm = normal_ignored(self, uv, norm)?;
+                norm = ignored(query.normal(uv))?.unwrap_or(norm);
                 let dot = st_pnt1.dot(norm);
 
                 found_start = dot.abs() < 0.017; // about 1 degree
@@ -776,17 +882,10 @@ impl Surface {
 
             // 2. Drop current EndPoint to Surface and check for coincidence
             let en_t = interval.evaluate(en_frac);
-            let en_pnt = curve.evaluate(en_t, 1, false, true)?;
+            let en_pnt = query.evaluate_curve(en_t, false)?;
             let en_pnt0 = vec_at(&en_pnt, 0)?;
             let mut en_pnt1 = vec_at(&en_pnt, 1)?;
-            let (mut found_end, sol) = local_point_solve::<O>(
-                k,
-                self,
-                uv_domain,
-                SolverOperation::Minimize,
-                en_pnt0,
-                uv_guess_end,
-            )?;
+            let (mut found_end, sol) = query.local_point(k, uv_domain, en_pnt0, uv_guess_end)?;
 
             // Check close enough.
             if found_end {
@@ -800,7 +899,7 @@ impl Surface {
                     en_pnt1 /= mag;
                 }
                 let uv = Point2::new(sol.start.param(0)?, sol.start.param(1)?);
-                norm = normal_ignored(self, uv, norm)?;
+                norm = ignored(query.normal(uv))?.unwrap_or(norm);
                 let dot = en_pnt1.dot(norm);
 
                 found_end = dot.abs() < 0.017; // about 1 degree
@@ -1836,11 +1935,6 @@ fn curve_point_ignored(curve: &Curve, t: f64, prev: Point3) -> Result<Point3> {
     Ok(ignored(curve.evaluate_point(t))?.unwrap_or(prev))
 }
 
-/// `EvaluateNormal(uv, FALSE, FALSE, n)` with its status ignored: `prev` on failure.
-fn normal_ignored(surface: &Surface, uv: Point2, prev: Vec3) -> Result<Vec3> {
-    Ok(ignored(surface.evaluate_normal(uv, Side::Right, Side::Right))?.unwrap_or(prev))
-}
-
 /// `ComputeParamDirection(uv, vec, dir)` with its status ignored: the cleared output
 /// `(0, 0)` on failure.
 fn param_direction_ignored(surface: &Surface, uv: Point2, vec: Vec3) -> Result<Vec2> {
@@ -1862,7 +1956,9 @@ pub(super) fn boundary_iso_curve(
             from_left,
             true,
         ))),
-        SurfaceKind::OffsetSurface(_)
+        SurfaceKind::Cone(_)
+        | SurfaceKind::Torus(_)
+        | SurfaceKind::OffsetSurface(_)
         | SurfaceKind::Plane(_)
         | SurfaceKind::SurfOfRevolution(_)
         | SurfaceKind::CurveBounded(_)
@@ -1906,6 +2002,14 @@ pub(super) fn create_iso_parametric_curve(
             let iso = p.create_iso_parametric_curve(dir, value, domain, false)?;
             Ok((Curve::from(iso.curve), iso.max_gap_3d))
         }
+        SurfaceKind::Cone(s) => {
+            let iso = s.create_iso_parametric_curve(k, dir, value, domain, false)?;
+            Ok((iso.curve, iso.max_gap_3d))
+        }
+        SurfaceKind::Torus(s) => {
+            let iso = s.create_iso_parametric_curve(k, dir, value, domain)?;
+            Ok((iso.curve, iso.max_gap_3d))
+        }
         SurfaceKind::SurfOfRevolution(s) => {
             let iso = s.create_iso_parametric_curve(k, dir, value, domain)?;
             Ok((iso.curve, iso.max_gap_3d))
@@ -1931,7 +2035,9 @@ fn is_singularity(
 ) -> Result<(bool, SurfParamType)> {
     match surface.kind() {
         SurfaceKind::Plane(p) => Ok(p.is_singularity()),
-        SurfaceKind::BSpline(_)
+        SurfaceKind::Cone(_)
+        | SurfaceKind::Torus(_)
+        | SurfaceKind::BSpline(_)
         | SurfaceKind::CurveBounded(_)
         | SurfaceKind::SrfInVolume(_)
         | SurfaceKind::SurfOfRevolution(_)
@@ -1948,7 +2054,9 @@ fn is_singularity(
 fn is_on_seam(k: &Kernel, surface: &Surface, uv: Point2) -> Result<bool> {
     match surface.kind() {
         SurfaceKind::Plane(p) => Ok(p.is_on_seam().0),
-        SurfaceKind::BSpline(_)
+        SurfaceKind::Cone(_)
+        | SurfaceKind::Torus(_)
+        | SurfaceKind::BSpline(_)
         | SurfaceKind::CurveBounded(_)
         | SurfaceKind::SrfInVolume(_)
         | SurfaceKind::SurfOfRevolution(_)

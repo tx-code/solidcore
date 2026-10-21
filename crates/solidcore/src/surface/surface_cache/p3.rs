@@ -942,6 +942,24 @@ impl<O: Copy + PartialEq> SurfaceCache<O> {
         // when it has none, as GetOrCreateGwNurbPointer)
         let bspline: Option<std::borrow::Cow<'_, BSplineSurface>> = match self.surface().kind() {
             SurfaceKind::BSpline(b) => Some(std::borrow::Cow::Borrowed(b)),
+            SurfaceKind::Cone(s) => {
+                if s.base().gw_nurb().is_none() {
+                    return Err(SolidError::unported(
+                        "SmCone owning NURB materialization before surface cache",
+                        "surface.cone_p1",
+                    ));
+                }
+                Some(std::borrow::Cow::Borrowed(s.base()))
+            }
+            SurfaceKind::Torus(s) => {
+                if s.base().base().gw_nurb().is_none() {
+                    return Err(SolidError::unported(
+                        "SmTorus owning NURB materialization before surface cache",
+                        "surface.torus",
+                    ));
+                }
+                Some(std::borrow::Cow::Borrowed(s.base().base()))
+            }
             SurfaceKind::Plane(p) => Some(p.base_with_nurb()?),
             // GetOrCreateGwNurbPointer: SmSurfOfRevolution::MakeNurb when it has none
             SurfaceKind::SurfOfRevolution(s) => {

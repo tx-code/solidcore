@@ -220,6 +220,25 @@ impl PolarConversion {
         curve: &Ellipse,
         nurbs_param: f64,
     ) -> Result<(f64, bool)> {
+        self.convert_to_polar_parameter_with_zone(
+            Some(crate::geom::tol::context_zone_tol_3d(
+                k,
+                None,
+                crate::geom::tol::SmallTopoType::NormalSize,
+            )),
+            curve,
+            nurbs_param,
+        )
+    }
+
+    /// Original polar conversion with the caller's resolved context zone. Only
+    /// the closed-ellipse seam inversion uses that context scalar.
+    pub(crate) fn convert_to_polar_parameter_with_zone(
+        &self,
+        context_zone: Option<f64>,
+        curve: &Ellipse,
+        nurbs_param: f64,
+    ) -> Result<(f64, bool)> {
         // Can't do anything if not set.
         if !self.has_curve {
             return Err(SolidError::null_pointer(OP_TO_POLAR));
@@ -252,7 +271,19 @@ impl PolarConversion {
             | ExtentPointType::Inside => {
                 // use a conversion based arcTan2 (EvaluatePoint status ignored)
                 let point = ignored(curve.base.evaluate_point(nurbs_param))?.unwrap_or(Vec3::UNDEF);
-                curve.step_inversion(k, point, false, 0.0).0
+                curve
+                    .step_inversion_with_zone(
+                        point,
+                        false,
+                        0.0,
+                        context_zone.ok_or_else(|| {
+                            SolidError::unported(
+                                "polar inversion requires the actual bound context zone",
+                                "curve.ellipse_p1",
+                            )
+                        })?,
+                    )
+                    .0
             }
         };
 

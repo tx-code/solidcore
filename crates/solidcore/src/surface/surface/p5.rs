@@ -511,6 +511,28 @@ impl Surface {
         want_uv_iso_curve: bool,
     ) -> Result<IsoParametricCurve> {
         match self.kind() {
+            SurfaceKind::Cone(s) => {
+                let r = s.create_iso_parametric_curve(
+                    k,
+                    param,
+                    iso_parameter,
+                    domain,
+                    want_uv_iso_curve,
+                )?;
+                return Ok(IsoParametricCurve {
+                    curve: r.curve,
+                    max_gap_3d: r.max_gap_3d,
+                    uv_iso_curve: r.uv_iso_curve,
+                });
+            }
+            SurfaceKind::Torus(s) => {
+                let r = s.create_iso_parametric_curve(k, param, iso_parameter, domain)?;
+                return Ok(IsoParametricCurve {
+                    curve: r.curve,
+                    max_gap_3d: r.max_gap_3d,
+                    uv_iso_curve: r.uv_iso_curve,
+                });
+            }
             SurfaceKind::BSpline(b) => {
                 let opts = crate::nurbs::b_spline_surface::p2::IsoCurveOptions {
                     domain: domain.copied(),

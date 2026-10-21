@@ -347,17 +347,22 @@ fn find_first(k: &Kernel, b: &mut Brep, tolerance: f64) -> Result<Option<Witness
                 continue;
             }
             let rec = b.edge(*e)?;
-            let curve = rec.curve.as_ref().ok_or_else(invalid)?;
-            let surface = b.face(*f)?.surface.as_ref().ok_or_else(invalid)?;
-            let Some(solution) = ignored(surface.simple_coincidence_checker::<EntityRef>(
-                k,
-                &domain,
-                curve,
-                &rec.interval,
-                tolerance,
-                true,
-                [None, None],
-            ))?
+            rec.curve.as_ref().ok_or_else(invalid)?;
+            b.face(*f)?.surface.as_ref().ok_or_else(invalid)?;
+            let interval = rec.interval;
+            let Some(solution) = ignored(
+                crate::topology::surface_cache::simple_face_edge_coincidence(
+                    k,
+                    b,
+                    *f,
+                    *e,
+                    &domain,
+                    &interval,
+                    tolerance,
+                    true,
+                    [None, None],
+                ),
+            )?
             .flatten() else {
                 continue;
             };

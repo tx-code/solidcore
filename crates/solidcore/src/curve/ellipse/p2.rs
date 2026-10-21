@@ -1238,6 +1238,24 @@ impl Ellipse {
         classify: bool,
         zone_tol: f64,
     ) -> (f64, Option<CurveLocationType>) {
+        self.step_inversion_with_zone(
+            point,
+            classify,
+            zone_tol,
+            context_zone_tol_3d(k, None, SmallTopoType::NormalSize),
+        )
+    }
+
+    /// The original inversion with an explicitly resolved context zone. The
+    /// context-free surface wrapper snapshots this scalar only; changing its
+    /// owning Kernel requires explicit rebinding before further evaluation.
+    pub(crate) fn step_inversion_with_zone(
+        &self,
+        point: Point3,
+        classify: bool,
+        zone_tol: f64,
+        context_zone: f64,
+    ) -> (f64, Option<CurveLocationType>) {
         let center = self.position.origin();
         let x_axis = self.position.x_axis();
         let y_axis = self.position.y_axis();
@@ -1273,7 +1291,7 @@ impl Ellipse {
         }
         if z_tol == 0.0 {
             // Because sometimes an edge has 0.0 tol
-            z_tol = context_zone_tol_3d(k, None, SmallTopoType::NormalSize);
+            z_tol = context_zone;
         }
         let approx_tol = z_tol / 100.;
 

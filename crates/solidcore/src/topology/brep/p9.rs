@@ -30,6 +30,8 @@
 //! status (1), distinct from its early `SM_SUCCESS` (0). Mutation success paths
 //! remain uncertified while part 2 and face notification dependencies defer;
 //! passing refusal/projection comparisons do not certify those paths.
+//! The default no-shell query uses this B-rep's actual owning spatial cache and
+//! caller kernel. The generic shell path retains its explicit world dependency.
 
 use crate::curve::curve::Curve;
 use crate::error::{ignore_status, Result, SolidError, SM_ERR};
@@ -114,7 +116,7 @@ where
         };
         let bounds = match supplied_box {
             Some(bounds) => bounds,
-            None => crate::error::ignored(brep_bounds(b))?
+            None => crate::error::ignored(brep_bounds(k, b))?
                 .unwrap_or_else(crate::geom::extent3d::Extent3d::new),
         };
         let ray_start = bounds.max() + (bounds.max() - bounds.min()) * 0.5;
@@ -242,68 +244,7 @@ where
                 }
             }
         } else {
-            let edges = brep_edges(b)?;
-            if edges.is_empty() {
-                return Err(SolidError::sm_err(OP));
-            }
-            let mut distance = crate::math::BIG_DOUBLE;
-            for pass in 0..6 {
-                if pass >= 1 && distance != crate::math::BIG_DOUBLE {
-                    break;
-                }
-                for edge_id in &edges {
-                    let record = b.edge(*edge_id)?;
-                    let curve = required(record.curve.as_ref(), "ray target edge without curve")?;
-                    let big_tolerance = record.tolerance > 1.01 * b.tolerance();
-                    let repeated =
-                        curve.has_repeated_end_control_points(crate::geom::tol::ZONE_TOL_3D)?;
-                    // IsSeam may create UV trim curves; reborrow the edge afterwards.
-                    let seam = edge::is_seam(k, b, *edge_id)?;
-                    let record = b.edge(*edge_id)?;
-                    let curve = required(record.curve.as_ref(), "ray target edge without curve")?;
-                    let approximated = is_intersector_approx(curve)?;
-                    let round = if !big_tolerance && !repeated && !seam && !approximated {
-                        0
-                    } else if !big_tolerance && !repeated && !seam && approximated {
-                        1
-                    } else if big_tolerance && !repeated && !seam && approximated {
-                        2
-                    } else if big_tolerance && !repeated && seam && approximated {
-                        3
-                    } else if repeated {
-                        4
-                    } else {
-                        5
-                    };
-                    if pass != round {
-                        continue;
-                    }
-                    for parameter in parameters {
-                        let point = curve.evaluate_point(record.interval.evaluate(parameter))?;
-                        let ray = point - ray_start;
-                        let squared = ray.length_squared();
-                        if squared < distance {
-                            direction = ray;
-                            distance = squared;
-                        }
-                    }
-                }
-            }
-            direction = ray_direction(direction)?;
-            if !brep_ray_fire(b, ray_start, direction, tolerance, &mut state)? {
-                // Native retries use edges[0], not the closest sampled edge.
-                let edge_id = *required(edges.first(), "missing first ray edge")?;
-                let record = b.edge(edge_id)?;
-                let curve = required(record.curve.as_ref(), "ray target edge without curve")?;
-                let point = curve.evaluate_point(record.interval.evaluate(0.789))?;
-                if !brep_ray_fire(b, ray_start, point - ray_start, tolerance, &mut state)? {
-                    let point = curve.evaluate_point(record.interval.evaluate(0.189))?;
-                    let start = bounds.min() - (bounds.max() - bounds.min()) * 0.5;
-                    if !brep_ray_fire(b, start, point - start, tolerance, &mut state)? {
-                        return Err(SolidError::sm_err(OP));
-                    }
-                }
-            }
+            return find_infinite_region_no_shell(k, b, brep_id, &bounds, tolerance);
         }
         return Ok(state.region);
     }
@@ -311,6 +252,128 @@ where
         OP,
         "infinite region shell retry exceeded its single retry",
     ))
+}
+
+/// The native default call used by `AssertValid`, without a synthetic shell
+/// world. Both entrypoints share the same no-shell sampling and ray algorithm.
+pub(crate) fn find_infinite_region_default(
+    k: &mut Kernel,
+    b: &mut Brep,
+) -> Result<Option<RegionId>> {
+    let regions = brep_regions(b)?;
+    if let [region] = regions.as_slice() {
+        return Ok(Some(*region));
+    }
+    let tolerance = b.tolerance();
+    let bounds = crate::error::ignored(brep_bounds(k, b))?
+        .unwrap_or_else(crate::geom::extent3d::Extent3d::new);
+    find_infinite_region_no_shell(
+        k,
+        b,
+        crate::topology::BrepId::from_index(0),
+        &bounds,
+        tolerance,
+    )
+}
+
+fn find_infinite_region_no_shell(
+    k: &mut Kernel,
+    b: &mut Brep,
+    brep_id: crate::topology::BrepId,
+    bounds: &crate::geom::extent3d::Extent3d,
+    tolerance: f64,
+) -> Result<Option<RegionId>> {
+    // SmBrep.cpp::FindInfiniteRegion, maintained d8ed45a:8330--8340,
+    // 8460--8558. Preserve the six edge preference passes, ordered five samples,
+    // strict squared-distance update, and first-edge retry targets exactly.
+    let ray_start = bounds.max() + (bounds.max() - bounds.min()) * 0.5;
+    let mut direction = Vec3::new(1.0, 1.0, 1.0);
+    let parameters = [0.12345, 0.34567, 0.56789, 0.78912, 0.86571];
+    let edges = brep_edges(b)?;
+    if edges.is_empty() {
+        return Err(SolidError::sm_err(OP));
+    }
+    let mut distance = crate::math::BIG_DOUBLE;
+    for pass in 0..6 {
+        if pass >= 1 && distance != crate::math::BIG_DOUBLE {
+            break;
+        }
+        for edge_id in &edges {
+            let record = b.edge(*edge_id)?;
+            let curve = required(record.curve.as_ref(), "ray target edge without curve")?;
+            let big_tolerance = record.tolerance > 1.01 * b.tolerance();
+            let repeated = curve.has_repeated_end_control_points(crate::geom::tol::ZONE_TOL_3D)?;
+            // IsSeam may create UV trim curves; reborrow the edge afterwards.
+            let seam = edge::is_seam(k, b, *edge_id)?;
+            let record = b.edge(*edge_id)?;
+            let curve = required(record.curve.as_ref(), "ray target edge without curve")?;
+            let approximated = is_intersector_approx(curve)?;
+            let round = if !big_tolerance && !repeated && !seam && !approximated {
+                0
+            } else if !big_tolerance && !repeated && !seam && approximated {
+                1
+            } else if big_tolerance && !repeated && !seam && approximated {
+                2
+            } else if big_tolerance && !repeated && seam && approximated {
+                3
+            } else if repeated {
+                4
+            } else {
+                5
+            };
+            if pass != round {
+                continue;
+            }
+            for parameter in parameters {
+                let point = curve.evaluate_point(record.interval.evaluate(parameter))?;
+                let ray = point - ray_start;
+                let squared = ray.length_squared();
+                if squared < distance {
+                    direction = ray;
+                    distance = squared;
+                }
+            }
+        }
+    }
+    direction = ray_direction(direction)?;
+    if let Some(found) = crate::error::ignored(brep_ray_fire(
+        k, b, brep_id, ray_start, direction, tolerance,
+    ))? {
+        return Ok(found.region);
+    }
+    // Native retries use edges[0], not the closest sampled edge. Reacquire its
+    // curve after each mutable ray call instead of retaining an arena borrow.
+    let edge_id = *required(edges.first(), "missing first ray edge")?;
+    let point = retry_point(b, edge_id, 0.789)?;
+    if let Some(found) = crate::error::ignored(brep_ray_fire(
+        k,
+        b,
+        brep_id,
+        ray_start,
+        point - ray_start,
+        tolerance,
+    ))? {
+        return Ok(found.region);
+    }
+    let point = retry_point(b, edge_id, 0.189)?;
+    let start = bounds.min() - (bounds.max() - bounds.min()) * 0.5;
+    if let Some(found) = crate::error::ignored(brep_ray_fire(
+        k,
+        b,
+        brep_id,
+        start,
+        point - start,
+        tolerance,
+    ))? {
+        return Ok(found.region);
+    }
+    Err(SolidError::sm_err(OP))
+}
+
+fn retry_point(b: &Brep, edge: EdgeId, parameter: f64) -> Result<Point3> {
+    let record = b.edge(edge)?;
+    let curve = required(record.curve.as_ref(), "ray target edge without curve")?;
+    curve.evaluate_point(record.interval.evaluate(parameter))
 }
 
 fn brep_regions(b: &Brep) -> Result<Vec<RegionId>> {
@@ -321,31 +384,47 @@ fn brep_edges(b: &Brep) -> Result<Vec<EdgeId>> {
     crate::topology::brep::p1::edges(b, None)
 }
 
-fn brep_bounds(b: &Brep) -> Result<crate::geom::extent3d::Extent3d> {
-    let _ = b;
-    // UNPORTED(query.brep): SmBrep::CalculateBoundingBox
-    Err(SolidError::unported(
-        "SmBrep::CalculateBoundingBox",
-        "query.brep",
-    ))
+fn brep_bounds(k: &Kernel, b: &Brep) -> Result<crate::geom::extent3d::Extent3d> {
+    crate::query::brep::calculate_bounding_box(
+        k,
+        b,
+        crate::query::brep::BoundingBoxOptions::default(),
+    )
 }
 
-fn brep_ray_fire<O>(
-    b: &Brep,
+fn brep_ray_fire(
+    k: &Kernel,
+    b: &mut Brep,
+    brep_id: crate::topology::BrepId,
     start: Point3,
     direction: Vec3,
     tolerance: f64,
-    state: &mut crate::topology::shell::ShellRayState<O>,
-) -> Result<bool> {
-    let _ = (b, start, direction, tolerance, state);
-    // UNPORTED(query.brep): SmBrep::RayFire over the B-rep cache. The port
-    // (`topology::brep::p2::ray_fire`) solves on the SM_OC_BREP cache world and first
-    // needs CalculateBoundingBox; both belong to query.brep, as for
-    // ShellRayWorld::shell_ray_sector.
-    Err(SolidError::unported(
-        "SmBrep::RayFire (B-rep cache world)",
-        "query.brep",
-    ))
+) -> Result<super::p2::RayFireResult> {
+    use crate::topology::brep_cache::arena_identity;
+    if b.notifications().spatial_cache.is_none() {
+        b.build_notification_cache(k)?;
+    }
+    // CacheMakeOrValidate(SM_OC_BREP) belongs to this model and caller context.
+    // Temporarily move only its cache so RayFire can update the owning B-rep's
+    // UV/sector data; restore it on success, ordinary failure, and Unported.
+    let cache = required(
+        b.notifications_mut().spatial_cache.take(),
+        "B-rep ray cache was not initialized",
+    )?;
+    let result = super::p2::ray_fire(
+        k,
+        b,
+        brep_id,
+        &cache,
+        &arena_identity,
+        &|_| None,
+        start,
+        direction,
+        tolerance,
+        None,
+    );
+    b.notifications_mut().spatial_cache = Some(cache);
+    result
 }
 
 fn ray_direction(direction: Vec3) -> Result<Vec3> {
@@ -2140,6 +2219,62 @@ fn drop_curve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sole_owning_region_wins_over_an_incorrect_stored_role() {
+        let mut b = Brep::new_with_infinite_region().unwrap();
+        let actual = b.region_list()[0];
+        let detached = b
+            .add_region_record(crate::topology::Region::default())
+            .unwrap();
+        b.set_infinite_region(Some(detached));
+        assert_eq!(
+            find_infinite_region_default(&mut Kernel::default(), &mut b).unwrap(),
+            Some(actual)
+        );
+        assert_eq!(b.infinite_region(), Some(detached));
+        assert!(b.notifications().spatial_cache.is_none());
+    }
+
+    #[test]
+    fn multiple_regions_without_ray_edges_return_the_native_error() {
+        let mut b = Brep::new_with_infinite_region().unwrap();
+        let stored = b.infinite_region();
+        b.add_region_record(crate::topology::Region {
+            in_brep: true,
+            ..crate::topology::Region::default()
+        })
+        .unwrap();
+        assert!(matches!(
+            find_infinite_region_default(&mut Kernel::default(), &mut b),
+            Err(SolidError::Upstream { code: SM_ERR, .. })
+        ));
+        assert_eq!(b.infinite_region(), stored);
+    }
+
+    #[test]
+    fn ray_failure_restores_the_same_owning_cache_and_model_identity() {
+        let k = Kernel::default();
+        let mut b = Brep::new_with_infinite_region().unwrap();
+        let key = crate::geom::attribute::ObjectKey(712345);
+        b.set_key(key);
+        b.add_vertex(Point3::ZERO).unwrap();
+        b.build_notification_cache(&k).unwrap();
+        let cache = b.notifications().spatial_cache.clone();
+        let tolerance = b.tolerance();
+        let error = brep_ray_fire(
+            &k,
+            &mut b,
+            crate::topology::BrepId::from_index(0),
+            Point3::ZERO,
+            Vec3::ZERO,
+            tolerance,
+        )
+        .unwrap_err();
+        assert!(!error.is_unported());
+        assert_eq!(b.notifications().spatial_cache, cache);
+        assert_eq!(b.key(), key);
+    }
 
     #[test]
     fn zero_ray_direction_retains_the_defined_native_status() {

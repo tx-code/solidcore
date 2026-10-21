@@ -54,7 +54,7 @@ use crate::nurbs::b_spline_curve::BoundingBoxRequest;
 use crate::nurbs::b_spline_surface::SurfParamType;
 use crate::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use crate::surface::surface::p4::NoObject;
-use crate::surface::surface::{Surface, SurfaceKind};
+use crate::surface::surface::Surface;
 use crate::surface::volume::Volume;
 use crate::topology::face::p2 as fp2;
 use crate::topology::shell::{self, ShellType};
@@ -181,20 +181,10 @@ fn surface_box(
     face_tolerance: f64,
 ) -> Result<Extent3d> {
     let missing = || SolidError::invalid_input(OP_FACE_BOX, "missing surface box");
-    match surface.kind() {
-        SurfaceKind::BSpline(_) | SurfaceKind::Plane(_) | SurfaceKind::SurfOfRevolution(_) => {
-            let mut normal = surface
-                .calculate_bounding_box(k, uv_domain, [true, false, false], false)?
-                .normal_box
-                .ok_or_else(missing)?;
-            normal.expand_absolute(face_tolerance);
-            Ok(normal)
-        }
-        _ => surface
-            .calculate_bounding_box(k, uv_domain, [true, false, false], true)?
-            .normal_box
-            .ok_or_else(missing),
-    }
+    surface
+        .calculate_bounding_box_for_face(k, uv_domain, [true, false, false], true, face_tolerance)?
+        .normal_box
+        .ok_or_else(missing)
 }
 
 /// `SmShell::CalculateBoundingBox(rBBox, bTight)` (`tight` defaults to `false`): `output`

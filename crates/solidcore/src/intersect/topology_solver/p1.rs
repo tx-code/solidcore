@@ -207,6 +207,52 @@ pub trait TopologyObjects<O> {
 
     /// The member an edge or face handle is for `SmShape::IsInShape`.
     fn shape_member(&self, object: O) -> ShapeMember;
+
+    /// `SmTol::GetZoneTol3d` for a real handle in this resolver's ownership
+    /// namespace. Standalone opaque adapters cannot infer an owning model.
+    fn object_zone_tolerance(&self, _kernel: &Kernel, _object: O) -> Result<f64> {
+        // UNPORTED(geom.tol): an opaque adapter has no actual owner lookup.
+        Err(SolidError::unported(
+            "SmTol::GetZoneTol3d(const SmObject*)",
+            "geom.tol",
+        ))
+    }
+}
+
+/// Mutable model execution at a topology-tree leaf. The native ray path owns
+/// its B-rep independently of the borrowed cache trees; legacy solvers keep
+/// using their existing immutable object resolver.
+pub(crate) trait PointLocalExecutor<O: SolutionObject> {
+    fn solve_pair(
+        &mut self,
+        kernel: &Kernel,
+        state: &mut GlobalSolver<'_, O>,
+        local: &mut LocalSolver<'_, O>,
+        first: Option<O>,
+        second: Option<O>,
+    ) -> Result<()>;
+}
+
+/// The four owner-dependent observations made while accepting ray/face
+/// candidates. Geometry borrows have ended before any mutable classification.
+pub(crate) trait RayFaceClassification<O> {
+    fn source_zone_tolerance(&self, kernel: &Kernel, vertex: Option<O>) -> Result<f64>;
+    fn object_zone_tolerance(&self, kernel: &Kernel, object: O) -> Result<f64>;
+    fn point_classify(
+        &mut self,
+        kernel: &Kernel,
+        face: O,
+        uv: Vec2,
+        source_tolerance: f64,
+    ) -> Result<i32>;
+    fn surface_owner(&self, surface: O) -> Result<Option<O>>;
+    fn classifies_on_face(
+        &mut self,
+        kernel: &Kernel,
+        face: O,
+        point: Point3,
+        tolerance: f64,
+    ) -> Result<bool>;
 }
 
 /// A curve a local solver works on (`m_pCurve`, `m_pCurve2`): the curve and the
@@ -427,6 +473,24 @@ impl<'t, 'a, O: SolutionObject + 't> TopologySolver<'t, 'a, O> {
     #[must_use]
     pub fn best_answer_so_far(&self) -> Option<f64> {
         best_answer_so_far(&self.base)
+    }
+
+    // Keep the single GlobalSolve sorting body, supplying this local query's
+    // actual owner resolver only where source Rayfire asks object tolerances.
+    fn add_local_solution(
+        &mut self,
+        solution: &Solution<O>,
+        sort_key: SortKey,
+        combine_contiguous_ranges: bool,
+    ) -> Result<()> {
+        let objects = self.objects;
+        let kernel = self.kernel;
+        self.base.add_sorted_solution_with(
+            solution,
+            sort_key,
+            combine_contiguous_ranges,
+            &mut |object| objects.object_zone_tolerance(kernel, object),
+        )
     }
 
     /// `SmTopologySolver::MayContainAnswer`: false when the boxes of two objects
@@ -664,6 +728,17 @@ impl<'t, 'a, O: SolutionObject + 't> TopologySolver<'t, 'a, O> {
     /// The body of [`TopologySolver::solve_trees`] once the local solver is in
     /// place.
     fn solve_trees_inner(&mut self, tree1: &'t Tree<O>, tree2: &'t Tree<O>) -> Result<()> {
+        let start_branch = self.initialize_tree_solve(tree1, tree2);
+        self.solve_branch(&start_branch)
+    }
+
+    // The owning point executor uses the same native setup before entering the
+    // same GlobalSolve traversal with a different local-execution adapter.
+    pub(super) fn initialize_tree_solve(
+        &mut self,
+        tree1: &'t Tree<O>,
+        tree2: &'t Tree<O>,
+    ) -> Branch {
         let s = &mut self.base;
         s.num_variables = 0;
         s.trees = [None; MAX_SOLVER_TREES];
@@ -676,11 +751,7 @@ impl<'t, 'a, O: SolutionObject + 't> TopologySolver<'t, 'a, O> {
             s.best_answer_so_far_sq = 0.0;
         }
 
-        // locals
-        let start_branch: Branch = [tree1.top_node(), tree2.top_node(), None];
-
-        // pass the call along
-        self.solve_branch(&start_branch)
+        [tree1.top_node(), tree2.top_node(), None]
     }
 
     /// `SmTopologySolver::SolveTwoTrees`: solves every object of `tree1` (in
@@ -1103,8 +1174,7 @@ impl<'a, O: SolutionObject> LocalSolver<'a, O> {
         sol.start.solution_value = sign * sqrt(dist_sq);
 
         // accumulate unique solutions sorted by value into SmGlobalSolver::m_pSolutions
-        ts.base
-            .add_sorted_solution(&sol, SortKey::BySolutionValue, true)
+        ts.add_local_solution(&sol, SortKey::BySolutionValue, true)
     }
 
     /// Loads the vertex among `object1`, `object2` (the first unless swapped) as
@@ -1216,7 +1286,7 @@ impl<'a, O: SolutionObject> LocalSolver<'a, O> {
         let target = best.map(|b| b * sign);
 
         // make the PointSolve call
-        let solutions = curve.global_point_solve(
+        let solutions = curve.global_point_solve_with_tolerance(
             ts.kernel,
             &self.interval,
             op,
@@ -1229,6 +1299,7 @@ impl<'a, O: SolutionObject> LocalSolver<'a, O> {
                 handle,
                 analytic_handle: handle.and_then(|h| objects.analytic_curve_handle(h)),
             },
+            &mut |object| objects.object_zone_tolerance(ts.kernel, object),
         )?;
 
         // iter every solution building final solution list.
@@ -1253,8 +1324,7 @@ impl<'a, O: SolutionObject> LocalSolver<'a, O> {
             if sol.solution_type == SolutionType::RangeOfValues {
                 sol.end.solution_value *= sign;
             }
-            ts.base
-                .add_sorted_solution(&sol, SortKey::BySolutionValue, true)?;
+            ts.add_local_solution(&sol, SortKey::BySolutionValue, true)?;
         } // end iter every solution building final solution list
 
         Ok(())
@@ -1320,6 +1390,20 @@ impl<'a, O: SolutionObject> LocalSolver<'a, O> {
         object1: Option<O>,
         object2: Option<O>,
     ) -> Result<()> {
+        if matches!(
+            ts.base.operation,
+            SolverOperation::Rayfire | SolverOperation::Signed3dDirectedMinimize
+        ) {
+            let candidates =
+                point_face_ray_candidates(ts.kernel, ts.objects, &ts.base, self, object1, object2)?;
+            if let Some(candidates) = candidates {
+                let mut owner = BorrowedRayClassification {
+                    objects: ts.objects,
+                };
+                accept_point_face_ray(ts.kernel, &mut ts.base, self, &mut owner, &candidates)?;
+            }
+            return Ok(());
+        }
         let objects = ts.objects;
         // locals
         let mut sol_objects: [Option<O>; MAX_TREES] = [None; MAX_TREES];
@@ -1370,81 +1454,7 @@ impl<'a, O: SolutionObject> LocalSolver<'a, O> {
         // branch on m_eSolverOperation val to find and load solutions into output m_rTopologySolver.m_pSolutions
         let op = ts.base.operation;
         let tol = ts.base.tolerance_3d;
-        if op == SolverOperation::Rayfire || op == SolverOperation::Signed3dDirectedMinimize {
-            // (upstream fetches the best answer here without using it)
-            let _best = best_answer_so_far(&ts.base);
-
-            let ray = opt_vector(&ts.base, 0)?;
-            let mut line_vec = ray;
-            let mut ray_fire = true;
-            if op == SolverOperation::Signed3dDirectedMinimize {
-                ray_fire = false;
-                if self.swap_order {
-                    line_vec = -line_vec;
-                }
-            }
-            let face_surface = objects.face_surface(face)?;
-            let uv_domain = objects.face_uv_domain(face)?;
-            let face_tol = objects.face_tolerance(face)?;
-            // pFace->GetSurface()->GlobalLineIntersect(uv_domain, point, line_vec, NULL,
-            // ray_fire, tol, solutions) (SER)
-            let solutions = objects.surface(face_surface)?.global_line_intersect(
-                ts.kernel,
-                face_surface,
-                &uv_domain,
-                self.point,
-                line_vec,
-                None,
-                ray_fire,
-                tol + face_tol,
-            )?;
-
-            for found in solutions.as_slice() {
-                let mut sol = *found;
-                let scale = self.point.max_dimension();
-                if op == SolverOperation::Rayfire && sol.start.param(0)? < -EFF_ZERO * scale {
-                    continue;
-                }
-
-                // We've found a result within the surface domain.
-                // It must also be within the Face: this is a topology routine.
-                // [060718 bd]
-                let src_zone_tol = object_zone_tol_3d(self.point_vertex)?;
-                let uv = Vec2::new(sol.start.param(1)?, sol.start.param(2)?);
-                if face_point_classify(face, uv, src_zone_tol, true, true)? == POINT_CLASS_UNKNOWN {
-                    continue;
-                }
-
-                // We need to do something here if we have a coincident segment to
-                // classify the answer by seeing if the start point is on the
-                // surface.  If not then skip it.
-                if sol.solution_type == SolutionType::RangeOfValues {
-                    let start = self.point + sol.start.param(0)? * ray;
-                    if !face_classifies_on_face(face, start, tol)? {
-                        continue;
-                    }
-                }
-
-                // Handle composite face situation
-                if objects.surface_owner(face_surface)? != Some(face) {
-                    let start = self.point + sol.start.param(0)? * ray;
-                    if !face_classifies_on_face(face, start, tol)? {
-                        continue;
-                    }
-                } // end composite face check
-
-                // load the solution
-                named(&mut sol);
-                // Shift the results for rayfire.
-                sol.start.solution_value = sol.start.param(0)?;
-                *sol.start.param_mut(0)? = sol.start.param(1)?;
-                *sol.start.param_mut(1)? = sol.start.param(2)?;
-
-                // add solution to output m_rTopologySolver.m_pSolutions if appropriate
-                ts.base
-                    .add_sorted_solution(&sol, SortKey::BySolutionValue, true)?;
-            } // end for each solution
-        } else if ts.base.projected_operation {
+        if ts.base.projected_operation {
             let opt_vectors = ts.base.opt_vectors.clone();
             let (trim_3d_curves, trim_uv_curves) =
                 face_silhouettes(ts.kernel, objects, face, &opt_vectors, tol)?;
@@ -1490,7 +1500,7 @@ impl<'a, O: SolutionObject> LocalSolver<'a, O> {
                 let mut sol = *found;
 
                 // Check whether the point is within the Face's trimmed boundaries.
-                let src_zone_tol = object_zone_tol_3d(self.point_vertex)?;
+                let src_zone_tol = point_vertex_zone_tol_3d(ts.kernel, objects, self.point_vertex)?;
                 let uv = Vec2::new(sol.start.param(0)?, sol.start.param(1)?);
                 if face_point_classify(face, uv, src_zone_tol, true, true)? == POINT_CLASS_UNKNOWN {
                     continue;
@@ -1726,6 +1736,200 @@ impl<'a, O: SolutionObject> LocalSolver<'a, O> {
     }
 }
 
+/// Execute the existing point/vertex or point/edge numerical body while the
+/// owner adapter lends a short immutable geometry view. Return the same global
+/// state, including writes made before an error, before releasing that view.
+pub(crate) fn solve_borrowed_point_pair<O: SolutionObject>(
+    kernel: &Kernel,
+    objects: &dyn TopologyObjects<O>,
+    state: &mut GlobalSolver<'_, O>,
+    local: &mut LocalSolver<'_, O>,
+    first: Option<O>,
+    second: Option<O>,
+) -> Result<()> {
+    let mut solver = TopologySolver {
+        base: core::mem::take(state),
+        kernel,
+        objects,
+        local_solver: None,
+    };
+    let result = match local.kind {
+        LocalSolverKind::PointVertex => local.solve_point_vertex(&mut solver, first, second),
+        LocalSolverKind::PointEdge => local.solve_point_edge(&mut solver, first, second),
+        _ => Err(SolidError::invalid_input(
+            OP_BASE,
+            "expected point/vertex or point/edge executor",
+        )),
+    };
+    *state = solver.base;
+    result
+}
+
+/// Owned surface intersections and native object naming for one point/face ray.
+pub(crate) struct PointFaceRayCandidates<O> {
+    solutions: SolutionArray<O>,
+    face: O,
+    surface: O,
+    face_surface: O,
+    names: [Option<O>; MAX_TREES],
+    count: usize,
+    ray: Vec3,
+}
+
+/// `SmTLSPointFace::SolveIt`, maintained SmTopologySolver.cpp:668--767: collect
+/// the ray/surface candidates without retaining references to the model.
+pub(crate) fn point_face_ray_candidates<O: SolutionObject>(
+    kernel: &Kernel,
+    objects: &dyn TopologyObjects<O>,
+    state: &GlobalSolver<'_, O>,
+    local: &LocalSolver<'_, O>,
+    first: Option<O>,
+    second: Option<O>,
+) -> Result<Option<PointFaceRayCandidates<O>>> {
+    let mut names = [None; MAX_TREES];
+    let mut count = 0;
+    let surface;
+    if local.swap_order {
+        surface = first.ok_or(null_deref(OP_PF, "surface without a face"))?;
+        push_object(&mut names, &mut count, Some(surface));
+        if local.point_vertex.is_some() {
+            push_object(&mut names, &mut count, local.point_vertex);
+        }
+    } else {
+        surface = second.ok_or(null_deref(OP_PF, "surface without a face"))?;
+        if local.point_vertex.is_some() {
+            push_object(&mut names, &mut count, local.point_vertex);
+        }
+        push_object(&mut names, &mut count, Some(surface));
+    }
+    let face = objects.surface_face(surface)?;
+    if !local.in_shape(objects, face) {
+        return Ok(None);
+    }
+    let face = face.ok_or(null_deref(OP_PF, "surface without a face"))?;
+    let _best = best_answer_so_far(state);
+    let ray = opt_vector(state, 0)?;
+    let mut line_vec = ray;
+    let mut ray_fire = true;
+    if state.operation == SolverOperation::Signed3dDirectedMinimize {
+        ray_fire = false;
+        if local.swap_order {
+            line_vec = -line_vec;
+        }
+    }
+    let face_surface = objects.face_surface(face)?;
+    let domain = objects.face_uv_domain(face)?;
+    let face_tolerance = objects.face_tolerance(face)?;
+    let solutions = objects.surface(face_surface)?.global_line_intersect(
+        kernel,
+        face_surface,
+        &domain,
+        local.point,
+        line_vec,
+        None,
+        ray_fire,
+        state.tolerance_3d + face_tolerance,
+    )?;
+    Ok(Some(PointFaceRayCandidates {
+        solutions,
+        face,
+        surface,
+        face_surface,
+        names,
+        count,
+        ray,
+    }))
+}
+
+/// The single native ray/face acceptance loop (SmTopologySolver.cpp:769--850).
+/// Mutable classification occurs at its source position, before solution naming,
+/// parameter shifting and insertion; ordinary status handling belongs to owner.
+pub(crate) fn accept_point_face_ray<O: SolutionObject>(
+    kernel: &Kernel,
+    state: &mut GlobalSolver<'_, O>,
+    local: &LocalSolver<'_, O>,
+    owner: &mut dyn RayFaceClassification<O>,
+    candidates: &PointFaceRayCandidates<O>,
+) -> Result<()> {
+    for found in candidates.solutions.as_slice() {
+        let mut sol = *found;
+        let scale = local.point.max_dimension();
+        if state.operation == SolverOperation::Rayfire && sol.start.param(0)? < -EFF_ZERO * scale {
+            continue;
+        }
+        let source_tolerance = owner.source_zone_tolerance(kernel, local.point_vertex)?;
+        let uv = Vec2::new(sol.start.param(1)?, sol.start.param(2)?);
+        if owner.point_classify(kernel, candidates.face, uv, source_tolerance)?
+            == POINT_CLASS_UNKNOWN
+        {
+            continue;
+        }
+        if sol.solution_type == SolutionType::RangeOfValues {
+            let start = local.point + sol.start.param(0)? * candidates.ray;
+            if !owner.classifies_on_face(kernel, candidates.face, start, state.tolerance_3d)? {
+                continue;
+            }
+        }
+        if owner.surface_owner(candidates.face_surface)? != Some(candidates.face) {
+            let start = local.point + sol.start.param(0)? * candidates.ray;
+            if !owner.classifies_on_face(kernel, candidates.face, start, state.tolerance_3d)? {
+                continue;
+            }
+        }
+        sol.objects[0] = candidates.names[0];
+        sol.objects[1] = candidates.names[1];
+        if candidates.names[0] == Some(candidates.surface) {
+            sol.objects[0] = Some(candidates.face);
+        }
+        if candidates.names[1] == Some(candidates.surface) {
+            sol.objects[1] = Some(candidates.face);
+        }
+        sol.num_objects = candidates.count;
+        sol.num_variables = 2;
+        sol.start.solution_value = sol.start.param(0)?;
+        *sol.start.param_mut(0)? = sol.start.param(1)?;
+        *sol.start.param_mut(1)? = sol.start.param(2)?;
+        state.add_sorted_solution_with(&sol, SortKey::BySolutionValue, true, &mut |object| {
+            owner.object_zone_tolerance(kernel, object)
+        })?;
+    }
+    Ok(())
+}
+
+struct BorrowedRayClassification<'a, O> {
+    objects: &'a dyn TopologyObjects<O>,
+}
+
+impl<O> RayFaceClassification<O> for BorrowedRayClassification<'_, O> {
+    fn source_zone_tolerance(&self, kernel: &Kernel, vertex: Option<O>) -> Result<f64> {
+        point_vertex_zone_tol_3d(kernel, self.objects, vertex)
+    }
+    fn object_zone_tolerance(&self, kernel: &Kernel, object: O) -> Result<f64> {
+        self.objects.object_zone_tolerance(kernel, object)
+    }
+    fn point_classify(
+        &mut self,
+        _: &Kernel,
+        face: O,
+        uv: Vec2,
+        source_tolerance: f64,
+    ) -> Result<i32> {
+        face_point_classify(face, uv, source_tolerance, true, true)
+    }
+    fn surface_owner(&self, surface: O) -> Result<Option<O>> {
+        self.objects.surface_owner(surface)
+    }
+    fn classifies_on_face(
+        &mut self,
+        _: &Kernel,
+        face: O,
+        point: Point3,
+        tolerance: f64,
+    ) -> Result<bool> {
+        face_classifies_on_face(face, point, tolerance)
+    }
+}
+
 /// `sm_GetFaceSilhouettes`: the face's trimmed silhouette curves for the view
 /// vector `opt_vectors[0]` (3D curves and their UV trim curves), taken from the
 /// surface cache's alternate caches or made and cached there (silhouette curves of
@@ -1862,7 +2066,27 @@ fn curve_global_curve_solve<O: SolutionObject>(
     )
 }
 
-/// `SmTol::GetZoneTol3d(m_pPointVertex)`.
+/// `SmTol::GetZoneTol3d(m_pPointVertex)` in `SmTLSPointFace::SolveIt`.
+pub(crate) fn point_vertex_zone_tol_3d<O>(
+    k: &Kernel,
+    objects: &dyn TopologyObjects<O>,
+    vertex: Option<O>,
+) -> Result<f64> {
+    // Maintained SmTopologySolver.cpp:780/905 and SmTol.cpp:761--765,
+    // SM_USE_OLDTOL: an actual point vertex supplies its stored GetTolerance.
+    // NULL explicitly requests the current SYSTEM tolerance in this same
+    // kernel, rather than the face/B-rep/context tolerance or a fallback value.
+    // Keep the two source meanings distinct; a present but invalid owner fails.
+    match vertex {
+        Some(vertex) => objects.vertex_tolerance(vertex),
+        None => Ok(crate::geom::tol::zone_tol_3d(
+            k,
+            crate::geom::tol::SmallTopoType::NormalSize,
+        )),
+    }
+}
+
+/// `SmTol::GetZoneTol3d` for the curve/face solver's opaque geometry handle.
 pub(super) fn object_zone_tol_3d<O>(_vertex: Option<O>) -> Result<f64> {
     // UNPORTED(geom.tol): SmTol::GetZoneTol3d(const SmObject*) on an opaque handle. Every
     // arm it dispatches to is ported (topology::{vertex, edge, face::p2, edgeuse::p1}::tolerance,
@@ -1919,6 +2143,44 @@ pub(crate) mod tests {
     use super::*;
     use crate::curve::line::{BoundedLineOptions, Line};
     use crate::geom::solution_array::ObjectKind;
+
+    #[test]
+    fn point_face_source_tolerance_uses_the_actual_vertex_or_native_null_rule() {
+        use crate::geom::assert_array::labels::BREP_TYPE;
+        use crate::topology::brep_cache::{arena_identity, BrepCache, BrepObjects, CacheObject};
+        use crate::topology::{Brep, BrepId, VertexId};
+
+        let mut k = Kernel::default();
+        k.tolerances.zone_tol_3d = 0.03125;
+        let context_tolerance = k.context.set_this_model_size_estimate(1_000_000.0);
+        assert_ne!(context_tolerance, k.tolerances.zone_tol_3d);
+        let mut b = Brep::new();
+        b.set_tolerance(0.25);
+        let vertex = b.add_vertex(Point3::ZERO).unwrap();
+        b.vertex_mut(vertex).unwrap().tolerance = 0.125;
+        let cache = BrepCache::new(BREP_TYPE).unwrap();
+        let objects = BrepObjects {
+            brep: &b,
+            brep_id: BrepId::from_index(0),
+            cache: &cache,
+            keys: &arena_identity,
+            owner_of: &|_| None,
+        };
+        assert_eq!(
+            point_vertex_zone_tol_3d(&k, &objects, None).unwrap(),
+            0.03125
+        );
+        assert_eq!(
+            point_vertex_zone_tol_3d(&k, &objects, Some(CacheObject::Vertex(vertex))).unwrap(),
+            0.125
+        );
+        assert!(point_vertex_zone_tol_3d(
+            &k,
+            &objects,
+            Some(CacheObject::Vertex(VertexId::from_index(u32::MAX))),
+        )
+        .is_err());
+    }
 
     /// Free-standing test objects: vertices `(point, tolerance)` and curves.
     #[derive(Debug, Clone, Copy, PartialEq)]

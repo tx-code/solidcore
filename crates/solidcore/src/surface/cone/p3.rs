@@ -14,7 +14,7 @@
 //! propagate Unported; errors which would leave an uninitialised output propagate.
 //! A default `SmPoint2d` is `SM_UNDEF_DOUBLE`, not uninitialised, so an ignored
 //! `ConvertUVFromSTEPToNURBS` failure keeps the converter-written U and that V.
-//! The general intersection is supplied as a callback until `SurfaceKind` can hold
+//! The general intersection is supplied as an owning-wrapper callback; `SurfaceKind` holds
 //! cones (without erasing their virtual methods). It receives every original
 //! argument. Sphere dispatch awaits the sphere type. Bounding boxes are those of
 //! bare geometry (no face owner), with upstream's zone-tolerance expansion.
@@ -889,6 +889,7 @@ impl Cone {
     ) -> Result<SurfaceIntersection> {
         let target = match other {
             IntersectTarget::Surface(s) => match s.kind() {
+                SurfaceKind::Cone(c) => IntersectTarget::Cone(c),
                 SurfaceKind::Plane(p) => IntersectTarget::Plane(p),
                 SurfaceKind::SurfOfRevolution(r) => IntersectTarget::Revolution(r),
                 _ => other,

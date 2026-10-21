@@ -1357,6 +1357,20 @@ pub(crate) fn global_surface_intersect(
 
     // switch on OtherSurface Type looking for cheap special intersection case
     match other.kind() {
+        SurfaceKind::Cone(cone) => {
+            let (more, mut found) =
+                cone.intersect_with_plane(k, other_uv_domain, plane, uv_domain, approx_tol_3d)?;
+            core::mem::swap(&mut found.surface1_uv_curves, &mut found.surface2_uv_curves);
+            (need_nurb_intersection, out) = (more, found);
+        }
+        SurfaceKind::Torus(torus) => {
+            let (more, mut found) =
+                torus
+                    .base()
+                    .intersect_with_plane(k, plane, uv_domain, approx_tol_3d)?;
+            core::mem::swap(&mut found.surface1_uv_curves, &mut found.surface2_uv_curves);
+            (need_nurb_intersection, out) = (more, found);
+        }
         // plane/plane special case intersection
         SurfaceKind::Plane(other_plane) => {
             // (whether each plane has a face: SmSurface::GetFace)

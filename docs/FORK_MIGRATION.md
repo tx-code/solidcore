@@ -11,9 +11,12 @@ STEP model-import milestones belong in solidcore: successful source inspection
 or kernel test counts cannot replace actual complete Rust BRep imports. Connect
 the maintained source pipeline to the Rust builder before unrelated kernel work.
 An initial standalone wgpu viewer now lives in `crates/solidcore-viewer` and
-supports CLI file launch, progress/HUD and derived planar display over an actual
-native candidate. Broader geometry, selection and measurements remain required;
-this initial display does not establish complete import or workbench parity.
+supports CLI file launch and progress/HUD over an actual native candidate. Explicit
+General loading also derives curved display from native surfaces and incidence UVs,
+with shared-edge conforming refinement and actual owning ray queries for selection.
+Feature information retains native/source identity; mutable queries invalidate old
+numerical observations in the HUD. Broader geometry/query coverage and workbench
+behavior remain required; display does not establish complete import or parity.
 
 ## Authoritative source and evidence
 

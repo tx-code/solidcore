@@ -401,6 +401,45 @@ fn brep_ray_fire(
     direction: Vec3,
     tolerance: f64,
 ) -> Result<super::p2::RayFireResult> {
+    brep_ray_fire_limited(k, b, brep_id, start, direction, tolerance, None)
+}
+
+/// Ray execution in a namespace containing only this actual B-rep. The root is
+/// registered through the same canonical single-model identity used by native
+/// validation; it is not a handle into a caller's multi-model shape store.
+pub(crate) fn ray_fire_owned(
+    k: &Kernel,
+    b: &mut Brep,
+    start: Point3,
+    direction: Vec3,
+    tolerance: f64,
+    answer_limit: Option<f64>,
+) -> Result<super::p2::RayFireResult> {
+    use crate::topology::brep_cache::{arena_identity, CacheObject};
+    let root = arena_identity(CacheObject::Brep);
+    let index = u32::try_from(root.key.0)
+        .map_err(|_| SolidError::invalid_input(OP, "invalid local B-rep root identity"))?;
+    brep_ray_fire_limited(
+        k,
+        b,
+        crate::topology::BrepId::from_index(index),
+        start,
+        direction,
+        tolerance,
+        answer_limit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Shared native wrapper, no duplicate ray algorithm.
+fn brep_ray_fire_limited(
+    k: &Kernel,
+    b: &mut Brep,
+    brep_id: crate::topology::BrepId,
+    start: Point3,
+    direction: Vec3,
+    tolerance: f64,
+    answer_limit: Option<f64>,
+) -> Result<super::p2::RayFireResult> {
     use crate::topology::brep_cache::arena_identity;
     if b.notifications().spatial_cache.is_none() {
         b.build_notification_cache(k)?;
@@ -422,7 +461,7 @@ fn brep_ray_fire(
         start,
         direction,
         tolerance,
-        None,
+        answer_limit,
     );
     b.notifications_mut().spatial_cache = Some(cache);
     result

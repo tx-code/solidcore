@@ -1,15 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! LINE/PLANE interaction, with native confirmation and owner-local identities.
+//! Native curved/planar interaction, with real ray confirmation and owner-local IDs.
 use crate::{
     camera::Frame,
     scene::{Result, Scene},
 };
 use glam::{DVec2, DVec3};
-use solidcore::{
-    curve::curve::CurveKind, error::EntityRef, intersect::point_class::PointClassType,
-    surface::surface::SurfaceKind,
-};
+use solidcore::{curve::curve::CurveKind, error::EntityRef, surface::surface::SurfaceKind};
 
 #[derive(Clone, Copy)]
 pub(crate) struct Hit {
@@ -58,94 +55,39 @@ fn normalized(scene: &Scene, p: DVec3) -> DVec3 {
     (p - scene.center_mm) / scene.radius_mm
 }
 
-fn triangle_candidate(origin: DVec3, direction: DVec3, a: DVec3, b: DVec3, c: DVec3) -> bool {
-    let ab = b - a;
-    let ac = c - a;
-    let cross = direction.cross(ac);
-    let determinant = ab.dot(cross);
-    if determinant.abs() < 1e-14 {
-        return false;
+/// Application-selected query tolerances stay separate from display chord error.
+fn query_tolerance(scene: &Scene) -> Result<f64> {
+    let value = if let Some(report) = scene.owner.general_report() {
+        report.quality.query_mm.numerator() as f64 / report.quality.query_mm.denominator() as f64
+    } else {
+        // Explicit P0 viewer fixture/application configuration, matching loading.rs.
+        // This is not a system/native default or a display-derived acceptance value.
+        1e-6
+    };
+    if value.is_finite() && value > 0. {
+        Ok(value)
+    } else {
+        Err("Invalid selected native query tolerance".into())
     }
-    let offset = origin - a;
-    let u = offset.dot(cross) / determinant;
-    let q = offset.cross(ab);
-    let v = direction.dot(q) / determinant;
-    u >= -1e-7 && v >= -1e-7 && u + v <= 1. + 1e-7 && ac.dot(q) / determinant >= 0.
 }
 
 fn face_hit(scene: &mut Scene, frame: Frame, pixel: DVec2) -> Result<Option<Hit>> {
     let Some((origin, direction)) = frame.ray(pixel) else {
         return Ok(None);
     };
-    // The f32 display triangles are a broad phase only. Every returned hit is
-    // re-intersected with the native plane and checked by the native trim query.
-    let mut candidates = Vec::new();
-    for (id, range) in &scene.face_ranges {
-        let mesh = scene
-            .triangles
-            .get(range.clone())
-            .ok_or("Face display range changed")?;
-        let (triangles, _) = mesh.as_chunks::<3>();
-        if triangles.iter().any(|[a, b, c]| {
-            triangle_candidate(
-                origin,
-                direction,
-                DVec3::from_array(a.position.map(f64::from)),
-                DVec3::from_array(b.position.map(f64::from)),
-                DVec3::from_array(c.position.map(f64::from)),
-            )
-        }) {
-            candidates.push(*id);
-        }
-    }
-    let world_origin = scene.center_mm + origin * scene.radius_mm;
-    let mut closest: Option<(f64, Hit)> = None;
-    for id in candidates {
-        let (distance, position, uv) = {
-            let face = scene.owner.brep().face(id).map_err(|e| e.to_string())?;
-            let SurfaceKind::Plane(plane) =
-                face.surface.as_ref().ok_or("Missing native plane")?.kind()
-            else {
-                return Err("Picking supports native PLANE only".into());
-            };
-            let normal = point(plane.position().x_axis().cross(plane.position().y_axis()));
-            let denominator = normal.dot(direction);
-            if denominator.abs() < 1e-12 {
-                continue;
-            }
-            let distance =
-                normal.dot(point(plane.position().origin()) - world_origin) / denominator;
-            if !distance.is_finite() || distance < 0. {
-                continue;
-            }
-            let position = world_origin + distance * direction;
-            (
-                distance,
-                position,
-                plane.project_point_to_uv_domain(native(position)),
-            )
-        };
-        let classification = scene
-            .owner
-            .classify_face_uv(id, uv)
-            .map_err(|e| e.to_string())?;
-        if matches!(
-            classification,
-            PointClassType::Face | PointClassType::Edge | PointClassType::Vertex
-        ) && closest
-            .as_ref()
-            .is_none_or(|(previous, _)| distance < *previous)
-        {
-            closest = Some((
-                distance,
-                Hit {
-                    entity: EntityRef::Face(id),
-                    point: position,
-                },
-            ));
-        }
-    }
-    Ok(closest.map(|(_, hit)| hit))
+    let origin_mm = scene.center_mm + origin * scene.radius_mm;
+    let tolerance = query_tolerance(scene)?;
+    // Display triangles are never a replacement for trimmed native intersection.
+    // Query the same owner even when a chord near a curved silhouette misses the
+    // cursor; gating this ray on a coarse display triangle would hide true hits.
+    let hit = scene
+        .owner
+        .ray_hit(native(origin_mm), native(direction), tolerance, None)
+        .map_err(|e| format!("Native picking ray: {e}"))?;
+    Ok(hit.map(|hit| Hit {
+        entity: hit.entity,
+        point: point(hit.point_mm),
+    }))
 }
 
 fn visible(scene: &mut Scene, frame: Frame, position: DVec3) -> Result<bool> {
@@ -158,9 +100,81 @@ fn visible(scene: &mut Scene, frame: Frame, position: DVec3) -> Result<bool> {
     let Some(front) = frame.project(normalized(scene, occluder.point)) else {
         return Ok(false);
     };
-    // Match float-depth display precision, not an import/error budget. A
-    // foreground native face still rejects hidden vertices and boundary lines.
+    // This is float-depth display precision, not enlargement of native ray/query
+    // budgets. Actual foreground geometry still occludes every candidate kind.
     Ok(projected.depth <= front.depth + 8. * f64::from(f32::EPSILON))
+}
+
+fn curve_candidate(
+    scene: &Scene,
+    frame: Frame,
+    pixel: DVec2,
+    id: solidcore::topology::EdgeId,
+    low: f64,
+    high: f64,
+    initial: f64,
+    evaluations: &mut usize,
+) -> Result<Option<(f64, DVec3)>> {
+    let edge = scene.owner.brep().edge(id).map_err(|e| e.to_string())?;
+    let curve = edge.curve.as_ref().ok_or("Missing native defining curve")?;
+    let mut score = |t: f64| -> Result<(f64, DVec3)> {
+        *evaluations = evaluations
+            .checked_add(1)
+            .ok_or("Curve picking count overflow")?;
+        if *evaluations > 16_384 {
+            return Err("Curve picking evaluation budget exceeded".into());
+        }
+        let position = point(
+            curve
+                .evaluate_point(scene.owner.kernel(), t)
+                .map_err(|e| e.to_string())?,
+        );
+        if !position.is_finite() {
+            return Err("Nonfinite native curve picking point".into());
+        }
+        let distance = frame
+            .project(normalized(scene, position))
+            .map_or(f64::INFINITY, |p| p.pixel.distance_squared(pixel));
+        Ok((distance, position))
+    };
+    let mut best = score(initial.clamp(low, high))?;
+    for t in [low, high] {
+        let next = score(t)?;
+        if next.0 < best.0 {
+            best = next;
+        }
+    }
+    // The display chord supplies only a short original-parameter bracket. Refine
+    // the cursor distance by evaluating the native basis inside that interval;
+    // no mesh-edge coordinate or polyline length becomes a CAD measurement.
+    let (mut a, mut b) = (low, high);
+    let ratio = 0.618_033_988_749_894_9;
+    let mut c = b - ratio * (b - a);
+    let mut d = a + ratio * (b - a);
+    let mut fc = score(c)?;
+    let mut fd = score(d)?;
+    for _ in 0..18 {
+        if fc.0 < best.0 {
+            best = fc;
+        }
+        if fd.0 < best.0 {
+            best = fd;
+        }
+        if fc.0 < fd.0 {
+            b = d;
+            d = c;
+            fd = fc;
+            c = b - ratio * (b - a);
+            fc = score(c)?;
+        } else {
+            a = c;
+            c = d;
+            fc = fd;
+            d = a + ratio * (b - a);
+            fd = score(d)?;
+        }
+    }
+    Ok(best.0.is_finite().then_some((best.0.sqrt(), best.1)))
 }
 
 pub(crate) fn pick(scene: &mut Scene, frame: Frame, pixel: DVec2) -> Result<Option<Hit>> {
@@ -195,47 +209,63 @@ pub(crate) fn pick(scene: &mut Scene, frame: Frame, pixel: DVec2) -> Result<Opti
         }
     }
     let mut edges = Vec::new();
-    for id in scene.owner.edges().values().flatten() {
-        let edge = scene.owner.brep().edge(*id).map_err(|e| e.to_string())?;
-        let CurveKind::Line(line) = edge
-            .curve
-            .as_ref()
-            .ok_or("Missing native defining curve")?
-            .kind()
-        else {
-            return Err("Picking supports native LINE only".into());
-        };
-        let start = point(line.evaluate_point(edge.interval.min()));
-        let end = point(line.evaluate_point(edge.interval.max()));
-        let Some((a, b, low, high)) =
-            frame.segment(normalized(scene, start), normalized(scene, end))
-        else {
-            continue;
-        };
-        let delta = b.pixel - a.pixel;
-        let fraction = if delta.length_squared() > 0. {
-            (pixel - a.pixel).dot(delta) / delta.length_squared()
-        } else {
-            0.
-        }
-        .clamp(0., 1.);
-        // Perspective-correct interpolation recovers a parameter of the
-        // ORIGINAL native LINE, rather than a mesh edge or screen-space chord.
-        let denominator = (1. - fraction) / a.w + fraction / b.w;
-        if !denominator.is_finite() || denominator <= 0. {
-            continue;
-        }
-        let t = low + (high - low) * (fraction / b.w) / denominator;
-        let position = point(line.evaluate_point(edge.interval.min() + t * edge.interval.length()));
-        if let Some(p) = frame.project(normalized(scene, position)) {
-            let distance = p.pixel.distance(pixel);
-            if distance <= radius {
-                edges.push((distance, *id, position));
+    let mut evaluations = 0usize;
+    // All native pieces and derived chart cuts are present in this owner-local
+    // table. Two pieces of one source edge retain their distinct native IDs.
+    for (id, samples) in &scene.edge_samples {
+        for pair in samples.windows(2) {
+            let [start, end] = pair else {
+                return Err("Incomplete native curve candidate segment".into());
+            };
+            let Some((a, b, low, high)) = frame.segment(
+                normalized(scene, start.point_mm),
+                normalized(scene, end.point_mm),
+            ) else {
+                continue;
+            };
+            let delta = b.pixel - a.pixel;
+            let fraction = if delta.length_squared() > 0. {
+                ((pixel - a.pixel).dot(delta) / delta.length_squared()).clamp(0., 1.)
+            } else {
+                0.
+            };
+            let projected = a.pixel + fraction * delta;
+            // The screen broad phase is deliberately wider than the hit radius.
+            // Only a subsequent original-curve evaluation can produce an edge hit.
+            let chord_pixels = scene.display_tolerance_mm / scene.radius_mm
+                * f64::from(frame.height)
+                / a.w.min(b.w).max(1e-9);
+            if projected.distance(pixel) > radius + 4. + chord_pixels {
+                continue;
+            }
+            let denominator = (1. - fraction) / a.w + fraction / b.w;
+            if !denominator.is_finite() || denominator <= 0. {
+                continue;
+            }
+            let fraction = low + (high - low) * (fraction / b.w) / denominator;
+            let initial = start.parameter + (end.parameter - start.parameter) * fraction;
+            if let Some((distance, position)) = curve_candidate(
+                scene,
+                frame,
+                pixel,
+                *id,
+                start.parameter,
+                end.parameter,
+                initial,
+                &mut evaluations,
+            )? {
+                if distance <= radius {
+                    edges.push((distance, *id, position));
+                }
             }
         }
     }
     edges.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut tried = std::collections::BTreeSet::new();
     for (_, id, position) in edges {
+        if !tried.insert(id) {
+            continue;
+        }
         if visible(scene, frame, position)? {
             return Ok(Some(Hit {
                 entity: EntityRef::Edge(id),
@@ -277,6 +307,24 @@ pub(crate) fn label(scene: &Scene, entity: EntityRef) -> Result<String> {
             ));
         }
     }
+    if let EntityRef::Edge(id) = entity {
+        if let Some(report) = scene.owner.general_report() {
+            if let Some((source_face, _)) = report.chart_cuts.iter().find(|(_, edge)| *edge == id) {
+                scene.owner.brep().edge(id).map_err(|e| e.to_string())?;
+                let source = scene
+                    .owner
+                    .source()
+                    .source()
+                    .records()
+                    .get(*source_face)
+                    .ok_or("Derived seam source face missing")?;
+                return Ok(format!(
+                    "Derived chart seam on face #{} · native {entity}",
+                    source.id
+                ));
+            }
+        }
+    }
     let record = match entity {
         EntityRef::Face(id) => scene
             .owner
@@ -309,21 +357,41 @@ pub(crate) fn label(scene: &Scene, entity: EntityRef) -> Result<String> {
     Ok(format!("#{source} · native {entity}", source = source.id))
 }
 
+/// A completed native numerical receipt wins; analytic line/circle intervals are
+/// evaluated directly, other definitions use the named native sampled query.
 pub(crate) fn edge_length(scene: &Scene, id: solidcore::topology::EdgeId) -> Result<f64> {
+    if let Some(measured) = scene
+        .owner
+        .general_report()
+        .and_then(|report| report.material_measurements)
+        .and_then(|m| m.edges.iter().find(|edge| edge.native_edge == id))
+    {
+        return Ok(measured.length_mm);
+    }
     let edge = scene.owner.brep().edge(id).map_err(|e| e.to_string())?;
-    let CurveKind::Line(line) = edge
-        .curve
-        .as_ref()
-        .ok_or("Missing native edge curve")?
-        .kind()
-    else {
-        return Err("Length measurement currently requires native LINE".into());
+    let curve = edge.curve.as_ref().ok_or("Missing native edge curve")?;
+    let length = match curve.kind() {
+        CurveKind::Line(line) => line.length(&edge.interval),
+        CurveKind::Ellipse(circle) if circle.is_circle_class() => {
+            let first = circle
+                .convert_t_from_nurbs_to_step(scene.owner.kernel(), edge.interval.min())
+                .map_err(|e| e.to_string())?;
+            let last = circle
+                .convert_t_from_nurbs_to_step(scene.owner.kernel(), edge.interval.max())
+                .map_err(|e| e.to_string())?;
+            circle.radius() * (last - first).abs() * std::f64::consts::PI / 180.
+        }
+        _ => {
+            curve
+                .approximate_length(scene.owner.kernel(), &edge.interval, 4096, false)
+                .map_err(|e| e.to_string())?
+                .0
+        }
     };
-    let length = line.length(&edge.interval);
-    if length.is_finite() {
+    if length.is_finite() && length >= 0. {
         Ok(length)
     } else {
-        Err("Nonfinite native LINE length".into())
+        Err("Nonfinite native edge length".into())
     }
 }
 
@@ -344,22 +412,53 @@ pub(crate) fn details(scene: &Scene, selection: &Selection) -> Result<Vec<String
                     .point;
                 rows.push(format!("Vertex mm: {:.6}, {:.6}, {:.6}", p.x, p.y, p.z));
             }
-            EntityRef::Edge(id) => rows.push(format!(
-                "Native LINE length: {:.6} mm",
-                edge_length(scene, id)?
-            )),
+            EntityRef::Edge(id) => {
+                let edge = scene.owner.brep().edge(id).map_err(|e| e.to_string())?;
+                let curve = edge
+                    .curve
+                    .as_ref()
+                    .ok_or("Missing native defining edge curve")?;
+                let sampled = !matches!(curve.kind(), CurveKind::Line(_))
+                    && !matches!(curve.kind(),CurveKind::Ellipse(circle) if circle.is_circle_class());
+                rows.push(format!(
+                    "Native {}length: {:.6} mm",
+                    if sampled {
+                        "sampled curve "
+                    } else {
+                        "analytic interval "
+                    },
+                    edge_length(scene, id)?
+                ));
+            }
             EntityRef::Face(id) => {
                 let face = scene.owner.brep().face(id).map_err(|e| e.to_string())?;
-                let SurfaceKind::Plane(plane) =
-                    face.surface.as_ref().ok_or("Missing face geometry")?.kind()
-                else {
-                    return Err("Face is not a native PLANE".into());
-                };
-                let n = plane.evaluate_normal();
-                rows.push(format!(
-                    "PLANE surface normal: {:.6}, {:.6}, {:.6}",
-                    n.x, n.y, n.z
-                ));
+                let surface = face.surface.as_ref().ok_or("Missing face geometry")?;
+                rows.push(format!("Surface: {}", surface.type_string()));
+                if let Some(area) = scene
+                    .owner
+                    .general_report()
+                    .and_then(|report| report.material_measurements)
+                    .and_then(|m| m.faces.iter().find(|f| f.native_face == id))
+                {
+                    rows.push(format!("Native numerical area: {:.6} mm²", area.area_mm2));
+                }
+                match surface.kind() {
+                    SurfaceKind::Plane(plane) => {
+                        let normal = plane.evaluate_normal();
+                        rows.push(format!(
+                            "Plane normal: {:.6}, {:.6}, {:.6}",
+                            normal.x, normal.y, normal.z
+                        ));
+                    }
+                    SurfaceKind::Cone(cone) => {
+                        if cone.is_cylinder() {
+                            rows.push(format!("Cylinder radius: {:.6} mm", cone.bot_radius()));
+                        } else {
+                            rows.push(format!("Cone semi-angle: {:.6}°", cone.semi_angle_deg()));
+                        }
+                    }
+                    _ => {}
+                }
             }
             _ => return Err("Unsupported selection entity".into()),
         }
@@ -386,6 +485,7 @@ pub(crate) fn details(scene: &Scene, selection: &Selection) -> Result<Vec<String
 mod tests {
     use super::*;
     use crate::camera::Camera;
+    use solidcore::intersect::point_class::PointClassType;
     use solidcore::topology::{EdgeId, FaceId, VertexId};
     use std::fmt::Write;
     const PLANE: &str = include_str!("../../solidcore-step/tests/fixtures/plane.step");
@@ -537,6 +637,18 @@ mod tests {
     #[test]
     fn actual_native_trim_query_and_display_candidates_both_reject_the_hole() {
         let mut scene = load(&with_hole());
+        // Independent planar truth: 12×8 outer rectangle minus a 4×4 hole.
+        // This checks the displayed trim region as well as the native query.
+        let (triangles, remainder) = scene.triangles.as_chunks::<3>();
+        assert!(remainder.is_empty());
+        let area = triangles
+            .iter()
+            .map(|[a, b, c]| {
+                let p = |v: &crate::scene::Vertex| DVec3::from_array(v.position.map(f64::from));
+                (p(b) - p(a)).cross(p(c) - p(a)).length() * 0.5 * scene.radius_mm * scene.radius_mm
+            })
+            .sum::<f64>();
+        assert!((area - 80.).abs() < 1e-4);
         let view = frame(1.);
         let f = face(&scene, "302");
         let classification = scene
@@ -594,6 +706,96 @@ mod tests {
         assert_eq!(
             pick(&mut scene, view, cursor).unwrap().unwrap().entity,
             EntityRef::Face(front)
+        );
+    }
+
+    #[test]
+    fn real_curved_face_and_circle_picking_use_native_points_at_each_dpi() {
+        use crate::scene::public_controls::{scene as curved_scene, CYLINDER};
+        let mut scene = curved_scene(CYLINDER);
+        let side = face(&scene, "182");
+        let upper = scene
+            .owner
+            .edges()
+            .get(&record(&scene, "131"))
+            .unwrap()
+            .clone();
+        let coordinate = 3. / 2_f64.sqrt();
+        for scale in [1., 2.] {
+            let view = frame(scale);
+            let cursor = pixel(&scene, view, DVec3::new(coordinate, coordinate, 3.5));
+            let hit = pick(&mut scene, view, cursor).unwrap().unwrap();
+            assert_eq!(hit.entity, EntityRef::Face(side));
+            assert!((hit.point.x * hit.point.x + hit.point.y * hit.point.y - 9.).abs() < 1e-5);
+            let cursor = pixel(&scene, view, DVec3::new(coordinate, coordinate, 7.));
+            let hit = pick(&mut scene, view, cursor).unwrap().unwrap();
+            let EntityRef::Edge(id) = hit.entity else {
+                panic!("public circle pick returned {}", hit.entity)
+            };
+            assert!(upper.contains(&id));
+            // The point comes from the original circle basis, not from the
+            // display chord that supplied its original-parameter bracket.
+            assert!((hit.point.x * hit.point.x + hit.point.y * hit.point.y - 9.).abs() < 1e-9);
+            assert!((hit.point.z - 7.).abs() < 1e-9);
+            assert!(label(&scene, hit.entity).unwrap().contains("#131"));
+        }
+        assert_eq!(scene.owner.source().source().bytes(), CYLINDER);
+        // Native ray queries may mutate caches and therefore invalidate the old
+        // numerical trim receipt; rendering alone must not be re-labelled as it.
+        assert!(scene
+            .owner
+            .general_report()
+            .unwrap()
+            .final_trim_measurements
+            .is_none());
+    }
+
+    #[test]
+    fn curved_source_pieces_derived_chart_provenance_and_analytic_lengths_remain_distinct() {
+        use crate::scene::public_controls::{scene as curved_scene, CYLINDER};
+        let mut scene = curved_scene(CYLINDER);
+        let upper = scene.owner.edges().get(&record(&scene, "131")).unwrap();
+        assert_eq!(upper.len(), 2);
+        let total = upper
+            .iter()
+            .map(|id| edge_length(&scene, *id).unwrap())
+            .sum::<f64>();
+        assert!((total - 6. * std::f64::consts::PI).abs() < 1e-10);
+        let report = scene.owner.general_report().unwrap();
+        let seam = report.chart_cuts[0].1;
+        let origin = &report.derived_vertices[0];
+        let vertex = origin.native_vertex;
+        assert!((edge_length(&scene, seam).unwrap() - 7.).abs() < 1e-10);
+        assert!(label(&scene, EntityRef::Edge(seam))
+            .unwrap()
+            .contains("Derived chart seam on face #182"));
+        assert_eq!(
+            label(&scene, EntityRef::Vertex(vertex)).unwrap(),
+            format!(
+                "From edge #131 at t={} · native {}",
+                origin.native_parameter,
+                EntityRef::Vertex(vertex)
+            )
+        );
+        let rows = details(
+            &scene,
+            &Selection {
+                hover: None,
+                selected: vec![EntityRef::Face(face(&scene, "182"))],
+            },
+        )
+        .unwrap();
+        assert!(rows.iter().any(|row| row == "Cylinder radius: 3.000000 mm"));
+        assert!(rows.iter().all(|row| !row.starts_with("Plane normal:")));
+
+        // A display-buffer miss cannot suppress a true curved native ray hit.
+        scene.triangles.clear();
+        let view = frame(1.);
+        let coordinate = 3. / 2_f64.sqrt();
+        let cursor = pixel(&scene, view, DVec3::new(coordinate, coordinate, 3.5));
+        assert_eq!(
+            pick(&mut scene, view, cursor).unwrap().unwrap().entity,
+            EntityRef::Face(face(&scene, "182"))
         );
     }
 }

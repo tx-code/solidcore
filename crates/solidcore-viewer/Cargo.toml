@@ -9,7 +9,7 @@ description = "Standalone wgpu viewer for actual Rust STEP construction candidat
 [dependencies]
 solidcore = { path = "../solidcore" }
 solidcore-step = { path = "../solidcore-step" }
-solidcore-step-native = { path = "../solidcore-step-native" }
+solidcore-step-native = { path = "../solidcore-step-native", features = ["general-development"] }
 wgpu = "=30.0.1"
 winit = "=0.30.13"
 egui = { version = "=0.37.0", default-features = false }

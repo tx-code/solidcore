@@ -44,7 +44,8 @@
 //!   recursion.
 //! - **Owning leaf execution.** The caller-resolved live face tolerance and kernel
 //!   reach both local curve intersection and the discontinuous line-end point
-//!   solve and near-tangent intersection classifier. Borrowed execution retains
+//!   solve, near-tangent intersection classifier and duplicate comparison.
+//!   Borrowed execution retains
 //!   its unresolved-owner error; no system
 //!   tolerance or copied topology owner replaces the actual face context.
 
@@ -341,7 +342,12 @@ impl<'t, O: SolutionObject + 't> GlobalSolve<'t, O> for LsiOwnerExecution<'_, 't
         first: &Solution<O>,
         second: &Solution<O>,
     ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
-        self.solver.identical_solutions(first, second)
+        self.solver.surface_identical_solutions_for_face(
+            self.kernel,
+            Some(self.face_tolerance),
+            first,
+            second,
+        )
     }
 }
 
@@ -384,12 +390,34 @@ impl<O: SolutionObject> LsiLeaf<'_, O> {
 }
 
 impl<'t, 's, O: SolutionObject + 't> LsiGlobalSolver<'t, 's, O> {
+    /// `SmLSIGlobalSolver::LocalSolve` inserts through its executing solver's
+    /// virtual `IdenticalSolutions`. Keep the same adapter for every insertion,
+    /// including discontinuity/boundary results: dispatching on the bare solver
+    /// would lose the live face before the conditional pole/seam comparison.
+    fn add_sorted_solution_with_owner(
+        &mut self,
+        owner_context: Option<(&Kernel, f64)>,
+        solution: &Solution<O>,
+    ) -> Result<()> {
+        if let Some((kernel, face_tolerance)) = owner_context {
+            LsiOwnerExecution {
+                solver: self,
+                kernel,
+                face_tolerance,
+            }
+            .add_sorted_solution(solution, SortKey::ByAllParameters, true)
+        } else {
+            self.add_sorted_solution(solution, SortKey::ByAllParameters, true)
+        }
+    }
+
     /// Filters a single valued solution of `surface` over `domain` and adds it when
     /// kept and inside the trim boundary (upstream's repeated `sm_FilterSolution` /
     /// `sm_IsPointValid` / `AddSortedSolution` block).
     fn keep_point(
         &mut self,
         k: &Kernel,
+        owner_context: Option<(&Kernel, f64)>,
         leaf: &LsiLeaf<'s, O>,
         surface: &Surface,
         domain: &Extent2d,
@@ -408,7 +436,7 @@ impl<'t, 's, O: SolutionObject + 't> LsiGlobalSolver<'t, 's, O> {
             let uv = Point2::new(p(&solution.start, 1)?, p(&solution.start, 2)?);
             // for points within the surface's trim boundary
             if is_point_valid(leaf.owner, leaf.cache, uv) {
-                self.add_sorted_solution(solution, SortKey::ByAllParameters, true)?;
+                self.add_sorted_solution_with_owner(owner_context, solution)?;
             }
         }
         Ok(keep)
@@ -703,7 +731,7 @@ impl<'t, 's, O: SolutionObject + 't> LsiGlobalSolver<'t, 's, O> {
 
             // for points within the surface's trim boundary
             if is_point_valid(leaf.owner, cache, hit.uv) {
-                self.add_sorted_solution(&solution, SortKey::ByAllParameters, true)?;
+                self.add_sorted_solution_with_owner(owner_context, &solution)?;
             }
 
             // Try to eliminate additional intersections with the patch's normal map.
@@ -777,7 +805,7 @@ impl<'t, 's, O: SolutionObject + 't> LsiGlobalSolver<'t, 's, O> {
                         set_p(&mut solution.start, 1, u)?;
                         set_p(&mut solution.start, 0, t)?;
                         solution.solution_type = SolutionType::SingleValue;
-                        self.keep_point(k, &leaf, surface, &natural, &solution)?;
+                        self.keep_point(k, owner_context, &leaf, surface, &natural, &solution)?;
                     }
                 }
             }
@@ -787,7 +815,7 @@ impl<'t, 's, O: SolutionObject + 't> LsiGlobalSolver<'t, 's, O> {
                 continue;
             }
             for dir in [SurfParamType::U, SurfParamType::V] {
-                if self.boundary_solve(k, &leaf, &patch.pseudo_box, dir, j)? {
+                if self.boundary_solve(k, owner_context, &leaf, &patch.pseudo_box, dir, j)? {
                     return Ok(false);
                 }
             }
@@ -804,6 +832,7 @@ impl<'t, 's, O: SolutionObject + 't> LsiGlobalSolver<'t, 's, O> {
     fn boundary_solve(
         &mut self,
         k: &Kernel,
+        owner_context: Option<(&Kernel, f64)>,
         leaf: &LsiLeaf<'s, O>,
         patch_box: &crate::geom::pseudo_box::PseudoBox,
         dir: SurfParamType,
@@ -834,7 +863,6 @@ impl<'t, 's, O: SolutionObject + 't> LsiGlobalSolver<'t, 's, O> {
         let tol = self.base.tolerance_3d;
 
         // Check for coincidence with curves of low continuity or boundary curves
-        let k = self.kernel;
         let found = leaf.line.simple_coincidence_checker::<O>(
             k,
             &leaf.interval,
@@ -867,10 +895,11 @@ impl<'t, 's, O: SolutionObject + 't> LsiGlobalSolver<'t, 's, O> {
                 } else {
                     set_p(&mut solution.end, 2, constant)?;
                 }
-                self.add_sorted_solution(&solution, SortKey::ByAllParameters, true)?;
+                self.add_sorted_solution_with_owner(owner_context, &solution)?;
             } else {
                 // Single valued solutions
-                let keep = self.keep_point(k, leaf, leaf.eval, &domain, &solution)?;
+                let keep =
+                    self.keep_point(k, owner_context, leaf, leaf.eval, &domain, &solution)?;
                 // when working with degenerate intervals we're done (v boundary only)
                 if keep
                     && !is_u
@@ -904,7 +933,7 @@ impl<'t, 's, O: SolutionObject + 't> LsiGlobalSolver<'t, 's, O> {
                     Point2::new(hit.my_param, constant)
                 };
                 let solution = leaf.solution(hit.other_param, uv, hit.deviation)?;
-                self.keep_point(k, leaf, leaf.eval, &domain, &solution)?;
+                self.keep_point(k, owner_context, leaf, leaf.eval, &domain, &solution)?;
             }
         }
         Ok(false)

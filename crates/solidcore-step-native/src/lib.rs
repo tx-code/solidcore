@@ -16,6 +16,9 @@ mod certify;
 #[cfg(feature = "general-development")]
 mod general;
 mod plan;
+#[cfg(feature = "general-development")]
+mod quality_json;
+mod view_query;
 pub use certify::{AcceptanceQuality, Certificate, Imported};
 #[cfg(feature = "general-development")]
 pub use general::{
@@ -27,6 +30,11 @@ pub use general::{
 pub use general::{
     GeneralMaterialEdgeMeasurement, GeneralMaterialFaceMeasurement, GeneralMaterialMeasurements,
 };
+#[cfg(feature = "general-development")]
+pub use quality_json::{
+    parse_general_quality_json, GeneralQualityJsonError, GeneralQualitySelection,
+};
+pub use view_query::NativeRayHit;
 
 use plan::{ExactPoint, Plan};
 

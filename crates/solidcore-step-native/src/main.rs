@@ -120,18 +120,8 @@ fn general(
     raw: &solidcore_step::Outcome,
     args: &Arguments,
 ) -> Result<solidcore_step_native::Candidate, Box<dyn std::error::Error>> {
-    use solidcore_step::{planar::Rational, semantics as s};
-    use solidcore_step_native::{GeneralQuality, Options};
-    const FIELDS: [&str; 8] = [
-        "id",
-        "definition_mm",
-        "consistency_mm",
-        "derived_uv_mm",
-        "query_mm",
-        "initial_work_tolerance_mm",
-        "maximum_work_tolerance_mm",
-        "maximum_tolerance_growth_mm",
-    ];
+    use solidcore_step::semantics as s;
+    use solidcore_step_native::{parse_general_quality_json, Options};
     let file = args
         .quality
         .as_ref()
@@ -140,35 +130,8 @@ fn general(
     std::fs::File::open(file)?
         .take(65537)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > 65536 {
-        return Err("Quality JSON exceeds 64 KiB".into());
-    }
-    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-    let object = value.as_object().ok_or("Quality JSON must be an object")?;
-    if object.len() != FIELDS.len() || object.keys().any(|k| !FIELDS.contains(&k.as_str())) {
-        return Err(
-            "Quality JSON must contain exactly id and the seven named mm budget strings".into(),
-        );
-    }
-    let text = |key: &str| -> Result<&str, Box<dyn std::error::Error>> {
-        object
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| format!("Quality field {key} must be a string").into())
-    };
-    let number = |key: &str| -> Result<Rational, Box<dyn std::error::Error>> {
-        Ok(Rational::decimal(text(key)?).map_err(solidcore_step_native::Error::Numeric)?)
-    };
-    let initial = number("initial_work_tolerance_mm")?;
-    let quality = GeneralQuality {
-        id: text("id")?.into(),
-        definition_mm: number("definition_mm")?,
-        consistency_mm: number("consistency_mm")?,
-        derived_uv_mm: number("derived_uv_mm")?,
-        query_mm: number("query_mm")?,
-        maximum_work_tolerance_mm: number("maximum_work_tolerance_mm")?,
-        maximum_tolerance_growth_mm: number("maximum_tolerance_growth_mm")?,
-    };
+    let selection = parse_general_quality_json(&bytes)?;
+    let initial = selection.initial_work_tolerance_mm;
     let options = s::Options {
         development_unit_policy: args.development_unit_policy,
         source_policy: if args.interop {
@@ -191,7 +154,7 @@ fn general(
             operations: 100_000,
             work_tolerance_mm: initial.numerator() as f64 / initial.denominator() as f64,
         },
-        quality,
+        selection.quality,
     )?)
 }
 

@@ -15,6 +15,7 @@
 //! | [`face_bounding_box`], [`face_internal_point`], [`face_classify_uv`], [`face_closest_point`] | `SmApiFaceBoundingBox`, `SmApiFaceInternalPoint`, `SmApiFaceClassifyUV`, `SmApiFaceClosestPoint` |
 //! | [`edge_bounding_box`], [`edge_closest_point`], [`edge_parameter_range`], [`edge_classify_parameter`], [`edge_tangent`] | `SmApiEdgeBoundingBox`, `SmApiEdgeClosestPoint`, `SmApiEdgeParameterRange`, `SmApiEdgeClassifyParameter`, `SmApiEdgeTangent` |
 //! | [`vertex_get_point`] | `SmApiVertexGetPoint` |
+//! | [`brep_ray_fire`] | `SmBrep::RayFire` on one owning B-rep |
 //! | `count_contained_samples`, `point_in_solid` (private) | `sm_CountContainedSamples`, `sm_PointInSolid` |
 //! | `solution_point` (private) | `SmSolution::GetPoint` |
 //!
@@ -61,6 +62,113 @@ pub struct ClosestPoint {
     pub point: Point3,
     /// Distance supplied by the solver.
     pub distance: f64,
+}
+
+/// Closest native ray intersection in the queried model's coordinate units.
+/// Entity IDs belong only to the actual B-rep passed to [`brep_ray_fire`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrepRayHit {
+    /// Actual native vertex, edge or trimmed face selected by the ray solver.
+    pub entity: crate::EntityRef,
+    /// Point along the normalized forward ray, in model coordinates.
+    pub point: Point3,
+    /// Unsquared forward distance from the origin, in model length units.
+    pub distance: f64,
+}
+
+/// Fire a forward ray against the actual trimmed topology and owning cache.
+/// The query scope registers exactly this B-rep as its canonical local root;
+/// local arena IDs and its cache never resolve into another model. There is no
+/// global store, copied model or default kernel. Native UV/sector caches may
+/// change on success or failure; the caller must invalidate derived receipts.
+/// Direction need not be normalized. All tolerances/distances use model units.
+///
+/// # Errors
+/// Nonfinite inputs, zero direction, nonpositive tolerance/distance limit, or
+/// the original native ray/owner dependency failure. A valid no-hit is `None`.
+pub fn brep_ray_fire(
+    k: &Kernel,
+    brep: &mut Brep,
+    origin: Point3,
+    direction: Vec3,
+    tolerance: f64,
+    maximum_distance: Option<f64>,
+) -> Result<Option<BrepRayHit>> {
+    let finite = |v: Vec3| v.x.is_finite() && v.y.is_finite() && v.z.is_finite();
+    let magnitude = direction
+        .x
+        .abs()
+        .max(direction.y.abs())
+        .max(direction.z.abs());
+    if !finite(origin)
+        || !finite(direction)
+        || magnitude == 0.
+        || !tolerance.is_finite()
+        || tolerance <= 0.
+        || maximum_distance.is_some_and(|limit| !limit.is_finite() || limit <= 0.)
+    {
+        return Err(SolidError::invalid_input(
+            OP,
+            "invalid explicit B-rep ray input",
+        ));
+    }
+    // Scale first to avoid overflowing/underflowing a finite nonzero direction.
+    // This normalizes query input only; native solver formulas remain unchanged.
+    let direction = (direction / magnitude).unitize()?;
+    let editing = brep.editing_enabled();
+    let result = crate::topology::brep::p9::ray_fire_owned(
+        k,
+        brep,
+        origin,
+        direction,
+        tolerance,
+        maximum_distance,
+    );
+    // A query cannot leave the caller in a different edit transaction after a
+    // native dependency fails. The owning cache wrapper separately restores
+    // this same model's cache on every Result path.
+    brep.set_editing_enabled(editing);
+    let result = result?;
+    let Some(entity) = result.intersection.object() else {
+        return Ok(None);
+    };
+    let distance = result.intersection.deviation();
+    if !distance.is_finite() || distance < 0. {
+        return Err(SolidError::invalid_input(
+            OP,
+            "nonfinite or backward native ray result",
+        ));
+    }
+    if maximum_distance.is_some_and(|limit| distance > limit) {
+        return Ok(None);
+    }
+    // This is the native ray's distance, not an unrelated closest-point gap.
+    let point = origin + distance * direction;
+    if !finite(point) {
+        return Err(SolidError::invalid_input(OP, "nonfinite native ray point"));
+    }
+    match entity {
+        crate::EntityRef::Vertex(id) => {
+            brep.vertex(id)?;
+        }
+        crate::EntityRef::Edge(id) => {
+            brep.edge(id)?;
+        }
+        crate::EntityRef::Face(id) => {
+            brep.face(id)?;
+        }
+        _ => {
+            return Err(SolidError::invalid_input(
+                OP,
+                "native ray hit is not boundary topology",
+            ))
+        }
+    }
+    Ok(Some(BrepRayHit {
+        entity,
+        point,
+        distance,
+    }))
 }
 
 /// A closest curve point with its parameter.

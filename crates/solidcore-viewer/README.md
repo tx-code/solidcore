@@ -11,25 +11,72 @@ foreign kernel, synthetic box or source-only geometry substituted on failure.
 cargo run -p solidcore-viewer -- crates/solidcore-step/tests/fixtures/plane.step --fixture-limits
 cargo run -p solidcore-viewer -- path/to/file.step
 cargo run -p solidcore-viewer -- --help
+cargo run -p solidcore-viewer -- crates/solidcore-step-native/tests/fixtures/cylinder-phase-rings.step --fixture-limits --general-development --quality quality.json
+cargo run -p solidcore-viewer -- crates/solidcore-step/tests/fixtures/cone-pole.step --fixture-limits --general-development --quality quality.json --check
 cargo run -p solidcore-viewer -- crates/solidcore-step/tests/fixtures/plane.step --fixture-limits --check
 cargo run -p solidcore-viewer -- crates/solidcore-step/tests/fixtures/plane.step --fixture-limits --screenshot plane.png --exit-after-screenshot
 ```
 
 Launching with a file alone opens configuration selection: the user must explicitly
-choose the development fixture preset in the HUD before loading. `--fixture-limits`
-chooses it on the command line. `--check` exercises native construction, validation
-and derived scene extraction without a window or GPU. The preset uses the source,
-semantic and P0 planar fixture budgets, 100,000 construction operations and 1e-6 mm
-native working tolerance. These are development values, **not production defaults**.
-General-purpose application configuration and broader native import are future work.
+choose the development resource preset in the HUD before loading. `--fixture-limits`
+chooses it on the command line. The default route remains the strict P0 planar path;
+a General failure never falls back to another reader or to source-only display.
+
+General loading requires both `--general-development` and `--quality FILE.json`.
+The quality file is read with a 64-KiB ceiling and parsed by the same pure exact
+`parse_general_quality_json` API used by `step-native-import`. It contains exactly
+these eight **string** fields; no missing budget or production precision is inferred:
+
+```json
+{
+  "id": "Q-Viewer-public-controls",
+  "definition_mm": "0.0000001",
+  "consistency_mm": "0.000001",
+  "derived_uv_mm": "0.000001",
+  "query_mm": "0.000001",
+  "initial_work_tolerance_mm": "0.000001",
+  "maximum_work_tolerance_mm": "0.00001",
+  "maximum_tolerance_growth_mm": "0"
+}
+```
+
+This example is a **public synthetic development selection**, not a production
+preset. The P0 route keeps its existing fixture quality and 1e-6 mm working tolerance.
+Both modes use the explicit source/semantic resource preset and 100,000 charged
+native operations across construction and requested checkpoints. General calls `construct_general`, which owns the complete source
+interpretation/semantics, followed by detailed pointer/level-two native validation and
+final UV correspondence measurements. The viewer does not build a second source
+interpretation. `--check` runs the same entire Scene extraction as windowed loading,
+including curved display derivation, without fonts, a window or a GPU; it requires
+`--fixture-limits`.
+
+General source-policy switches match the native CLI. `--interop` selects the proven
+nongeometric policy. `--ap214-unregistered-as-2010` additionally requires `--interop`.
+`--opaque-header-name`, `--opaque-data-strings` and `--level1-as-corrected-encoding`
+require explicit General plus interoperability mode; interop enables none of them
+implicitly. The separate `--development-ap214-angle-dimensions` option requires
+General and an explicit quality file, but does not require or enlarge interop. It
+continues only after the full source-owned dimensional/conversion proof. The HUD
+retains the distinction between a requested option and an applied receipt; applied
+unit compatibility is labeled **source syntax unverified**, with original source
+bytes and diagnostics retained by the Candidate.
+
+`--measure-material-accuracy VALUE` optionally requests numerical material
+observations after the required native/trim checkpoints. It requires General mode,
+quality, and a finite dimensionless control within `[1e-8,1e-4]`. Nothing selects an
+accuracy silently. These observations do not grant import acceptance or a continuous
+error bound. Native queries that invalidate a prior observation are reflected by the
+HUD instead of continuing to claim that receipt is current.
 
 The viewport starts with shaded faces and dark native defining edges. Left drag
 orbits, the wheel zooms, F/Home fits and Escape closes. A click selects a native
 face, edge or vertex; Ctrl-click keeps up to two selections. Two selected native
 vertices show their distance in mm. A selected LINE shows its original native curve
-interval length, a vertex shows its native coordinates, and a face shows its PLANE
-surface normal (not an inferred material/outward normal). Area/volume measurements
-are not provided. The Clear selection button clears selections. The 300-point HUD occupies
+interval length, a vertex shows its native coordinates, and a face's local surface
+information is queried from its actual native receiver. Query capabilities that are
+not available remain explicit; no mesh-derived measurement is substituted. Optional
+material observations are separate from feature picking and require the accuracy
+selection described above. The Clear selection button clears selections. The 300-point HUD occupies
 its own area and reports original roles, executed checks, loading stages and errors.
 Resize and display scaling rebuild the viewport/depth buffer. Camera near/far planes
 follow zoom; f64 centering and normalization precede GPU f32 narrowing, preserving
@@ -47,13 +94,19 @@ Native edges use 2–4 physical-pixel, near-black quads with their actual projec
 depth. The edge pass keeps depth testing enabled and only the face pass has a small
 depth bias; hidden edges are not displayed as an x-ray overlay.
 
-The current display adapter accepts native PLANE receivers and LINE/affine UV trims.
-It walks complete native loops (including holes), evaluates the actual plane at native
-trim endpoints and triangulates that region using earcutr. This is explicitly derived
-display output, not the missing complete kernel BRep tessellation driver and not a
-continuous source/native acceptance certificate. Unsupported geometry is refused.
-The original native LINE endpoints supply edge rendering independently of face fill.
-Only a successful complete extraction is transferred to the GPU.
+The display adapter derives its output from actual native surfaces, defining
+curves and incidence-specific UV trims. Its first curved controls are the public
+phase-split cylinder and cone with a source pole boundary. Computational seams,
+source edge pieces and pole/derived vertices retain their native identities and
+source correspondence. Display subdivisions do not introduce native/source edges
+or replace the stored analytic/NURBS definitions. Unsupported extraction remains an
+error with no partial Scene transferred to the GPU.
+
+Triangle shading and boundary polylines are approximate display output. Their
+subdivision settings are independent of source acceptance, native working tolerance,
+repair and optional material integration controls. This viewer adapter is not a
+claim that the complete kernel BRep tessellation driver or arbitrary general STEP
+support has been finished.
 
 `--screenshot FILE.png` copies the loaded scene's completed presentation texture
 after the same shaded-face, edge and HUD passes used by the window. It never reads
@@ -84,19 +137,21 @@ stage delivery and drops unpublished results. The worker checks cancellation bet
 stages. This does not promise interruption inside a native kernel operation or a hard
 CPU/memory limit. No private file, inventory or derived data is uploaded.
 
-Interaction is limited to the same LINE/PLANE profile. Display triangles only
-nominate a face; a native plane intersection and owner-bound trimmed-face query
-confirm it. Original LINE/vertex positions confirm features, with foreground native
-faces rejecting occluded selections. Missing kernel queries are shown as unavailable
-and never replaced with mesh classification. Pixel and float-depth allowances are
-interaction settings, not import acceptance budgets. Rendering and picking share
-one viewport/matrix, including DPI and near clipping. Queries never use a default
-Kernel, cleared geometry owner or cloned model.
+Display triangles nominate native face candidates; actual owning native queries
+must confirm a returned hit. Face/edge/vertex selections and measurements retain
+original native identity, including source edges split into several pieces and
+explicitly derived chart geometry. Missing queries are shown as unavailable, never
+replaced with mesh classification. Pixel and float-depth allowances are interaction
+settings, not import acceptance budgets. Rendering and picking share one
+viewport/matrix, including DPI and near clipping. Queries must use the actual
+owning Candidate and its Kernel; no cleared-owner copy or default context is a
+valid replacement.
 
-This increment does **not** complete general STEP/native import, 100 real models,
-general curved picking or general area/volume measurement. Native identities and ownership stay
-available in `Scene`. A viewer screenshot does not establish
-source equivalence, material-solid semantics, accepted import or query coverage.
+This increment does **not** complete general STEP import or a real-model acceptance
+target. The HUD continues to identify the result as an unpublished native candidate.
+Source assumptions, current numerical observations and derived display output stay
+separate. A screenshot does not establish source equivalence, material-solid
+semantics, accepted import or unexecuted query coverage.
 
 Versions were checked against the published crate sources: [wgpu 30.0.1](https://docs.rs/wgpu/30.0.1/wgpu/),
 [winit 0.30.13](https://docs.rs/winit/0.30.13/winit/) and egui/egui-wgpu/egui-winit 0.37.0.
@@ -111,6 +166,7 @@ cargo test -p solidcore-viewer
 cargo clippy -p solidcore-viewer --all-targets -- -D warnings
 ```
 
-The public plane fixture tests actual reader-to-native scene extraction and retained
-role/ownership; camera tests cover extreme zoom/orbit matrices. A real GPU/window
+Public controls cover default P0 loading, explicit General loading of the cylinder
+and cone, quality/policy gates, cancellation before delivery, and source-owned unit
+compatibility receipts. Camera tests cover extreme zoom/orbit matrices. A real GPU/window
 smoke test is additionally necessary for text layout, drawing and interaction evidence.

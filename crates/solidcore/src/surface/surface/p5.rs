@@ -2248,6 +2248,9 @@ pub(super) fn identical_solutions_with_geometry<O: SolutionObject>(
 struct SurfaceComparison<'a> {
     surface: Option<&'a Surface>,
     geometry: [Option<(usize, SolutionGeometry<'a>)>; 2],
+    // Only the owning execution adapter may supply this value. It is the
+    // live face's working tolerance, not GlobalSolver's solution tolerance.
+    face_tolerance: Option<f64>,
 }
 
 /// The shared body of the four `IdenticalSolutions` overrides: the parent's verdict, then
@@ -2302,7 +2305,17 @@ fn surface_identical_solutions<O: SolutionObject>(
             if let SurfaceKind::Plane(plane) = surf.kind() {
                 Ok(plane.is_singularity().0)
             } else {
-                Ok(surf.is_singularity(k, uv, EFF_ZERO, false)?.singular)
+                Ok(surf
+                    .is_singularity_with_owner_tolerance(
+                        k,
+                        uv,
+                        SS_UNKNOWN,
+                        None,
+                        EFF_ZERO,
+                        false,
+                        context.face_tolerance,
+                    )?
+                    .singular)
             }
         };
         if !is_singular(uv1)? {
@@ -2314,8 +2327,8 @@ fn surface_identical_solutions<O: SolutionObject>(
 
         // We're at a pole. Distinct only if they're both on a seam. When one is on a seam
         // prefer that. Else prefer the best solution.
-        let on_seam1 = surf.is_on_seam(k, uv1, None)?.on_seam;
-        let on_seam2 = surf.is_on_seam(k, uv2, None)?.on_seam;
+        let on_seam1 = surf.is_on_seam(k, uv1, context.face_tolerance)?.on_seam;
+        let on_seam2 = surf.is_on_seam(k, uv2, context.face_tolerance)?.on_seam;
         if on_seam1 && !on_seam2 {
             return Ok((SolutionPairType::Identical, Some(PreferredSolution::First)));
         }
@@ -2356,6 +2369,7 @@ pub fn cs_identical_solutions<O: SolutionObject>(
         &SurfaceComparison {
             surface,
             geometry: [None; 2],
+            face_tolerance: None,
         },
         sol1,
         sol2,
@@ -2392,6 +2406,7 @@ impl<O: SolutionObject> CsGlobalSolver<'_, '_, O> {
             &self.base,
             &SurfaceComparison {
                 surface: self.surface,
+                face_tolerance: None,
                 geometry: [
                     self.curve.map(|curve| (0, SolutionGeometry::Curve(curve))),
                     self.surface
@@ -2418,6 +2433,7 @@ impl<O: SolutionObject> CsiGlobalSolver<'_, '_, O> {
             &self.base,
             &SurfaceComparison {
                 surface: self.surface,
+                face_tolerance: None,
                 geometry: [
                     self.curve.map(|curve| (0, SolutionGeometry::Curve(curve))),
                     self.surface
@@ -2444,11 +2460,25 @@ impl<O: SolutionObject> LsiGlobalSolver<'_, '_, O> {
         sol1: &Solution<O>,
         sol2: &Solution<O>,
     ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
+        self.surface_identical_solutions_for_face(k, None, sol1, sol2)
+    }
+
+    /// Same `SmLSIGlobalSolver` comparison under its live owning execution.
+    /// GetSingularities/IsOnSeam use this actual face's working tolerance;
+    /// borrowed entrypoints keep None and their explicit unresolved-owner error.
+    pub(super) fn surface_identical_solutions_for_face(
+        &self,
+        k: &Kernel,
+        face_tolerance: Option<f64>,
+        sol1: &Solution<O>,
+        sol2: &Solution<O>,
+    ) -> Result<(SolutionPairType, Option<PreferredSolution>)> {
         surface_identical_solutions(
             k,
             &self.base,
             &SurfaceComparison {
                 surface: self.surface,
+                face_tolerance,
                 geometry: [
                     None,
                     self.surface
@@ -2480,6 +2510,7 @@ impl<O: SolutionObject> SpGlobalSolver<'_, '_, O> {
             &self.base,
             &SurfaceComparison {
                 surface: self.surface,
+                face_tolerance: None,
                 geometry: [
                     None,
                     self.surface
@@ -2843,6 +2874,98 @@ mod tests {
             curve_owner
         );
         assert!(brep.editing_enabled());
+    }
+
+    #[test]
+    fn owned_lsi_comparison_keeps_live_face_tolerance_and_borrowed_refusal() {
+        use crate::error::EntityRef;
+        use crate::topology::surface_cache::BrepSurfaceContext;
+
+        for face_tolerance in [7e-8, 2e-5] {
+            let (mut kernel, mut brep, face) = owned_unit_patch();
+            kernel.tolerances.zone_tol_3d = 3e-3;
+            brep.face_mut(face).unwrap().tolerance = face_tolerance;
+            let surface = brep
+                .face(face)
+                .unwrap()
+                .surface
+                .as_ref()
+                .unwrap()
+                .clone_for_evaluation()
+                .unwrap();
+            let owner = surface.owner();
+            let domain = surface.natural_uv_domain();
+            let SurfaceKind::BSpline(base) = surface.kind() else {
+                panic!()
+            };
+            let definition = base.canonical().unwrap();
+            let cache = super::super::p1::make_surface_cache_with_topology(
+                &kernel,
+                &surface,
+                Some(EntityRef::Face(face)),
+                &mut BrepSurfaceContext {
+                    brep: &mut brep,
+                    face,
+                },
+            )
+            .unwrap();
+            let mut solver = LsiGlobalSolver::new(
+                &kernel,
+                cache.tree().unwrap(),
+                Some(&surface),
+                domain,
+                Vec3::new(0., 0.5, 0.),
+                Vec3::X,
+                None,
+                false,
+                1e-3,
+            );
+            solver.surface_cache = Some(&cache);
+            solver.base.tolerance_3d = 1e-3;
+            let mut first = Solution::new();
+            first.num_objects = 2;
+            first.num_variables = 3;
+            first.solution_type = SolutionType::SingleValue;
+            first.objects[1] = Some(EntityRef::Face(face));
+            first.start.parameters[..3].copy_from_slice(&[0.5, 0.5, 0.5]);
+            let mut second = first;
+            second.start.parameters[..3].copy_from_slice(&[0.5005, 0.5005, 0.5]);
+            // Both points lie exactly on x=t,y=1/2,z=0. S(u,v)=(u,v,0)
+            // is regular: nearby points within the query tolerance are not a
+            // pole with alternate UVs, so they remain DiffParameters. The
+            // working face tolerance is neither this 1e-3 nor system 3e-3.
+            assert!(matches!(
+                solver.surface_identical_solutions(&kernel, &first, &second),
+                Err(SolidError::Unported {
+                    upstream: "SmFace::GetTolerance",
+                    unit: "topology.face_p2",
+                })
+            ));
+            assert_eq!(
+                solver
+                    .surface_identical_solutions_for_face(
+                        &kernel,
+                        Some(brep.face(face).unwrap().tolerance),
+                        &first,
+                        &second,
+                    )
+                    .unwrap(),
+                (SolutionPairType::DiffParameters, None)
+            );
+            assert_eq!(surface.owner(), owner);
+            assert_eq!(surface.natural_uv_domain(), domain);
+            let SurfaceKind::BSpline(base) = surface.kind() else {
+                panic!()
+            };
+            assert_eq!(base.canonical().unwrap(), definition);
+            assert_eq!(
+                brep.face(face).unwrap().surface.as_ref().unwrap().owner(),
+                owner
+            );
+            assert_eq!(brep.face(face).unwrap().tolerance, face_tolerance);
+            assert_eq!(kernel.tolerances.zone_tol_3d, 3e-3);
+            assert_eq!(solver.base.tolerance_3d, 1e-3);
+        }
     }
 
     #[test]

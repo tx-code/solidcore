@@ -37,10 +37,30 @@ are not live model handles.
 Native interval endpoint queries execute against the same mutable model that
 owns the face, including vertex sectors, edge sides and point classifications.
 The line-intersection leaf retains the resolved face working tolerance through
-local endpoint solves and near-tangent classification. Detached borrowed queries
+local endpoint solves, near-tangent classification, and duplicate-solution
+pole/seam comparison, including boundary-result insertion. Detached borrowed queries
 keep their explicit unresolved-owner failures; no copied model or system
 fallback supplies missing evidence. These connections cover the exercised paths,
 not every remaining owner-dependent kernel operation.
+
+`Candidate::ray_hit` provides the closest forward native face/edge/vertex hit for
+viewers, using that same candidate's kernel and actual trimmed topology. Origins,
+hit points, tolerance and optional maximum distance use millimeters. Direction
+may be unnormalized; all inputs must be finite, direction nonzero, and tolerance
+and any distance limit positive. `Ok(None)` is a completed no-hit; native failures
+remain errors. The core query establishes a namespace containing exactly the
+supplied B-rep and its own spatial cache, with the canonical single-model root
+identity. Local IDs are never a cross-model shape-store handle. No model or mesh
+copy, global registry, or replacement kernel resolves a hit.
+
+Each hit is checked against original correspondence or explicit derived chart
+receipts; source edge pieces and computational vertices are not hidden behind a
+first-child mapping. Before a valid native query executes, previous general trim
+and material measurements are invalidated, including when the query later fails.
+Invalid input rejected before execution leaves those measurements intact. Source
+bytes, defining parameters and source receipts remain unchanged; a hit establishes
+neither continuous source equivalence nor accepted import. Modeling and import
+qualification remain separate from interactive viewing.
 
 
 `Candidate::accept_open_planar` currently qualifies **one open planar face** only.
@@ -158,6 +178,15 @@ eight **string** fields: `id`, `definition_mm`, `consistency_mm`, `derived_uv_mm
 `query_mm`, `initial_work_tolerance_mm`, `maximum_work_tolerance_mm`, and
 `maximum_tolerance_growth_mm`. All lengths are millimeters; the growth allowance
 may be zero. The named configuration and source uncertainty remain distinct.
+
+Applications and the CLI share the pure library function
+`parse_general_quality_json(&[u8])`, available with `general-development`. It
+accepts at most 64 KiB and returns `GeneralQualitySelection` containing the named
+quality and a separate exact rational initial working tolerance. It performs no
+I/O, supplies no defaults and preserves the CLI's eight string fields and decimal
+error order. Parsing does not grant valid budget selection: the general constructor
+still performs its original semantic checks. The CLI alone opens the file and
+retains its bounded 65,537-byte read before calling the shared parser.
 
 General interoperability is also opt-in: `--interop` selects the existing proven
 nongeometric exceptions, and `--ap214-unregistered-as-2010` requests the existing

@@ -7,6 +7,7 @@ mod camera;
 mod capture;
 mod fonts;
 mod gpu;
+mod loading;
 mod picking;
 mod scene;
 
@@ -26,8 +27,10 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+#[derive(Debug)]
 struct Cli {
     path: PathBuf,
+    load: loading::LoadOptions,
     fixture: bool,
     check: bool,
     screenshot: Option<PathBuf>,
@@ -35,16 +38,23 @@ struct Cli {
 }
 
 fn arguments() -> Result<Option<Cli>> {
+    parse_arguments(std::env::args_os().skip(1))
+}
+
+fn parse_arguments(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<Option<Cli>> {
     let mut path = None;
+    let mut load = loading::LoadOptions::default();
     let mut fixture = false;
     let mut check = false;
     let mut screenshot = None;
     let mut exit_after_screenshot = false;
-    let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
+        if load.parse_argument(&argument, &mut arguments)? {
+            continue;
+        }
         match argument.to_str() {
             Some("--help" | "-h") => {
-                println!("solidcore-viewer FILE.step [--fixture-limits] [--check]\n                    [--screenshot FILE.png] [--exit-after-screenshot]\n\nNative Rust LINE/PLANE development viewer.\nWith FILE alone, select the development preset in the window.\n--fixture-limits explicitly chooses synthetic development budgets and starts loading.\n--check loads and derives display geometry without a GPU (requires --fixture-limits).\n--screenshot copies this viewer's complete loaded GPU frame, including HUD, to PNG.\n--exit-after-screenshot exits after the PNG is written; capture/load errors exit nonzero.\n\nDrag left: orbit · wheel: zoom · F/Home: fit · Esc: close.\nNative construction and validation do not establish accepted import.\nGeneral STEP, hover, selection and measurement remain separate work.");
+                println!("solidcore-viewer FILE.step [--fixture-limits] [--check]\n                    [--general-development --quality JSON]\n                    [--interop] [--ap214-unregistered-as-2010]\n                    [--opaque-header-name] [--opaque-data-strings]\n                    [--level1-as-corrected-encoding] [--development-ap214-angle-dimensions]\n                    [--measure-material-accuracy VALUE]\n                    [--screenshot FILE.png] [--exit-after-screenshot]\n\nDefault: strict P0 planar candidate. General development requires an explicit quality JSON.\nWith FILE alone, select the development resource preset in the window.\n--fixture-limits explicitly chooses synthetic resource limits and starts loading.\n--check completes the actual native scene, including display extraction, without a GPU; requires --fixture-limits.\nCarrier exceptions require General plus --interop; the angle-unit policy is separate and never verifies the original syntax.\nMaterial numerical observations require explicit accuracy within [1e-8,1e-4].\n--screenshot captures this viewer's complete GPU frame and HUD.\n--exit-after-screenshot closes only after a completed PNG; errors exit nonzero.\n\nDrag left: orbit · wheel: zoom · F/Home: fit · Esc: close.\nNative and display checkpoints do not establish accepted import.");
                 return Ok(None);
             }
             Some("--fixture-limits") => fixture = true,
@@ -65,6 +75,7 @@ fn arguments() -> Result<Option<Cli>> {
             }
         }
     }
+    load.validate()?;
     if check && !fixture {
         return Err("--check requires the explicit --fixture-limits development preset".into());
     }
@@ -82,6 +93,7 @@ fn arguments() -> Result<Option<Cli>> {
     }
     Ok(Some(Cli {
         path,
+        load,
         fixture,
         check,
         screenshot,
@@ -169,13 +181,14 @@ impl App {
         self.loading = true;
         self.progress = "Starting native load…".into();
         let path = self.cli.path.clone();
+        let options = self.cli.load.clone();
         let proxy = self.proxy.clone();
         let cancelled = self.cancelled.clone();
         let error_proxy = self.proxy.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("step-native-load".into())
             .spawn(move || {
-                let result = scene::load(&path, |message| {
+                let result = loading::load(&path, &options, |message| {
                     if cancelled.load(Ordering::Relaxed) {
                         return Err("Loading cancelled".into());
                     }
@@ -219,6 +232,11 @@ impl App {
                 ui.add_space(8.);ui.heading("solidcore");ui.label("Native STEP viewer");ui.separator();
                 ui.label(egui::RichText::new(self.cli.path.file_name().map_or_else(||"STEP file".into(),|p|p.to_string_lossy())).strong());
                 ui.small(self.cli.path.to_string_lossy());ui.add_space(8.);
+                ui.label(if self.cli.load.general_development {"General development"} else {"P0 planar profile"});
+                if self.scene.is_none() {
+                    if let Some(quality) = &self.cli.load.quality {ui.small(format!("Selected quality file: {}",quality.display()));}
+                    if self.cli.load.development_ap214_angle_dimensions {ui.small("Requested: verified development angle-unit compatibility");}
+                }
                 if self.loading{ui.horizontal(|ui|{ui.spinner();ui.label(&self.progress);});}
                 else{ui.label(&self.progress);}
                 if let Some(error)=&self.error {
@@ -232,16 +250,17 @@ impl App {
                     ui.label(format!("Radius: {:.6} mm",scene.radius_mm));
                     ui.small(format!("Center mm: {:.5}, {:.5}, {:.5}",scene.center_mm.x,scene.center_mm.y,scene.center_mm.z));
                     ui.add_space(6.);ui.colored_label(egui::Color32::from_rgb(242,202,128),"Native candidate · not accepted import");
-                    ui.small("Pointer and level-two native checks passed. Continuous source/native acceptance and publication are not selected here.");
+                    for line in loading::qualification_lines(scene, &self.cli.load) {ui.small(line);}
+                    ui.small("Display mesh and numerical observations do not establish continuous source/native acceptance.");
                 }
                 ui.add_space(10.);
                 if !self.loading {
-                    if self.scene.is_none(){start=ui.button("Load with development fixture preset").clicked();}
+                    if self.scene.is_none(){start=ui.button(if self.cli.load.general_development {"Load with selected quality / development limits"} else {"Load with development fixture preset"}).clicked();}
                     else{ui.horizontal(|ui|{fit=ui.button("Fit model  [F]").clicked();start=ui.add_enabled(self.captures.request().is_none(),egui::Button::new("Reload")).clicked();});}
                 }
-                ui.small("Explicit synthetic limits / quality / working tolerance. No production preset is inferred.");
+                ui.small("Development resource preset; no production precision is inferred.");
                 ui.separator();ui.label("Drag left: orbit\nWheel: zoom\nF / Home: fit\nEsc: close");
-                ui.add_space(6.);ui.small("LINE / PLANE trims only. Shading and native boundary edges are derived display output.");
+                ui.add_space(6.);ui.small("Shading, triangles and edge polylines are derived display output.");
                 ui.small("Hover to inspect · Click to select · Ctrl-click two vertices to measure");
                 if let Ok(Some(rows))=&inspection {for row in rows {ui.label(row);}}
                 if let Err(error)=&inspection {ui.colored_label(egui::Color32::LIGHT_RED,error);}
@@ -429,9 +448,18 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Progress(progress) => self.progress = progress,
+            UserEvent::Progress(progress) => {
+                if !self.closing {
+                    self.progress = progress;
+                }
+            }
             UserEvent::Loaded(result) => {
                 self.loading = false;
+                // A completion queued before Close must not install another owner
+                // while cancellation/capture cleanup is finishing.
+                if self.closing || self.cancelled.load(Ordering::Relaxed) {
+                    return;
+                }
                 match result {
                     Ok(scene) => {
                         let upload = self
@@ -728,12 +756,15 @@ fn run() -> Result<()> {
         return Ok(());
     };
     if cli.check {
-        let scene = scene::load(&cli.path, |progress| {
+        let scene = loading::load(&cli.path, &cli.load, |progress| {
             eprintln!("{progress}");
             Ok(())
         })?;
-        println!("NativeConstructed; accepted_import=false; source_role={}; faces={}; edges={}; vertices={}; display_triangles={}; display_edges={}",
-            scene.role,scene.owner.brep().face_list().len(),scene.owner.brep().edge_list().len(),scene.owner.brep().vertex_list().len(),scene.triangles.len()/3,scene.lines.len()/2);
+        println!("NativeConstructed; accepted_import=false; general_development={}; source_role={}; faces={}; edges={}; vertices={}; display_triangles={}; display_edges={}",
+            cli.load.general_development,scene.role,scene.owner.brep().face_list().len(),scene.owner.brep().edge_list().len(),scene.owner.brep().vertex_list().len(),scene.triangles.len()/3,scene.lines.len()/2);
+        for line in loading::qualification_lines(&scene, &cli.load) {
+            eprintln!("{line}");
+        }
         return Ok(());
     }
     let event_loop = EventLoop::<UserEvent>::with_user_event()

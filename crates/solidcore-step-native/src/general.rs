@@ -7,6 +7,7 @@
 //! proofs or complete AP validity. Source interpretation is always the existing
 //! typed snapshot; source topology is never recovered from a display mesh.
 
+mod associated;
 mod edge_pieces;
 mod geometry;
 mod material_measurement;
@@ -16,6 +17,12 @@ mod trim_measurement;
 use super::{
     Candidate, Error, Execution, GeneralDerivedVertex, GeneralFailureKind, Options, Result,
     SourcePlan,
+};
+pub use associated::{
+    AssociatedClosestPoint, AssociatedCoordinateFrame, AssociatedCurveInfo,
+    AssociatedDefinitionRef, AssociatedFrameInfo, AssociatedGeometry, AssociatedGroup,
+    AssociatedOccurrence, AssociatedPlaneInfo, AssociatedPointInfo, AssociatedRepresentation,
+    AssociatedRepresentationItem, AssociatedRole,
 };
 use geometry::{BuiltCurve, Geometry};
 pub use geometry::{ParameterMapping, UnitConversion};
@@ -164,6 +171,10 @@ pub struct GeneralReport<'a> {
     /// Absent until the complete separate material measurement checkpoint succeeds.
     /// Numerical observations do not grant continuous qualification or acceptance.
     pub material_measurements: Option<&'a GeneralMaterialMeasurements>,
+    /// Complete independently owned associated definitions and original uses.
+    /// Absent for a request with no such physical source roles. The borrowed
+    /// view executes against this same candidate's Kernel, never a default.
+    pub associated_geometry: Option<AssociatedGeometry<'a>>,
 }
 
 pub(super) struct SourceVertex {
@@ -236,6 +247,7 @@ pub(super) struct Plan {
     final_trim_measurements: Option<GeneralTrimMeasurements>,
     material_measurements: Option<GeneralMaterialMeasurements>,
     material_region: Option<RegionId>,
+    associated: associated::OwnedAssociated,
 }
 
 impl Plan {
@@ -300,7 +312,13 @@ impl Plan {
     pub fn observations(&self) -> GeneralObservations {
         self.observations
     }
-    pub fn report(&self) -> GeneralReport<'_> {
+    pub(super) fn associated_geometry<'a>(
+        &'a self,
+        kernel: &'a Kernel,
+    ) -> Option<AssociatedGeometry<'a>> {
+        (!self.associated.is_empty()).then(|| self.associated.view(kernel))
+    }
+    pub fn report<'a>(&'a self, kernel: &'a Kernel) -> GeneralReport<'a> {
         GeneralReport {
             source: &self.source_report,
             quality: &self.quality,
@@ -314,6 +332,7 @@ impl Plan {
             observations: self.observations,
             final_trim_measurements: self.final_trim_measurements.as_ref(),
             material_measurements: self.material_measurements.as_ref(),
+            associated_geometry: self.associated_geometry(kernel),
         }
     }
 }
@@ -609,18 +628,10 @@ impl Plan {
         {
             return Err(unsupported("GeneralUnsupportedShape", self.shape));
         }
-        // Required detached definitions cannot silently disappear while their
-        // conversion/publication contract is still being migrated.
-        if self.source.part_definition().is_some_and(|p| {
-            p.roles.iter().any(|r| {
-                r.name == "wireframe_representation" || r.name == "construction_representation"
-            })
-        }) {
-            return Err(unsupported(
-                "GeneralAssociatedGeometryNotYetConstructed",
-                self.shape,
-            ));
-        }
+        // All required associated members must be constructible before native
+        // body allocation. This reuses the same sealed source roles and unit
+        // interpretation; unsupported members cannot become a body-only result.
+        associated::preflight(geometry)?;
         let mut vertices = BTreeMap::new();
         let mut edges = BTreeMap::new();
         for record in geometry.references(self.shell, "cfs_faces")? {
@@ -828,6 +839,7 @@ pub fn construct_general(
         final_trim_measurements: None,
         material_measurements: None,
         material_region: None,
+        associated: associated::OwnedAssociated::empty(),
     };
     plan.prepare(&geometry)?;
     for face in &plan.faces {
@@ -1103,6 +1115,15 @@ pub fn construct_general(
         execution.step()?;
         builder.end_face()?;
     }
+    // Build detached definitions while the one source Geometry binding still
+    // borrows this actual Kernel. They neither touch body topology nor execute
+    // its queries. Any error drops this owner and the unfinished body together.
+    // The staged Rust candidate is still unpublished and must subsequently pass
+    // body validators/measurements; this is not C++ whole-pipeline call-order or
+    // per-native-call cancellation qualification.
+    plan.associated = associated::OwnedAssociated::build(&geometry, &plan.quality, &mut execution)?;
+    plan.mappings
+        .extend(plan.associated.parameter_mappings().iter().cloned());
     execution.step()?;
     let mut kernel = kernel;
     builder.end_shell(&mut kernel, false)?;

@@ -113,6 +113,13 @@ pub(crate) fn from_candidate_with_options(
     if owner.native_checks().is_none() {
         return Err("Native validation must finish before display extraction".into());
     }
+    if owner.associated_geometry().is_some() {
+        // The native candidate retains these definitions completely, but this
+        // display adapter currently renders body topology only. Refuse the whole
+        // Scene rather than silently hiding required auxiliary source geometry.
+        // Maintained StepViewExport.cpp uses the same explicit scope refusal.
+        return Err("AssociatedGeometryDisplayUnsupported".into());
+    }
     let role = owner
         .source()
         .part_definition()
@@ -279,6 +286,32 @@ mod tests {
     use super::*;
     use public_controls::{candidate, scene, world, CONE, CYLINDER};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn required_associated_definitions_are_retained_and_never_silently_hidden() {
+        for bytes in [
+            include_bytes!("../../solidcore-step-native/tests/fixtures/linked-wireframe.step")
+                .as_slice(),
+            include_bytes!("../../solidcore-step-native/tests/fixtures/supporting-geometry.step")
+                .as_slice(),
+        ] {
+            let owner = candidate(bytes);
+            let view = owner.associated_geometry().unwrap();
+            assert!(!view.representations().is_empty());
+            assert!(!view.groups().is_empty());
+            assert_eq!(owner.brep().face_list().len(), 6);
+            let calls = std::cell::Cell::new(0);
+            let result = from_candidate_with_options(owner, DisplayOptions::default(), |_| {
+                calls.set(calls.get() + 1);
+                Ok(())
+            });
+            match result {
+                Err(error) => assert_eq!(error, "AssociatedGeometryDisplayUnsupported"),
+                Ok(_) => panic!("body-only Scene hid required source geometry"),
+            }
+            assert_eq!(calls.get(), 0);
+        }
+    }
 
     fn record(scene: &Scene, id: &str) -> usize {
         scene

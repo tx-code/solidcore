@@ -24,7 +24,7 @@ The maintained usd-brep fork is the source, not just NVIDIA's kernel pin
 `c9c5979f04cea8c38213004d4f04df0dcfb40d05`. Check its live checkout and delivered
 worktrees before assuming a capability or delta is absent. The STEP contract
 reference used so far is `d8ed45ab85d52dba07660cafdceacafdca7217ed`. The delivered
-associated-geometry viewer additionally exists at `200aa2f`; separate face/edge/
+associated-geometry import and viewer changes additionally exist at `200aa2f`; separate face/edge/
 vertex hover work remains uncommitted. Preserve and account for that work,
 distinguishing delivered behavior from incomplete experiments. Do not overwrite
 the C++ working changes or claim their unvalidated behavior as a parity oracle.
@@ -238,7 +238,7 @@ and seals verified dimensional/conversion dependencies; it neither broadens the
 nongeometric policy nor establishes formal AP syntax. The native general route
 can measure final installed trims at identical edge/UV parameters, retaining an
 optional owning receipt. Finite samples do not establish a continuous bound.
-General material measurements, complete acceptance/publication and the remaining
+General continuous qualification, complete acceptance/publication and the remaining
 SDK ledger are still required work.
 
 Owner-scoped ray and coincidence queries now reuse the original algorithms with
@@ -256,4 +256,17 @@ The general STEP candidate can obtain complete numerical material observations
 with explicit integration accuracy and refresh all final trims afterwards.
 The public analytic box/cylinder/annular controls exercise these checkpoints;
 continuous general qualification, publication, broader source/topology coverage,
-curved viewer rendering and the remaining SDK/binding/tool ledger are unfinished.
+broader curved display/picking coverage and the remaining SDK/binding/tool ledger
+are unfinished.
+
+The general source bridge also retains associated linked wireframes and supporting
+geometry as complete independent native definitions beside the material BRep.
+Their original roles, units, memberships, shared source identities, finite curve
+domains and unbounded planes/coordinate frames remain observable through a view
+bound to the actual candidate and Kernel. Material topology/queries do not acquire
+auxiliary edges, vertices or volume. Whole-request budget failure releases both
+owners, and unsupported required members cannot disappear into a body-only result.
+Mixed archives, complete modeling-copy scope, per-native-call cancellation and
+final publication still require separate migration. The current viewer explicitly
+refuses associated requests until it can render their complete scope. This is
+native construction/query progress, not completion of the import or SDK ledger.

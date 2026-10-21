@@ -3,7 +3,12 @@
 //! Explicit synthetic construction checkpoint; not a full-import success CLI.
 use solidcore_step::semantics::DevelopmentUnitPolicy;
 use std::io::Read;
+#[cfg(feature = "general-development")]
+use std::io::Write;
 use std::path::PathBuf;
+
+#[cfg(feature = "general-development")]
+mod associated_report;
 
 struct Arguments {
     path: PathBuf,
@@ -283,9 +288,7 @@ fn run_general(
             "general_development_publication",
         ]
     };
-    println!(
-        "{}",
-        serde_json::json!({"status":"NativeConstructed","accepted_import":false,
+    let mut report = serde_json::json!({"status":"NativeConstructed","accepted_import":false,
         "general_development":true,"source_policy":model.source().source_policy(),
         "development_unit_policy":model.source().development_unit_policy(),
         "development_unit_receipt":model.source().development_unit_receipt(),
@@ -299,8 +302,22 @@ fn run_general(
         "derived_vertices":model.derived_vertices().len(),"chart_cuts":general_report.chart_cuts.len()},
         "final_trim_measurements":{"status":"Passed","maximum_mm":trims.maximum_mm,
         "samples":trims.samples,"edge_uses":trims.edge_uses,"evidence":"finite_same_parameter_samples_not_a_continuous_bound"},
-        "material_measurements":material,"unrun":unrun,"repair":"None"})
-    );
+        "material_measurements":material,"unrun":unrun,"repair":"None"});
+    if let Some(view) = general_report.associated_geometry.as_ref() {
+        report
+            .as_object_mut()
+            .ok_or("Native report object required")?
+            .insert(
+                "associated_geometry".into(),
+                associated_report::inventory(view),
+            );
+        let complete =
+            associated_report::complete_report(&report, associated_report::SUMMARY_LIMIT_BYTES)?;
+        std::io::stdout().lock().write_all(&complete)?;
+    } else {
+        // Preserve deterministic bytes and the previous no-associated contract.
+        println!("{report}");
+    }
     Ok(())
 }
 

@@ -29,6 +29,8 @@ use solidcore_step::{planar::Rational, semantics as s, Value, ValueKind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::{PI, TAU};
 
+mod detached;
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Frame {
     pub origin: Vec3,
@@ -110,6 +112,15 @@ fn need(passed: bool, key: &'static str, record: usize) -> Result<()> {
 
 fn finite(point: Vec3) -> bool {
     point.x.is_finite() && point.y.is_finite() && point.z.is_finite()
+}
+
+// StepImportGeometryConstruction.h::TrimmedConic at maintained 200aa2f uses
+// Add(origin, Add(xterm, yterm)). Preserve that binary64 addition order: large
+// translations can otherwise change a trim residual by an ULP and incorrectly
+// cross the caller's consistency threshold. This is source interpretation, not
+// a fit or a tolerance adjustment; independent curve endpoints use it too.
+fn source_conic_point(frame: Frame, radius_x: f64, radius_y: f64, angle: f64) -> Vec3 {
+    frame.origin + (frame.x * (radius_x * angle.cos()) + frame.y * (radius_y * angle.sin()))
 }
 
 // The maintained Windows source helper uses std::hypot(x,y,z), not the kernel's
@@ -211,6 +222,10 @@ impl<'a> Geometry<'a> {
 
     pub const fn kernel(&self) -> &Kernel {
         self.kernel
+    }
+
+    pub const fn source(&self) -> &s::Snapshot {
+        self.source
     }
 
     pub fn is(&self, record: usize, name: &str) -> bool {
@@ -721,9 +736,7 @@ impl Geometry<'_> {
             .value()
             .ok_or(Error::Invalid("missing general trim master representation"))?
             .text;
-        let evaluate = |angle: f64| {
-            frame.origin + frame.x * (radius_x * angle.cos()) + frame.y * (radius_y * angle.sin())
-        };
+        let evaluate = |angle: f64| source_conic_point(frame, radius_x, radius_y, angle);
         let angle = |point: Vec3| {
             let delta = point - frame.origin;
             (delta.dot(frame.y) / radius_y).atan2(delta.dot(frame.x) / radius_x)
@@ -1240,6 +1253,36 @@ mod tests {
             .iter()
             .position(|record| record.id == id)
             .unwrap()
+    }
+
+    #[test]
+    fn translated_conic_trim_preserves_fixed_cpp_addition_order_at_tight_budget() {
+        let source = source(
+            "#900=CIRCLE('',#133,1.);\n\
+             #901=CARTESIAN_POINT('',(100000000.46656057,100000000.88448925,0.));\n\
+             #902=TRIMMED_CURVE('',#900,(PARAMETER_VALUE(0.3),#901),(PARAMETER_VALUE(0.8)),.T.,.PARAMETER.);",
+        );
+        let kernel = Kernel::default();
+        let geometry = Geometry::new(&source, &kernel, 1e-9, 1e-9).unwrap();
+        // Isolated defining-geometry control: the caller-supplied frame is the
+        // private helper's input, not an assertion of full selected-part import.
+        let q = 0.5_f64.sqrt();
+        let frame = Frame {
+            origin: Vec3::new(1e8, 1e8, 0.),
+            x: Vec3::new(q, q, 0.),
+            y: Vec3::new(-q, q, 0.),
+            z: Vec3::Z,
+        };
+        let expected = Vec3::new(100_000_000.466_560_57, 100_000_000.884_489_25, 0.);
+        assert_eq!(source_conic_point(frame, 1., 1., 0.3), expected);
+        let old = frame.origin + frame.x * 0.3_f64.cos() + frame.y * 0.3_f64.sin();
+        assert!(norm(old - expected) > 1e-9);
+        let trim = geometry
+            .trimmed_conic(record(&source, "902"), frame, 1., 1.)
+            .unwrap();
+        assert_eq!(trim.maximum_consistency_mm, 0.);
+        assert_eq!(trim.first, 0.3);
+        assert_eq!(trim.last, 0.8);
     }
 
     #[test]

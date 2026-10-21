@@ -7,6 +7,11 @@ accepted import**. Native pointer/deep validation is required before scene extra
 failure produces a readable error and an empty viewport. There is no fallback reader,
 foreign kernel, synthetic box or source-only geometry substituted on failure.
 
+The native loader now retains linked wireframes and supporting geometry separately
+from material topology. This display adapter currently rejects those requests with
+`AssociatedGeometryDisplayUnsupported` before extracting a Scene. It does not hide
+required auxiliary definitions behind a successful body-only display.
+
 ```text
 cargo run -p solidcore-viewer -- crates/solidcore-step/tests/fixtures/plane.step --fixture-limits
 cargo run -p solidcore-viewer -- path/to/file.step

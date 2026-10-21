@@ -28,6 +28,13 @@ pub use general::{
 };
 #[cfg(feature = "general-development")]
 pub use general::{
+    AssociatedClosestPoint, AssociatedCoordinateFrame, AssociatedCurveInfo,
+    AssociatedDefinitionRef, AssociatedFrameInfo, AssociatedGeometry, AssociatedGroup,
+    AssociatedOccurrence, AssociatedPlaneInfo, AssociatedPointInfo, AssociatedRepresentation,
+    AssociatedRepresentationItem, AssociatedRole,
+};
+#[cfg(feature = "general-development")]
+pub use general::{
     GeneralMaterialEdgeMeasurement, GeneralMaterialFaceMeasurement, GeneralMaterialMeasurements,
 };
 #[cfg(feature = "general-development")]
@@ -251,7 +258,18 @@ impl Candidate {
     #[cfg(feature = "general-development")]
     pub fn general_report(&self) -> Option<GeneralReport<'_>> {
         match &self.plan {
-            SourcePlan::General(plan) => Some(plan.report()),
+            SourcePlan::General(plan) => Some(plan.report(&self.kernel)),
+            SourcePlan::Planar(_) => None,
+        }
+    }
+    /// Borrow the complete independently owned auxiliary geometry, retaining its
+    /// physical source roles and this candidate's actual Kernel. These queries
+    /// do not insert topology or alter body UV/material measurement receipts.
+    /// No associated source roles means `None`, including the strict P0 path.
+    #[cfg(feature = "general-development")]
+    pub fn associated_geometry(&self) -> Option<AssociatedGeometry<'_>> {
+        match &self.plan {
+            SourcePlan::General(plan) => plan.associated_geometry(&self.kernel),
             SourcePlan::Planar(_) => None,
         }
     }

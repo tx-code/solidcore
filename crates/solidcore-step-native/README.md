@@ -153,6 +153,40 @@ Additional full-curve copies are charged before copying; unsplit curves move
 without an added copy. Material and trim checkpoints account for every piece and
 derived vertex. This does not grant general continuous qualification.
 
+Associated linked wireframes and supporting representations are constructed as
+independently owned native definitions beside the material BRep. The builder
+consumes the same sealed source snapshot, unit proof and original part roles;
+it does not infer connectivity or create body edges/vertices for standalone
+curves and points. Supported members are finite trimmed LINE/CIRCLE/ELLIPSE,
+complete circles/ellipses, explicit-knot polynomial/rational B-splines, 3D points,
+placements and unbounded source planes. Source rules still apply first, and an
+unsupported required member rejects the complete request. Original representation
+items, set memberships, relationships, source senses and parameter domains remain
+ordered and observable. Definitions shared across associated roles retain one
+owner-local identity; distinct source points are not merged by their coordinates.
+
+`Candidate::associated_geometry()` and `GeneralReport::associated_geometry` borrow
+these complete definitions and the candidate's actual Kernel. Curve evaluation,
+set-scoped closest queries, plane evaluation/projection and native frame inspection
+use those real definitions; they never query the display mesh or insert material
+topology. Body ray, bounds and material integrals keep their existing body scope.
+Associated queries are immutable and do not invalidate body UV/material observations.
+A supporting placement's canonical-plane storage is explicitly a frame adapter,
+not an added source plane or physical locus. Plane UV coordinates use millimeters;
+native representability sentinels are not source trim boundaries.
+
+All additional construction uses the request's existing operation budget. Each
+wireframe use retains its own charged tight-bounds query, including shared
+definitions. Unrun trim/endpoint measurements remain absent. Errors release the
+whole unpublished candidate. This staged Rust construction precedes final body
+validation and does not claim the C++ whole-pipeline native-call/cancellation
+ordering. Mixed archives, complete modeling copies, per-native-call cancellation
+and final publication still need their separate migrated contracts. The development
+CLI emits the complete associated inventory before any successful output, under a
+separate 16-MiB synthetic summary ceiling; it does not serialize a live model.
+The current viewer explicitly rejects associated definitions until it can display
+their full scope, rather than silently showing a body-only Scene.
+
 The conical two-ring code path applies that same chart mechanism to two complete
 circular boundaries on the positive-radius sheet `R(h)=r0+tan(alpha)*h`, retaining
 the signed source semi-angle and its declared unit conversion. The two seam ends

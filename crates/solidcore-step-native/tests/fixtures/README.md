@@ -31,3 +31,16 @@ Let `beta=acos(3/5)`. Independent elementary integrals give material volume
 The cut is a circular arc of length `10*beta` mm through `(10,0,5)`, rather than
 the straight chord between its ends. The integration tests also exercise the
 complementary long minor-angle band without changing the defining torus/circles.
+
+`linked-wireframe.step` and `supporting-geometry.step` retain the original public
+`linked_wireframe.step` / `supporting_geometry.step` bytes from maintained fork
+`200aa2f`, `source/STEP_IMPORT/tests/fixtures/`. Their independent body is the
+10-by-20-by-30-mm box: volume 6000 mm³, area 2200 mm² and 8 vertices / 12 edges /
+6 faces. Standalone source points, finite trimmed lines, quarter circles, planes
+and frames are associated definitions, not additional body topology. Public
+integration controls check original source identities, shared definitions across
+roles, distinct equal-coordinate point identities, centimeter units, actual
+parameter evaluation, numerical closest results and whole-request budget failure.
+Added curve-family controls preserve full conic/spline definitions and compare
+polynomial/rational quadratic interior points with independent closed forms.
+No private model or derived identifying inventory is included.
